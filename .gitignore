@@ -1,0 +1,24 @@
+# Local configuration and credentials
+/config.env
+/proxy/certs/
+
+# Runtime state
+/logs/
+/run/
+/.cache/
+
+# Downloaded models and generated environments
+/models/
+/s2s/.venv/
+/third_party/avtr-1/.pixi/
+/third_party/avtr-1/artifacts/
+
+# Retained legacy implementation (not part of the AVTR-1 runtime)
+/LiveTalking/
+
+# Python/editor generated files
+__pycache__/
+*.py[cod]
+.vendor-git/
+.DS_Store
+*~

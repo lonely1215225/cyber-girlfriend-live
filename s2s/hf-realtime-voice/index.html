@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>实时语音助手</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%2378d99a'/><circle cx='11' cy='14' r='2' fill='%230b0d12'/><circle cx='21' cy='14' r='2' fill='%230b0d12'/><path d='M10 21c4 3 8 3 12 0' fill='none' stroke='%230b0d12' stroke-width='2' stroke-linecap='round'/></svg>" />
+    <link rel="stylesheet" href="style.css?v=20260819m" />
+  </head>
+  <!--
+    `booting` disables transitions/animations until the first paint commits.
+    Without this the orb visibly fades/scales in on the very first frame
+    because `state-idle` and the generic `.ind` defaults differ. The
+    bootstrap script at the end of main.js strips the class after one rAF.
+  -->
+  <body class="booting">
+    <div id="app">
+      <header class="topbar">
+        <div class="connection-summary" aria-live="polite">
+          <span id="conversation-state" class="connection-chip" data-state="idle">对话未连接</span>
+          <span id="avatar-connection-state" class="connection-chip" data-state="connecting">数字人连接中</span>
+        </div>
+        <div class="topbar-right">
+          <!-- HF login chip / sign-in pill. Populated by ui/account.js; only
+               shown when the deploy runs behind a load balancer with OAuth. -->
+          <div id="account" class="account" hidden></div>
+          <button id="tools-btn" class="icon-btn" title="Tools" aria-label="Tools">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          </button>
+          <button id="chat-btn" class="icon-btn" title="Conversation history" aria-label="Conversation history">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span id="chat-badge" class="chat-badge" aria-hidden="true"></span>
+          </button>
+          <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .66.39 1.25 1 1.51H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="stage">
+        <div class="orb-wrap">
+          <div id="mic-gate" class="mic-gate">
+            <svg id="mic-gate-arc" class="mic-gate-arc" viewBox="0 0 100 100" aria-hidden="true">
+              <path id="mga-track" class="mga-track" fill="none" />
+              <path id="mga-fill" class="mga-fill" fill="none" />
+              <path id="mga-hit" class="mga-hit" fill="none" />
+              <circle id="mga-handle" class="mga-handle" r="3" />
+            </svg>
+            <button id="mic-btn" class="side-btn" type="button" aria-label="Mute" title="Mute" aria-hidden="true">
+              <svg class="mic-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+              <svg class="mic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M9 5a3 3 0 0 1 6 0v4"/><path d="M9 10v1a3 3 0 0 0 5.1 2.1"/><path d="M19 10a7 7 0 0 1-1.24 3.97"/><path d="M5 10a7 7 0 0 0 11 5.67"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+            </button>
+          </div>
+
+          <button
+            id="main-circle"
+            class="circle state-idle"
+            type="button"
+            aria-label="Start voice conversation"
+          >
+            <span class="circle-glow" aria-hidden="true"></span>
+            <span class="circle-ring" aria-hidden="true"></span>
+            <span class="circle-ring-outer" aria-hidden="true"></span>
+            <span class="circle-core">
+              <span class="circle-indicator" aria-hidden="true">
+                <svg class="ind ind-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor" stroke="none"/>
+                  <path d="M5 10a7 7 0 0 0 14 0"/>
+                  <line x1="12" y1="19" x2="12" y2="22"/>
+                  <line x1="8" y1="22" x2="16" y2="22"/>
+                </svg>
+                <svg class="ind ind-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16" x2="12" y2="16"/></svg>
+                <span class="ind ind-spinner"></span>
+                <span class="ind ind-thinking">
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                </span>
+                <span class="ind ind-bars">
+                  <span class="bar"></span>
+                  <span class="bar"></span>
+                  <span class="bar"></span>
+                  <span class="bar"></span>
+                  <span class="bar"></span>
+                </span>
+                <svg class="ind ind-voice" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3 10v4a1 1 0 0 0 1 1h3l5 4V5L7 9H4a1 1 0 0 0-1 1z" fill="currentColor" stroke="none"/>
+                  <path class="wave wave-1" d="M16 8a5 5 0 0 1 0 8"/>
+                  <path class="wave wave-2" d="M19 5a9 9 0 0 1 0 14"/>
+                </svg>
+              </span>
+            </span>
+          </button>
+
+          <button id="stop-btn" class="side-btn" type="button" aria-label="End" title="End" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+        </div>
+
+        <p id="circle-caption" class="circle-caption" role="status">Tap to start</p>
+        <p id="circle-subcaption" class="circle-subcaption" hidden></p>
+
+        <div id="queue-actions" class="queue-actions" hidden>
+          <button id="join-queue-btn" class="join-queue-btn" type="button" hidden>
+            Join now
+          </button>
+          <button id="leave-queue-btn" class="leave-queue-btn" type="button" hidden>
+            Leave queue
+          </button>
+        </div>
+      </main>
+
+    </div>
+
+    <!-- Ephemeral chat bubbles anchored to the top-right -->
+    <div id="bubble-stack" class="bubble-stack" aria-live="polite" aria-atomic="false"></div>
+
+    <!-- Webcam self-view, shown bottom-left while the camera tool is enabled -->
+    <div id="cam-pip" class="cam-pip" aria-hidden="true">
+      <video id="cam-video" class="cam-video" autoplay playsinline muted></video>
+      <span class="cam-flash" aria-hidden="true"></span>
+      <span class="cam-label">camera</span>
+    </div>
+
+    <!-- Conversation history panel (overlay) -->
+    <div id="chat-panel" class="chat-panel">
+      <div id="chat-panel-backdrop" class="chat-panel-backdrop"></div>
+      <div class="chat-panel-inner">
+        <header class="chat-panel-header">
+          <h3>实时对话</h3>
+          <button id="chat-panel-close" class="icon-btn" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+        <div id="chat-history" class="chat-history"></div>
+      </div>
+    </div>
+
+    <dialog id="settings-modal" class="modal">
+      <form method="dialog" class="modal-content" id="settings-form">
+        <header class="modal-header">
+          <h2>Settings</h2>
+          <button class="icon-btn" value="close" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+
+        <div class="tab-panels">
+          <section class="tab-panel active" role="tabpanel">
+            <label class="field" id="conn-field">
+              <span id="conn-label">Speech-to-speech server URL</span>
+              <input id="lb-url" type="text" autocomplete="off" spellcheck="false" placeholder="http://localhost:port" />
+              <small id="conn-hint">
+                URL of your speech-to-speech server, e.g.
+                <code>http://localhost:8080</code> (the app adds <code>/v1/realtime</code>).
+              </small>
+            </label>
+
+            <div class="field-row">
+              <label class="field">
+                <span>Voice</span>
+                <select id="voice">
+                  <option value="Aiden" selected>Aiden</option>
+                  <option value="Ryan">Ryan</option>
+                  <option value="Dylan">Dylan</option>
+                  <option value="Eric">Eric</option>
+                  <option value="Ono_Anna">Ono_Anna</option>
+                  <option value="Serena">Serena</option>
+                  <option value="Sohee">Sohee</option>
+                  <option value="Uncle_Fu">Uncle_Fu</option>
+                  <option value="Vivian">Vivian</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="field">
+              <span>Microphone</span>
+              <select id="audio-input">
+                <option value="">System default</option>
+              </select>
+              <small>Applies on the next conversation (or Restart).</small>
+            </label>
+
+            <label class="field" id="audio-output-field">
+              <span>Speakers</span>
+              <select id="audio-output">
+                <option value="">System default</option>
+              </select>
+              <small id="audio-output-hint">
+                Where assistant audio plays. Chrome/Edge support switching outputs.
+              </small>
+            </label>
+
+            <div class="field avatar-tune">
+              <span>数字人形象</span>
+              <div id="avatar-picker" class="avatar-picker"></div>
+              <small>点选后马上切换。也可以用右下角缩略图切换。</small>
+              <span>数字人画面</span>
+              <label class="avatar-slider">
+                <span>人像大小 <output id="avatar-size-value">100%</output></span>
+                <input id="avatar-size" type="range" min="70" max="135" step="1" value="100" />
+              </label>
+              <label class="avatar-slider">
+                <span>水平位置 <output id="avatar-position-value">4% 向右</output></span>
+                <input id="avatar-position" type="range" min="-20" max="20" step="1" value="4" />
+              </label>
+              <label class="avatar-slider">
+                <span>左侧阴影 <output id="avatar-fade-value">42%</output></span>
+                <input id="avatar-fade" type="range" min="0" max="70" step="1" value="42" />
+              </label>
+              <button id="avatar-view-reset" type="button" class="btn avatar-view-reset">恢复默认画面</button>
+              <small>拖动时立即预览，只保存在当前浏览器中。</small>
+            </div>
+
+            <div class="field">
+              <span class="field-head">
+                Noise gate
+                <span id="gate-value" class="field-value">Off</span>
+              </span>
+              <div class="gate">
+                <div class="gate-track" aria-hidden="true">
+                  <div id="gate-meter-fill" class="gate-meter-fill"></div>
+                  <input
+                    id="noise-gate"
+                    type="range"
+                    min="-66"
+                    max="-3"
+                    step="1"
+                    value="-66"
+                    aria-label="Noise gate threshold"
+                  />
+                </div>
+                <div class="gate-ends">
+                  <span>Off</span>
+                  <span>−3 dB</span>
+                </div>
+              </div>
+              <small>
+                Mutes the mic below the handle so room noise isn't sent. Slide fully
+                left to turn it off; the bar shows your live input while in a call.
+              </small>
+            </div>
+
+            <label class="field">
+              <span>Instructions</span>
+              <textarea id="instructions" rows="5" placeholder="You are a friendly voice assistant..."></textarea>
+            </label>
+
+            <div class="field">
+              <button id="restart-conversation" type="button" class="btn primary wide" disabled>
+                Restart conversation with these settings
+              </button>
+              <small id="restart-hint">Connect first, then come back here to apply live changes.</small>
+            </div>
+          </section>
+        </div>
+
+        <footer class="modal-footer">
+          <button id="settings-save" type="submit" class="btn primary" value="save">Save</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="tools-modal" class="modal">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2>Tools</h2>
+          <button id="tools-close" class="icon-btn" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+
+        <p class="tools-intro">Let the assistant act during the conversation. Changes apply live.</p>
+
+        <div class="tool-list">
+          <div class="tool-row" id="tool-web-row">
+            <div class="tool-info">
+              <span class="tool-name">Web search</span>
+              <span class="tool-desc">Look things up on Google, via Serper.</span>
+            </div>
+            <label class="switch">
+              <input id="tool-web" type="checkbox" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </label>
+          </div>
+          <label class="field tools-key">
+            <span>Search API key</span>
+            <input id="search-key" type="password" autocomplete="off" spellcheck="false" />
+            <small id="tool-web-hint"></small>
+          </label>
+
+          <div class="tool-row tool-row-sep" id="tool-cam-row">
+            <div class="tool-info">
+              <span class="tool-name">Camera</span>
+              <span class="tool-desc">Let the assistant see through your webcam.</span>
+            </div>
+            <label class="switch">
+              <input id="tool-cam" type="checkbox" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </label>
+          </div>
+          <small id="tool-cam-hint" class="tool-hint">A live preview shows bottom-left while the camera is on.</small>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="limit-modal" class="modal limit-modal">
+      <div class="modal-content limit-card">
+        <button id="limit-close" class="icon-btn limit-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+        <div class="limit-badge" aria-hidden="true">!</div>
+        <h2 id="limit-title" class="limit-title">That's a wrap for now</h2>
+        <p id="limit-msg" class="limit-msg"></p>
+        <a id="limit-cta" class="btn primary wide limit-cta" href="#"></a>
+        <p id="limit-note" class="limit-note"></p>
+      </div>
+    </dialog>
+
+    <script src="/vendor/mpegts.min.js"></script>
+    <script src="/avatar-sync.js?v=20260819q"></script>
+    <script type="module" src="main.js?v=20260819q"></script>
+  </body>
+</html>

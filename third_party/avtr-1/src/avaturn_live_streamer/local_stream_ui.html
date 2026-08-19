@@ -1,0 +1,1152 @@
+<!-- SPDX-FileCopyrightText: 2026 Goodsize Inc. -->
+<!-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 -->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Local Stream</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #181b22;
+      --panel-2: #1f232c;
+      --border: #2a2f3a;
+      --text: #e7e9ee;
+      --muted: #9aa3b2;
+      --accent: #4f8cff;
+      --accent-hover: #6a9fff;
+      --danger: #e5484d;
+      --ok: #30a46c;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .app { max-width: 560px; margin: 0 auto; padding: 48px 24px 24px; }
+    h1 { font-size: 22px; font-weight: 600; margin: 0 0 24px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .field { margin-bottom: 16px; }
+    .field:last-child { margin-bottom: 0; }
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    select, button, input, textarea { font: inherit; color: var(--text); }
+    select, input, textarea {
+      width: 100%;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+    }
+    textarea { resize: vertical; min-height: 72px; font-family: inherit; }
+    select {
+      appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239aa3b2' stroke-width='2'><polyline points='6 9 12 15 18 9'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      padding-right: 32px;
+    }
+    select:focus, input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      padding: 8px 14px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      border-radius: 0;
+      font-weight: 500;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+    .engine-panel { display: flex; flex-direction: column; gap: 14px; }
+    .error-box {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--danger);
+      background: #2a1217;
+      border-radius: 6px;
+      color: var(--danger);
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      padding: 10px 18px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.12s;
+      color: var(--text);
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 100;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      width: var(--modal-w, min(720px, 100%));
+      max-width: 100%;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      max-height: calc(100vh - 48px);
+      transition: width 0.18s ease;
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-title { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .dot {
+      display: inline-block;
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted);
+    }
+    .dot.live { background: var(--ok); box-shadow: 0 0 0 4px rgba(48,164,108,0.18); }
+    .icon-btn {
+      background: transparent; border: none; color: var(--muted);
+      cursor: pointer; padding: 4px 8px; font-size: 20px; line-height: 1; border-radius: 4px;
+    }
+    .icon-btn:hover { background: var(--panel-2); color: var(--text); }
+    .modal-body { padding: 16px 18px; overflow: auto; }
+    .video-wrap {
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      width: 100%;
+      aspect-ratio: var(--video-ar, 16 / 9);
+      transition: aspect-ratio 0.15s ease;
+      position: relative;
+    }
+    .ended-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: rgba(15, 17, 21, 0.92);
+      text-align: center;
+      padding: 24px;
+    }
+    .ended-overlay .title { font-size: 18px; font-weight: 600; color: var(--text); }
+    .ended-overlay .sub { font-size: 13px; color: var(--muted); max-width: 360px; }
+    video { width: 100%; height: 100%; display: block; object-fit: contain; background: #000; }
+    .modal-controls { margin-top: 14px; }
+
+    .mic-toggle-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 96px;
+      height: 96px;
+      flex: 0 0 auto;
+    }
+    .mic-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      min-height: 96px;
+    }
+    .mic-select {
+      flex: 1 1 auto;
+      max-width: 320px;
+      margin-left: auto;
+    }
+    .mic-toggle {
+      position: relative;
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1;
+      transition: background 0.12s, border-color 0.12s, color 0.12s;
+    }
+    .mic-toggle:hover { background: #262b35; }
+    .mic-toggle.muted { background: var(--danger); border-color: var(--danger); color: #fff; }
+    .mic-toggle.muted:hover { background: #f15a5f; }
+    .mic-toggle::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: calc(56px + var(--halo, 0px));
+      height: calc(56px + var(--halo, 0px));
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(74,222,128,0.95) 0%, rgba(48,164,108,0.55) 45%, rgba(48,164,108,0) 75%);
+      z-index: -1;
+      pointer-events: none;
+      transition: width 0.08s ease-out, height 0.08s ease-out, opacity 0.15s;
+      opacity: var(--halo-opacity, 0);
+    }
+    .mic-toggle.muted::before { background: radial-gradient(circle, rgba(229,72,77,0.7) 0%, rgba(229,72,77,0.3) 45%, rgba(229,72,77,0) 75%); }
+    .mic-toggle svg { width: 22px; height: 22px; }
+
+    .probe { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); font-size: 13px; }
+    .probe.warn { border-color: #b06b1c; background: #2a1f12; }
+    .probe.bad { border-color: var(--danger); background: #2a1217; }
+    .probe-title { font-weight: 600; margin-bottom: 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+    .probe ul { margin: 0; padding-left: 18px; }
+    .probe li { color: var(--muted); }
+    .probe li.ok { color: var(--ok); }
+    .probe li.miss { color: var(--danger); }
+    .probe .hint { margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .probe code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+    .log-section { margin-top: 24px; }
+    .log-section summary {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      font-weight: 500;
+      cursor: pointer;
+      padding: 4px 0;
+      list-style: none;
+    }
+    .log-section summary::-webkit-details-marker { display: none; }
+    .log-section summary::before {
+      content: "▸";
+      display: inline-block;
+      width: 14px;
+      transition: transform 0.12s;
+    }
+    .log-section[open] summary::before { transform: rotate(90deg); }
+    .log-section pre { margin-top: 6px; }
+    pre#log {
+      margin: 0;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      max-height: 220px;
+      overflow: auto;
+      font-size: 12px;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <pre id="log" hidden></pre>
+
+  <script type="module">
+    import { h, render } from "https://esm.sh/preact@10.22.0";
+    import { useState, useEffect, useRef, useCallback } from "https://esm.sh/preact@10.22.0/hooks";
+    import htm from "https://esm.sh/htm@3.1.1";
+
+    const html = htm.bind(h);
+
+    // Deep link to the TURN section of the README on the main branch of the
+    // public repo. Used by the connectivity card when ICE fails or TURN isn't
+    // configured so users have one click to the setup guide.
+    const _README_TURN_URL =
+      "https://github.com/avaturn-live/avtr-1/blob/main/README.md#turn-server-setup";
+
+    const logEl = document.getElementById("log");
+    const log = (...a) => {
+      // Keep a hidden log buffer; rendered inline by component.
+      logEl.textContent += a.join(" ") + "\n";
+      window.dispatchEvent(new CustomEvent("applog", { detail: logEl.textContent }));
+    };
+
+    const ENGINE_TABS = [
+      { id: "openai", label: "OpenAI Realtime" },
+      { id: "cartesia", label: "Cartesia" },
+    ];
+
+    // Echo cancellation + noise suppression + auto gain control. Suppresses
+    // the avatar's own audio (played back through the user's speakers) from
+    // feeding into the mic, which the engine would otherwise transcribe and
+    // respond to. Browser support varies (Chromium honors all three;
+    // Safari/Firefox at minimum honor echoCancellation).
+    const MIC_PROCESSING_CONSTRAINTS = {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
+
+    function buildMicConstraints(deviceId) {
+      const base = deviceId ? { deviceId: { exact: deviceId } } : {};
+      return { ...base, ...MIC_PROCESSING_CONSTRAINTS };
+    }
+
+    const OPENAI_VOICES = [
+      "alloy", "ash", "ballad", "cedar", "coral", "echo",
+      "marin", "sage", "shimmer", "verse",
+    ];
+    const DEFAULT_OPENAI_MODEL = "gpt-realtime-2";
+    const DEFAULT_OPENAI_VOICE = "shimmer";
+    const DEFAULT_OPENAI_PROMPT =
+      "You are a friendly, concise voice assistant. Speak naturally and keep " +
+      "answers under 50 words. Avoid emojis or unreadable symbols.";
+
+    function useLocalStorage(key, initial) {
+      const [val, setVal] = useState(() => {
+        try {
+          const v = localStorage.getItem(key);
+          return v === null ? initial : v;
+        } catch { return initial; }
+      });
+      useEffect(() => {
+        try { localStorage.setItem(key, val ?? ""); } catch {}
+      }, [key, val]);
+      return [val, setVal];
+    }
+
+    async function fetchIceConfig() {
+      const r = await fetch("/ice-servers");
+      if (!r.ok) throw new Error("GET /ice-servers " + r.status);
+      return r.json();  // { iceServers, iceTransportPolicy }
+    }
+
+    // aiortc on the server side has no trickle-ICE endpoint, so we must wait
+    // for the browser to finish gathering candidates and ship the complete
+    // SDP. Otherwise the server only ever sees the initial host candidates
+    // and never learns the browser's TURN-relay public addresses -> server's
+    // TURN drops every connectivity-check packet for lack of permission.
+    async function waitForIceGatheringComplete(pc, timeoutMs = 8000) {
+      if (pc.iceGatheringState === "complete") return;
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => { if (!done) { done = true; resolve(); } };
+        const onChange = () => { if (pc.iceGatheringState === "complete") finish(); };
+        pc.addEventListener("icegatheringstatechange", onChange);
+        setTimeout(finish, timeoutMs);
+      });
+    }
+
+    // Run a real ICE handshake against /probe-offer with iceTransportPolicy=all,
+    // then inspect the selected candidate pair to see whether the server is
+    // actually reachable via direct UDP (host/srflx) or only via TURN (relay).
+    //
+    // This is more honest than browser-side-only candidate gathering: srflx
+    // candidates appearing locally only prove the browser can reach a STUN
+    // server, NOT that the AWS box can receive UDP from the browser.
+    async function probeConnectivity({ iceTimeoutMs = 10000 } = {}) {
+      const cfg = await fetchIceConfig();
+      const turnUrls = (cfg.iceServers || []).flatMap((s) =>
+        (Array.isArray(s.urls) ? s.urls : [s.urls]).filter((u) => /^turns?:/i.test(u))
+      );
+      const pc = new RTCPeerConnection({ iceServers: cfg.iceServers, iceTransportPolicy: "all" });
+      const localTypes = new Set();
+      pc.onicecandidate = (ev) => {
+        if (!ev.candidate) return;
+        const m = /\btyp\s+(\w+)\b/.exec(ev.candidate.candidate || "");
+        if (m) localTypes.add(m[1]);
+      };
+      pc.createDataChannel("probe");
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitForIceGatheringComplete(pc);
+
+      let result = { serverConfig: cfg, turnConfigured: turnUrls.length > 0, localTypes, status: "unknown" };
+      try {
+        const r = await fetch("/probe-offer", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+        });
+        if (!r.ok) throw new Error("/probe-offer " + r.status + " " + (await r.text()));
+        const answer = await r.json();
+        await pc.setRemoteDescription(answer);
+
+        // Wait for ICE to reach connected/completed, or timeout.
+        const finalState = await new Promise((resolve) => {
+          const onChange = () => {
+            const s = pc.iceConnectionState;
+            if (s === "connected" || s === "completed" || s === "failed") {
+              pc.removeEventListener("iceconnectionstatechange", onChange);
+              resolve(s);
+            }
+          };
+          if (["connected", "completed", "failed"].includes(pc.iceConnectionState)) {
+            return resolve(pc.iceConnectionState);
+          }
+          pc.addEventListener("iceconnectionstatechange", onChange);
+          setTimeout(() => resolve("timeout"), iceTimeoutMs);
+        });
+
+        // Inspect selected candidate pair from getStats.
+        let selected = null;
+        const stats = await pc.getStats();
+        // Standard: a candidate-pair with selected:true (or the
+        // transport's selectedCandidatePairId). Fall back to nominated/succeeded.
+        let transportSelectedId = null;
+        stats.forEach((s) => {
+          if (s.type === "transport" && s.selectedCandidatePairId) {
+            transportSelectedId = s.selectedCandidatePairId;
+          }
+        });
+        stats.forEach((s) => {
+          if (s.type !== "candidate-pair") return;
+          if (s.id === transportSelectedId || s.selected || s.nominated && s.state === "succeeded") {
+            selected = s;
+          }
+        });
+        if (selected) {
+          const local = stats.get(selected.localCandidateId);
+          const remote = stats.get(selected.remoteCandidateId);
+          result.selected = {
+            localType: local?.candidateType || "?",
+            remoteType: remote?.candidateType || "?",
+          };
+          result.status = "connected";
+        } else if (finalState === "failed") {
+          result.status = "failed";
+        } else if (finalState === "timeout") {
+          result.status = "timeout";
+        } else {
+          result.status = "no_selected_pair";
+        }
+      } catch (e) {
+        result.status = "error";
+        result.error = e.message || String(e);
+      } finally {
+        try { pc.close(); } catch {}
+      }
+      return result;
+    }
+
+    function useConnectivityProbe() {
+      const [state, setState] = useState({ status: "loading" });
+      useEffect(() => {
+        let alive = true;
+        (async () => {
+          try {
+            const r = await probeConnectivity();
+            if (alive) setState({ status: "ok", ...r });
+          } catch (e) {
+            if (alive) setState({ status: "error", error: e.message || String(e) });
+          }
+        })();
+        return () => { alive = false; };
+      }, []);
+      return state;
+    }
+
+    function ConnectivityCard({ probe }) {
+      if (probe.status === "loading") {
+        return html`<div class="probe"><div class="probe-title">Connectivity</div>Checking… (real ICE handshake against /probe-offer)</div>`;
+      }
+      const { turnConfigured, localTypes = new Set(), selected, status, error } = probe;
+      const hasLocalHost = localTypes.has("host");
+      const hasLocalSrflx = localTypes.has("srflx");
+      const hasLocalRelay = localTypes.has("relay");
+
+      // Real verdict: did ICE pick a direct (host/srflx) or relayed pair?
+      let verdict = null;
+      if (status === "connected" && selected) {
+        const direct = (selected.localType !== "relay") && (selected.remoteType !== "relay");
+        verdict = direct ? "direct" : "relay";
+      }
+      const cls =
+        status === "failed" || status === "timeout" || status === "error" ? "bad"
+        : verdict === "relay" && !turnConfigured ? "bad"
+        : verdict === "relay" ? "warn"
+        : "";
+
+      const row = (label, ok) => html`<li class=${ok ? "ok" : "miss"}>${ok ? "✓" : "✗"} ${label}</li>`;
+
+      return html`
+        <div class=${"probe " + cls}>
+          <div class="probe-title">Connectivity</div>
+
+          ${status === "connected" ? html`
+            <div>
+              ICE selected pair: <code>${selected.localType}</code> ↔ <code>${selected.remoteType}</code>
+              ${verdict === "direct"
+                ? html` — <span style="color: var(--ok)">direct UDP works</span>.`
+                : html` — <span style="color: #d8a04e">media relayed via TURN</span>.`}
+            </div>
+          ` : null}
+          ${status === "failed" ? html`
+            <div style="color: var(--danger)">ICE failed: neither direct nor TURN path is reachable from your browser.</div>
+          ` : null}
+          ${status === "timeout" ? html`
+            <div style="color: var(--danger)">ICE timed out — the server didn't become reachable.</div>
+          ` : null}
+          ${status === "error" ? html`
+            <div style="color: var(--danger)">Probe error: ${error}</div>
+          ` : null}
+
+          <div style="margin-top:8px; color: var(--muted); font-size:12px;">Local candidates the browser could gather:</div>
+          <ul>
+            ${row("host (local interface)", hasLocalHost)}
+            ${row("server-reflexive via STUN (own public IP)", hasLocalSrflx)}
+            ${row("relay via TURN", hasLocalRelay)}
+          </ul>
+          <div class="hint" style="margin-top:0">
+            These are <i>browser-side only</i> — srflx here just proves the browser can reach a STUN server, not that the streamer host is reachable on UDP.
+          </div>
+
+          ${verdict === "direct" && turnConfigured ? html`
+            <div class="hint">Direct UDP works, so TURN config is unused (and the session will still force relay if <code>iceTransportPolicy=relay</code> is set). Optional optimization: drop the policy override for lowest latency.</div>
+          ` : null}
+          ${
+            // Show the TURN docs link only when the host/srflx (direct UDP)
+            // path didn't work for ICE: either the connection failed entirely
+            // or it only succeeded by routing through a TURN relay. If a
+            // direct pair was selected, TURN isn't needed and we stay quiet.
+            (status === "failed" || status === "timeout" || verdict === "relay") ? html`
+            <div class="hint">
+              ${turnConfigured
+                ? (verdict === "relay"
+                    ? html`Direct UDP between your browser and the streamer didn't work, so media is going through a TURN relay. If that's unexpected (or you want lower latency), see <a href=${_README_TURN_URL} target="_blank" rel="noopener">README → Troubleshooting → TURN server setup</a> for the full walkthrough.`
+                    : html`TURN is configured but ICE still didn't connect. Likely the Cloudflare credentials are invalid/expired — check the streamer log for <code>ice: Cloudflare TURN fetch failed</code>. Full walkthrough: <a href=${_README_TURN_URL} target="_blank" rel="noopener">README → Troubleshooting → TURN server setup</a>.`)
+                : html`No TURN is configured and direct ICE didn't work. Set <code>CLOUDFLARE_TURN_KEY_ID</code> and <code>CLOUDFLARE_TURN_KEY_TOKEN</code> in <code>.env</code> and restart the streamer — see <a href=${_README_TURN_URL} target="_blank" rel="noopener">README → Troubleshooting → TURN server setup</a> for the full walkthrough.`}
+            </div>
+          ` : null}
+        </div>
+      `;
+    }
+
+    function useRendererRegistry() {
+      // /avatars returns both lists in one round-trip — the renderer loads
+      // both avatars and backgrounds at startup and surfaces them together.
+      const [state, setState] = useState({ status: "loading", avatars: [], backgrounds: [], error: null });
+      useEffect(() => {
+        let alive = true;
+        (async () => {
+          try {
+            const r = await fetch("/avatars");
+            if (!r.ok) throw new Error(`/avatars ${r.status}`);
+            const data = await r.json();
+            if (!alive) return;
+            setState({
+              status: data.error ? "error" : "ok",
+              avatars: Array.isArray(data.avatars) ? data.avatars : [],
+              backgrounds: Array.isArray(data.backgrounds) ? data.backgrounds : [],
+              error: data.error || null,
+            });
+          } catch (e) {
+            if (alive) setState({ status: "error", avatars: [], backgrounds: [], error: e.message || String(e) });
+          }
+        })();
+        return () => { alive = false; };
+      }, []);
+      return state;
+    }
+
+    function useMics() {
+      const [mics, setMics] = useState([]);
+      const refresh = useCallback(async () => {
+        try {
+          const probe = await navigator.mediaDevices.getUserMedia({ audio: true });
+          probe.getTracks().forEach((t) => t.stop());
+        } catch (e) {
+          log("mic permission:", e.message || e);
+        }
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setMics(devices.filter((d) => d.kind === "audioinput"));
+      }, []);
+      useEffect(() => {
+        refresh();
+        const onChange = () => refresh();
+        navigator.mediaDevices?.addEventListener?.("devicechange", onChange);
+        return () => navigator.mediaDevices?.removeEventListener?.("devicechange", onChange);
+      }, [refresh]);
+      return mics;
+    }
+
+    function useMicLevel(track) {
+      // Returns 0..1 short-term RMS of the supplied MediaStreamTrack.
+      const [level, setLevel] = useState(0);
+      useEffect(() => {
+        if (!track) { setLevel(0); return; }
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const stream = new MediaStream([track]);
+        const src = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.7;
+        src.connect(analyser);
+        const buf = new Float32Array(analyser.fftSize);
+        let raf;
+        const tick = () => {
+          analyser.getFloatTimeDomainData(buf);
+          let sum = 0;
+          for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+          const rms = Math.sqrt(sum / buf.length);
+          // Normalize: ~-50dB floor to 0dB ceiling, clamp 0..1.
+          const db = 20 * Math.log10(Math.max(rms, 1e-6));
+          const norm = Math.max(0, Math.min(1, (db + 50) / 50));
+          setLevel(norm);
+          raf = requestAnimationFrame(tick);
+        };
+        tick();
+        return () => {
+          cancelAnimationFrame(raf);
+          try { src.disconnect(); } catch {}
+          ctx.close();
+        };
+      }, [track]);
+      return level;
+    }
+
+    function MicButton({ track, muted, onToggle }) {
+      const level = useMicLevel(muted ? null : track);
+      // Map 0..1 level → 0..40px extra halo radius. Capped at 40 so the halo
+      // (button is 56px + halo) never exceeds the 96px mic-toggle-wrap and
+      // can't push neighbouring controls or grow the modal.
+      const halo = Math.round(Math.pow(level, 0.7) * 40);
+      const opacity = muted ? 0.5 : Math.min(1, 0.5 + level * 1.5);
+      const style = { "--halo": halo + "px", "--halo-opacity": opacity };
+      const icon = muted
+        ? html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="3" x2="21" y2="21"/>
+            <path d="M9 9v3a3 3 0 0 0 5.12 2.12"/>
+            <path d="M15 9.34V5a3 3 0 0 0-5.94-.6"/>
+            <path d="M17 16.95A7 7 0 0 1 5 12v-2"/>
+            <path d="M19 10v2a7 7 0 0 1-.11 1.23"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+          </svg>`
+        : html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="3" width="6" height="12" rx="3"/>
+            <path d="M5 10v2a7 7 0 0 0 14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+          </svg>`;
+      return html`
+        <div class="mic-toggle-wrap">
+          <button
+            class=${"mic-toggle" + (muted ? " muted" : "")}
+            style=${style}
+            onClick=${onToggle}
+            title=${muted ? "Unmute" : "Mute"}
+            aria-pressed=${muted}
+          >${icon}</button>
+        </div>
+      `;
+    }
+
+    function ConfigCard({
+      mics, onStart, disabled, error,
+      engine, setEngine,
+      micId, setMicId,
+      registry,
+      avatarId, setAvatarId,
+      backgroundId, setBackgroundId,
+      openaiKey, setOpenaiKey,
+      openaiModel, setOpenaiModel,
+      openaiVoice, setOpenaiVoice,
+      openaiPrompt, setOpenaiPrompt,
+      cartesiaKey, setCartesiaKey,
+      cartesiaAgentId, setCartesiaAgentId,
+    }) {
+      const avatarOptions = registry.avatars || [];
+      const backgroundOptions = registry.backgrounds || [];
+      const registryHint = registry.status === "loading"
+        ? "Loading…"
+        : registry.status === "error"
+          ? `Renderer registry unavailable: ${registry.error || "unknown error"}`
+          : `${avatarOptions.length} avatar${avatarOptions.length === 1 ? "" : "s"} and ${backgroundOptions.length} background${backgroundOptions.length === 1 ? "" : "s"} loaded by the renderer.`;
+      return html`
+        <div class="card">
+          <div class="field">
+            <label for="avatar">Avatar</label>
+            <select id="avatar" value=${avatarId}
+                    onChange=${(e) => setAvatarId(e.target.value)}
+                    disabled=${avatarOptions.length === 0}>
+              ${avatarOptions.length === 0
+                ? html`<option value="">(none loaded)</option>`
+                : avatarOptions.map((a) => html`<option value=${a}>${a}</option>`)}
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="background">Background</label>
+            <select id="background" value=${backgroundId}
+                    onChange=${(e) => setBackgroundId(e.target.value)}
+                    disabled=${backgroundOptions.length === 0}>
+              ${backgroundOptions.length === 0
+                ? html`<option value="">(none loaded)</option>`
+                : backgroundOptions.map((b) => html`<option value=${b}>${b}</option>`)}
+            </select>
+            <div class="hint">${registryHint}</div>
+          </div>
+
+          <div class="tabs">
+            ${ENGINE_TABS.map((t) => html`
+              <button
+                class=${"tab" + (engine === t.id ? " active" : "")}
+                onClick=${() => setEngine(t.id)}
+                type="button"
+              >${t.label}</button>
+            `)}
+          </div>
+
+          ${engine === "openai" ? html`
+            <div class="engine-panel">
+              <div class="field">
+                <label for="openai-key">OpenAI API Key</label>
+                <input id="openai-key" type="password" value=${openaiKey}
+                       onInput=${(e) => setOpenaiKey(e.target.value)}
+                       placeholder="sk-..." autocomplete="off" />
+                <div class="hint">Stored in your browser's localStorage. Used server-side to mint an ephemeral realtime token per session. <a href="https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key" target="_blank" rel="noopener">Where do I find this?</a></div>
+              </div>
+              <div class="field">
+                <label for="openai-model">Model</label>
+                <input id="openai-model" type="text" value=${openaiModel}
+                       onInput=${(e) => setOpenaiModel(e.target.value)}
+                       placeholder=${DEFAULT_OPENAI_MODEL} />
+                <div class="hint">e.g. <code>gpt-realtime-2</code> or another realtime model id.</div>
+              </div>
+              <div class="field">
+                <label for="openai-voice">Voice</label>
+                <select id="openai-voice" value=${openaiVoice}
+                        onChange=${(e) => setOpenaiVoice(e.target.value)}>
+                  ${OPENAI_VOICES.map((v) => html`<option value=${v}>${v}</option>`)}
+                </select>
+              </div>
+              <div class="field">
+                <label for="openai-prompt">System Prompt</label>
+                <textarea id="openai-prompt" rows="6" value=${openaiPrompt}
+                          onInput=${(e) => setOpenaiPrompt(e.target.value)}
+                          placeholder="Instructions for the assistant"></textarea>
+              </div>
+            </div>
+          ` : null}
+
+          ${engine === "cartesia" ? html`
+            <div class="engine-panel">
+              <div class="field">
+                <label for="cartesia-key">Cartesia API Key</label>
+                <input id="cartesia-key" type="password" value=${cartesiaKey}
+                       onInput=${(e) => setCartesiaKey(e.target.value)}
+                       placeholder="sk_..." autocomplete="off" />
+                <div class="hint">Stored in localStorage. Used server-side to mint a short-lived access token per session. <a href="https://play.cartesia.ai/keys" target="_blank" rel="noopener">Where do I find this?</a></div>
+              </div>
+              <div class="field">
+                <label for="cartesia-agent">Agent ID</label>
+                <input id="cartesia-agent" type="text" value=${cartesiaAgentId}
+                       onInput=${(e) => setCartesiaAgentId(e.target.value)}
+                       placeholder="agent_..." />
+                <div class="hint"><a href="https://play.cartesia.ai/agents" target="_blank" rel="noopener">Where do I find this?</a></div>
+              </div>
+            </div>
+          ` : null}
+
+          <div class="field" style="margin-top:16px;">
+            <label for="mic">Microphone</label>
+            <select id="mic" value=${micId} onChange=${(e) => setMicId(e.target.value)}>
+              ${mics.map((m, i) => html`<option value=${m.deviceId}>${m.label || `Microphone ${i + 1}`}</option>`)}
+            </select>
+          </div>
+
+          ${error ? html`<div class="error-box">${error}</div>` : null}
+
+          <div class="actions">
+            <button class="btn" disabled=${disabled} onClick=${onStart}>Start session</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function SessionModal({ open, status, micId, mics, onChangeMic, onClose, videoRef, audioRef, audioTrack, muted, onToggleMute }) {
+      const wrapRef = useRef(null);
+      const modalRef = useRef(null);
+      useEffect(() => {
+        if (!open) return;
+        const onKey = (e) => { if (e.key === "Escape") onClose(); };
+        document.addEventListener("keydown", onKey);
+        return () => document.removeEventListener("keydown", onKey);
+      }, [open, onClose]);
+
+      useEffect(() => {
+        const v = videoRef.current;
+        const wrap = wrapRef.current;
+        const modal = modalRef.current;
+        if (!v || !wrap || !modal) return;
+        const apply = () => {
+          if (!v.videoWidth || !v.videoHeight) return;
+          wrap.style.setProperty("--video-ar", `${v.videoWidth} / ${v.videoHeight}`);
+          // Size modal to native video width, scaled down to fit viewport with margin
+          // for header, controls, and 24px backdrop padding. Cap viewport-height by
+          // ratio so portrait/square videos don't overflow vertically either.
+          const padX = 48;          // backdrop horizontal padding (24px each side)
+          const padY = 48;          // backdrop vertical padding
+          const chrome = 200;       // header + controls + body padding budget
+          const maxW = Math.max(320, window.innerWidth - padX);
+          const maxVideoH = Math.max(240, window.innerHeight - padY - chrome);
+          const ar = v.videoWidth / v.videoHeight;
+          const widthByHeight = maxVideoH * ar;
+          const targetW = Math.min(v.videoWidth, maxW, widthByHeight);
+          modal.style.setProperty("--modal-w", Math.round(targetW) + "px");
+        };
+        const onResize = () => apply();
+        v.addEventListener("loadedmetadata", apply);
+        v.addEventListener("resize", apply);
+        window.addEventListener("resize", onResize);
+        apply();
+        return () => {
+          v.removeEventListener("loadedmetadata", apply);
+          v.removeEventListener("resize", apply);
+          window.removeEventListener("resize", onResize);
+        };
+      }, [open]);
+
+      const backdropClick = (e) => { if (e.currentTarget === e.target) onClose(); };
+
+      return html`
+        <div class=${"modal-backdrop" + (open ? " open" : "")} onClick=${backdropClick}>
+          <div class="modal" role="dialog" aria-modal="true" ref=${modalRef}>
+            <div class="modal-header">
+              <div class="modal-title">
+                <span class=${"dot" + (status === "live" ? " live" : "")}></span>
+                <span>${status === "live" ? "Live" : status === "connecting" ? "Connecting…" : "Ended"}</span>
+              </div>
+              <button class="icon-btn" title="End session" onClick=${onClose}>×</button>
+            </div>
+            <div class="modal-body">
+              <div class="video-wrap" ref=${wrapRef}>
+                <video ref=${videoRef} autoplay playsinline></video>
+                <audio ref=${audioRef} autoplay></audio>
+                ${status === "ended" ? html`
+                  <div class="ended-overlay">
+                    <div class="title">Session timed out</div>
+                    <div class="sub">The server ended this session (timeout or shutdown). Close this window and start a new session.</div>
+                  </div>
+                ` : null}
+              </div>
+              <div class="modal-controls">
+                <div class="mic-row">
+                  ${audioTrack ? html`<${MicButton} track=${audioTrack} muted=${muted} onToggle=${onToggleMute} />` : html`<div></div>`}
+                  <select id="mic-live" class="mic-select" value=${micId} onChange=${(e) => onChangeMic(e.target.value)}>
+                    ${mics.map((m, i) => html`<option value=${m.deviceId}>${m.label || `Microphone ${i + 1}`}</option>`)}
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function LogPanel() {
+      const [text, setText] = useState("");
+      useEffect(() => {
+        const on = (e) => setText(e.detail);
+        window.addEventListener("applog", on);
+        return () => window.removeEventListener("applog", on);
+      }, []);
+      const preRef = useRef(null);
+      useEffect(() => { if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight; }, [text]);
+      return html`
+        <details class="log-section">
+          <summary>Log</summary>
+          <pre ref=${preRef} id="log-view">${text}</pre>
+        </details>
+      `;
+    }
+
+    function App() {
+      const mics = useMics();
+      const probe = useConnectivityProbe();
+      const registry = useRendererRegistry();
+      const [engine, setEngine] = useLocalStorage("engine", "openai");
+      const [avatarId, setAvatarId] = useLocalStorage("avatar_id", "");
+      const [backgroundId, setBackgroundId] = useLocalStorage("background_id", "");
+      const [openaiKey, setOpenaiKey] = useLocalStorage("openai_api_key", "");
+      const [openaiModel, setOpenaiModel] = useLocalStorage("openai_model", DEFAULT_OPENAI_MODEL);
+      const [openaiVoice, setOpenaiVoice] = useLocalStorage("openai_voice", DEFAULT_OPENAI_VOICE);
+      const [openaiPrompt, setOpenaiPrompt] = useLocalStorage("openai_prompt", DEFAULT_OPENAI_PROMPT);
+      const [cartesiaKey, setCartesiaKey] = useLocalStorage("cartesia_api_key", "");
+      const [cartesiaAgentId, setCartesiaAgentId] = useLocalStorage("cartesia_agent_id", "");
+      const [micId, setMicId] = useState("");
+      const [open, setOpen] = useState(false);
+      const [status, setStatus] = useState("connecting");
+      const [audioTrack, setAudioTrack] = useState(null);
+      const [active, setActive] = useState(false);
+      const [muted, setMuted] = useState(false);
+      const [startError, setStartError] = useState(null);
+
+      const toggleMute = useCallback(() => {
+        setMuted((m) => {
+          const next = !m;
+          if (streamRef.current) {
+            for (const t of streamRef.current.getAudioTracks()) t.enabled = !next;
+          }
+          return next;
+        });
+      }, []);
+
+      const videoRef = useRef(null);
+      const audioRef = useRef(null);
+      const pcRef = useRef(null);
+      const senderRef = useRef(null);
+      const streamRef = useRef(null);
+
+      useEffect(() => { if (!micId && mics.length) setMicId(mics[0].deviceId); }, [mics]);
+      useEffect(() => {
+        // If the saved avatar / background is no longer loaded by the renderer,
+        // fall back to the first available one in that list.
+        if (registry.status !== "ok") return;
+        const avatarsList = registry.avatars || [];
+        if (avatarsList.length && (!avatarId || !avatarsList.includes(avatarId))) {
+          setAvatarId(avatarsList[0]);
+        }
+        const bgList = registry.backgrounds || [];
+        if (bgList.length && (!backgroundId || !bgList.includes(backgroundId))) {
+          setBackgroundId(bgList[0]);
+        }
+      }, [registry]);
+
+      const teardown = useCallback(() => {
+        try { pcRef.current?.close(); } catch {}
+        if (streamRef.current) for (const t of streamRef.current.getTracks()) t.stop();
+        pcRef.current = null;
+        senderRef.current = null;
+        streamRef.current = null;
+        setAudioTrack(null);
+        if (videoRef.current) videoRef.current.srcObject = null;
+        if (audioRef.current) audioRef.current.srcObject = null;
+      }, []);
+
+      const stop = useCallback(() => {
+        setActive(false);
+        setStatus("ended");
+        setOpen(false);
+        teardown();
+        log("stopped");
+      }, [teardown]);
+
+      // Server-side termination (timeout / shutdown / network drop): tear down
+      // media but leave the modal open with an overlay so the user sees that
+      // the session ended, instead of having the window vanish silently.
+      const handleRemoteEnd = useCallback(() => {
+        setActive((wasActive) => {
+          if (!wasActive) return wasActive;
+          setStatus("ended");
+          teardown();
+          log("session ended by server");
+          return false;
+        });
+      }, [teardown]);
+
+      const buildEngineConfig = useCallback(() => {
+        if (engine === "openai") {
+          const apiKey = (openaiKey || "").trim();
+          if (!apiKey) throw new Error("OpenAI API key is required");
+          return {
+            type: "openai",
+            api_key: apiKey,
+            model: (openaiModel || "").trim() || DEFAULT_OPENAI_MODEL,
+            voice: openaiVoice || DEFAULT_OPENAI_VOICE,
+            prompt: openaiPrompt || "",
+          };
+        }
+        if (engine === "cartesia") {
+          const apiKey = (cartesiaKey || "").trim();
+          const agentId = (cartesiaAgentId || "").trim();
+          if (!apiKey) throw new Error("Cartesia API key is required");
+          if (!agentId) throw new Error("Cartesia agent id is required");
+          return { type: "cartesia", api_key: apiKey, agent_id: agentId };
+        }
+        throw new Error(`Unknown engine: ${engine}`);
+      }, [engine, openaiKey, openaiModel, openaiVoice, openaiPrompt, cartesiaKey, cartesiaAgentId]);
+
+      const start = useCallback(async () => {
+        if (active) return;
+        setStartError(null);
+        let engineConfig;
+        try {
+          engineConfig = buildEngineConfig();
+        } catch (e) {
+          setStartError(e.message || String(e));
+          return;
+        }
+        setActive(true);
+        setStatus("connecting");
+        setOpen(true);
+        setMuted(false);
+        try {
+          let iceCfg = {};
+          try {
+            iceCfg = await fetchIceConfig();
+          } catch (e) {
+            log("ice-servers fetch failed; using browser defaults:", e.message || e);
+          }
+          const pc = new RTCPeerConnection({
+            iceServers: iceCfg.iceServers || [],
+            iceTransportPolicy: iceCfg.iceTransportPolicy || "all",
+          });
+          pcRef.current = pc;
+
+          pc.ontrack = (ev) => {
+            log("ontrack", ev.track.kind);
+            if (ev.track.kind === "video" && videoRef.current) videoRef.current.srcObject = ev.streams[0];
+            else if (ev.track.kind === "audio" && audioRef.current) audioRef.current.srcObject = ev.streams[0];
+          };
+          pc.onconnectionstatechange = () => {
+            log("pc state:", pc.connectionState);
+            if (pc.connectionState === "connected") setStatus("live");
+            else if (["failed", "disconnected", "closed"].includes(pc.connectionState)) handleRemoteEnd();
+          };
+
+          const localStream = await navigator.mediaDevices.getUserMedia({
+            audio: buildMicConstraints(micId),
+            video: false,
+          });
+          streamRef.current = localStream;
+          const track = localStream.getAudioTracks()[0];
+          senderRef.current = pc.addTrack(track, localStream);
+          setAudioTrack(track);
+
+          // Server sends both audio and video back, but we already have a
+          // sendrecv audio transceiver from addTrack above (the mic). Adding a
+          // separate recvonly audio transceiver here creates a third m-line
+          // that aiortc can't match (we only set up 2 outbound tracks
+          // server-side) and the unmatched "inactive" m-line breaks BUNDLE so
+          // ICE connect() hangs without firing any checks.
+          pc.addTransceiver("video", { direction: "recvonly" });
+
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          await waitForIceGatheringComplete(pc);
+
+          const r = await fetch("/offer", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              engine: engineConfig,
+              sdp: pc.localDescription.sdp,
+              type: pc.localDescription.type,
+              avatar_id: avatarId,
+              background_id: backgroundId,
+            }),
+          });
+          if (!r.ok) {
+            const body = await r.text();
+            log("offer failed:", r.status, body);
+            setStartError(`offer ${r.status}: ${body}`);
+            stop();
+            return;
+          }
+          const answer = await r.json();
+          await pc.setRemoteDescription(answer);
+          log("connected; engine =", engineConfig.type);
+        } catch (e) {
+          log("error:", e.message || e);
+          setStartError(e.message || String(e));
+          stop();
+        }
+      }, [active, micId, avatarId, backgroundId, stop, buildEngineConfig]);
+
+      const switchMic = useCallback(async (deviceId) => {
+        setMicId(deviceId);
+        if (!active || !senderRef.current) return;
+        try {
+          const next = await navigator.mediaDevices.getUserMedia({
+            audio: buildMicConstraints(deviceId),
+            video: false,
+          });
+          const newTrack = next.getAudioTracks()[0];
+          await senderRef.current.replaceTrack(newTrack);
+          if (streamRef.current) {
+            for (const t of streamRef.current.getAudioTracks()) {
+              streamRef.current.removeTrack(t);
+              t.stop();
+            }
+            streamRef.current.addTrack(newTrack);
+          }
+          newTrack.enabled = !muted;
+          setAudioTrack(newTrack);
+          log("switched mic to", newTrack.label || deviceId);
+        } catch (e) {
+          log("switch mic failed:", e.message || e);
+        }
+      }, [active, muted]);
+
+      return html`
+        <div class="app">
+          <h1>Local Stream</h1>
+          <${ConfigCard}
+            mics=${mics}
+            engine=${engine} setEngine=${setEngine}
+            micId=${micId} setMicId=${setMicId}
+            registry=${registry}
+            avatarId=${avatarId} setAvatarId=${setAvatarId}
+            backgroundId=${backgroundId} setBackgroundId=${setBackgroundId}
+            openaiKey=${openaiKey} setOpenaiKey=${setOpenaiKey}
+            openaiModel=${openaiModel} setOpenaiModel=${setOpenaiModel}
+            openaiVoice=${openaiVoice} setOpenaiVoice=${setOpenaiVoice}
+            openaiPrompt=${openaiPrompt} setOpenaiPrompt=${setOpenaiPrompt}
+            cartesiaKey=${cartesiaKey} setCartesiaKey=${setCartesiaKey}
+            cartesiaAgentId=${cartesiaAgentId} setCartesiaAgentId=${setCartesiaAgentId}
+            error=${startError}
+            disabled=${active} onStart=${start}
+          />
+          <${ConnectivityCard} probe=${probe} />
+          <${LogPanel} />
+        </div>
+        <${SessionModal}
+          open=${open} status=${status}
+          mics=${mics} micId=${micId} onChangeMic=${switchMic}
+          onClose=${stop}
+          videoRef=${videoRef} audioRef=${audioRef}
+          audioTrack=${audioTrack}
+          muted=${muted} onToggleMute=${toggleMute}
+        />
+      `;
+    }
+
+    render(h(App, null), document.getElementById("root"));
+  </script>
+</body>
+</html>
