@@ -21,11 +21,14 @@ import uvicorn
 
 from speech_to_speech.api.openai_realtime import websocket_router
 
+from tiered_memory import cancel_semantic_refinements, install_tiered_memory
+
 LOG = logging.getLogger("speech_to_speech.avatar_tee")
 # The local pacer posts ten small chunks per second; per-request INFO logs would
 # drown out the useful latency and pipeline messages.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 _uvicorn_config_init = uvicorn.Config.__init__
+install_tiered_memory()
 
 
 def _quiet_uvicorn_config(self, *args, **kwargs):
@@ -37,7 +40,8 @@ uvicorn.Config.__init__ = _quiet_uvicorn_config
 TEE_URL = os.environ.get("AVTR1_LOCAL_TEE_URL", "").rstrip("/")
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
-PREROLL_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * 0.6)
+PREROLL_MS = max(200, int(os.environ.get("AVATAR_TEE_PREROLL_MS", "400")))
+PREROLL_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * PREROLL_MS / 1000)
 PACE_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * 0.1)
 PACE_SECONDS = 0.1
 
@@ -93,7 +97,10 @@ class LocalAvatarTee:
                 threshold = PREROLL_BYTES if first else PACE_BYTES
                 if len(self.pending) >= threshold or (self.done and self.pending):
                     if first:
-                        size = len(self.pending)
+                        # Send a bounded first packet. A large streaming TTS
+                        # delta must not overflow the renderer's live buffer and
+                        # silently discard the beginning of the sentence.
+                        size = min(PREROLL_BYTES, len(self.pending))
                         first = False
                     else:
                         size = min(PACE_BYTES, len(self.pending))
@@ -140,6 +147,9 @@ if TEE_URL:
             elif event_type in ("response.audio.done", "response.output_audio.done"):
                 tee.finish()
             elif event_type == "input_audio_buffer.speech_started":
+                # Semantic memory uses the conversation model only while idle.
+                # Cancel it at VAD onset, before STT can submit the next LLM turn.
+                cancel_semantic_refinements()
                 await tee.interrupt()
             elif event_type == "response.done":
                 response = getattr(event, "response", None)

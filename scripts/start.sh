@@ -119,8 +119,33 @@ export PUBLIC_WS_URL="${PUBLIC_WS_URL:-wss://${PUBLIC_IP}:${PUBLIC_HTTP_PORT}/v1
 export PUBLIC_IP PUBLIC_HTTP_PORT
 export AVATAR_SAMPLE_RATE
 export SPEECH_TO_SPEECH_URL=auto
-export STARTUP_GREETING="用小雅的口吻，用一句很短的中文跟他打招呼，不要提自己是AI。"
-export OLLAMA_URL LLM_NAME THINKLESS_PORT LLM_NUM_CTX LLM_NUM_PREDICT
+export LIVE_ROOM_ENABLED="${LIVE_ROOM_ENABLED:-1}"
+export LIVE_ROOM_QUEUE_LIMIT="${LIVE_ROOM_QUEUE_LIMIT:-100}"
+export LIVE_ROOM_JOIN_TIMEOUT="${LIVE_ROOM_JOIN_TIMEOUT:-60}"
+export LIVE_ROOM_MAX_CALL_SECONDS="${LIVE_ROOM_MAX_CALL_SECONDS:-600}"
+export ADMIN_SETTINGS_PASSWORD="${ADMIN_SETTINGS_PASSWORD:-123456}"
+export ADMIN_SESSION_TTL_SECONDS="${ADMIN_SESSION_TTL_SECONDS:-1800}"
+export MENTION_REPLY_QUEUE_LIMIT="${MENTION_REPLY_QUEUE_LIMIT:-30}"
+export MCP_ENABLED="${MCP_ENABLED:-1}"
+export MCP_COINGECKO_URL="${MCP_COINGECKO_URL:-https://mcp.api.coingecko.com/mcp}"
+export MCP_EXA_URL="${MCP_EXA_URL:-https://mcp.exa.ai/mcp}"
+export MCP_GDELT_URL="${MCP_GDELT_URL:-https://gdelt.caseyjhand.com/mcp}"
+export MCP_MAX_OUTPUT_CHARS="${MCP_MAX_OUTPUT_CHARS:-6000}"
+export S2S_INTERNAL_WS_URL="ws://127.0.0.1:${S2S_PORT}/v1/realtime"
+export AVATAR_TEE_PREROLL_MS="${AVATAR_TEE_PREROLL_MS:-400}"
+export STARTUP_GREETING="${STARTUP_GREETING:-}"
+export IDLE_PROMPT="${IDLE_PROMPT:-}"
+export IDLE_PROMPT_MIN_SECONDS="${IDLE_PROMPT_MIN_SECONDS:-35}"
+export IDLE_PROMPT_MAX_SECONDS="${IDLE_PROMPT_MAX_SECONDS:-55}"
+export OLLAMA_URL LLM_NAME THINKLESS_PORT LLM_NUM_CTX LLM_NUM_PREDICT LLM_KEEP_ALIVE LLM_PREWARM
+export LLM_CHAT_SIZE="${LLM_CHAT_SIZE:-12}"
+export LLM_COMPACTION_NUM_PREDICT="${LLM_COMPACTION_NUM_PREDICT:-256}"
+export LLM_COMPACTION_MODE="${LLM_COMPACTION_MODE:-local}"
+export LLM_COMPACTION_MAX_CHARS="${LLM_COMPACTION_MAX_CHARS:-900}"
+export MEMORY_SEMANTIC_ENABLED="${MEMORY_SEMANTIC_ENABLED:-1}"
+export MEMORY_SEMANTIC_IDLE_SECONDS="${MEMORY_SEMANTIC_IDLE_SECONDS:-12}"
+export MEMORY_SEMANTIC_MAX_SECONDS="${MEMORY_SEMANTIC_MAX_SECONDS:-15}"
+export MEMORY_SEMANTIC_NUM_PREDICT="${MEMORY_SEMANTIC_NUM_PREDICT:-256}"
 
 # Keep every service log bounded while preserving one previous segment.
 start_bg log_guard "$RUN/log_guard.pid" "$LOG/log_guard.log" \
@@ -162,6 +187,11 @@ export AVTR1_BG_ID="${AVTR1_BG_ID:-plain_white}"
 export AVTR1_OUT_H="${AVTR1_OUT_H:-1280}"
 export AVTR1_OUT_W="${AVTR1_OUT_W:-720}"
 export AVTR1_H264_BITRATE="${AVTR1_H264_BITRATE:-1200000}"
+export AVTR1_CFG_SELF_AUDIO="${AVTR1_CFG_SELF_AUDIO:-2.3}"
+export AVTR1_CFG_OTHER_AUDIO="${AVTR1_CFG_OTHER_AUDIO:-2.0}"
+export AVTR1_CFG_KP="${AVTR1_CFG_KP:-3.0}"
+export AVTR1_NOISE_ALPHA="${AVTR1_NOISE_ALPHA:-1.5}"
+export AVTR1_NOISE_TRUNC_Z="${AVTR1_NOISE_TRUNC_Z:-1.0}"
 export AVTR1_URL="http://127.0.0.1:${AVTR1_PORT:-18012}"
 export AVTR1_LOCAL_TEE_URL="http://127.0.0.1:${AVATAR_GW_PORT:-18011}"
 export LOAD_BALANCER_URL=disabled
@@ -212,12 +242,14 @@ start_bg s2s "$RUN/s2s.pid" "$LOG/s2s.log" \
     --responses_api_api_key "$LLM_API_KEY" \
     --responses_api_stream \
     --responses_api_disable_thinking \
+    --chat_size "$LLM_CHAT_SIZE" \
+    --compact_history \
     --init_chat_prompt "$INIT_CHAT_PROMPT" \
     "${TTS_ARGS[@]}" \
     --no_enable_live_transcription \
     --thresh "$VAD_THRESH" \
     --min_speech_ms "$MIN_SPEECH_MS" \
-    --min_speech_continuation_ms 192 \
+    --min_speech_continuation_ms "${MIN_SPEECH_CONTINUATION_MS:-128}" \
     --min_silence_ms "$MIN_SILENCE_MS" \
     --speech_pad_ms "$SPEECH_PAD_MS" \
     --speculative_reopen_ms "$REOPEN_MS" \

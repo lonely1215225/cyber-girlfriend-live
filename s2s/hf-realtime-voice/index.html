@@ -3,9 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>实时语音助手</title>
+    <title>小雅直播间</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%2378d99a'/><circle cx='11' cy='14' r='2' fill='%230b0d12'/><circle cx='21' cy='14' r='2' fill='%230b0d12'/><path d='M10 21c4 3 8 3 12 0' fill='none' stroke='%230b0d12' stroke-width='2' stroke-linecap='round'/></svg>" />
-    <link rel="stylesheet" href="style.css?v=20260819m" />
+    <link rel="stylesheet" href="style.css?v=20260819u" />
   </head>
   <!--
     `booting` disables transitions/animations until the first paint commits.
@@ -16,11 +16,18 @@
   <body class="booting">
     <div id="app">
       <header class="topbar">
-        <div class="connection-summary" aria-live="polite">
-          <span id="conversation-state" class="connection-chip" data-state="idle">对话未连接</span>
-          <span id="avatar-connection-state" class="connection-chip" data-state="connecting">数字人连接中</span>
+        <div class="room-heading">
+          <div class="room-title"><span class="room-live-dot"></span><strong>小雅直播间</strong><span class="room-live-label">LIVE</span></div>
+          <div class="connection-summary" aria-live="polite">
+            <span id="conversation-state" class="connection-chip" data-state="idle">正在观看</span>
+            <span id="avatar-connection-state" class="connection-chip" data-state="connecting">数字人连接中</span>
+            <button id="room-viewers-btn" class="connection-chip room-viewers" type="button" aria-expanded="false" aria-controls="room-viewers-popover">观众 <b id="room-viewer-count">0</b></button>
+          </div>
         </div>
         <div class="topbar-right">
+          <button id="room-name-btn" class="room-name-button" type="button" title="修改我的名字">
+            <span id="room-my-name">正在生成名字…</span><small>修改</small>
+          </button>
           <!-- HF login chip / sign-in pill. Populated by ui/account.js; only
                shown when the deploy runs behind a load balancer with OAuth. -->
           <div id="account" class="account" hidden></div>
@@ -92,28 +99,100 @@
             </span>
           </button>
 
-          <button id="stop-btn" class="side-btn" type="button" aria-label="End" title="End" aria-hidden="true">
+          <button id="stop-btn" class="side-btn" type="button" aria-label="下线" title="下线" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           </button>
         </div>
 
-        <p id="circle-caption" class="circle-caption" role="status">Tap to start</p>
+        <p id="circle-caption" class="circle-caption" role="status">申请连线</p>
         <p id="circle-subcaption" class="circle-subcaption" hidden></p>
 
         <div id="queue-actions" class="queue-actions" hidden>
           <button id="join-queue-btn" class="join-queue-btn" type="button" hidden>
-            Join now
+            立即连线
           </button>
           <button id="leave-queue-btn" class="leave-queue-btn" type="button" hidden>
-            Leave queue
+            退出排队
           </button>
         </div>
       </main>
 
+      <aside class="room-panel" aria-label="直播间状态">
+        <section class="room-panel-section room-now">
+          <div class="room-panel-label">当前连线</div>
+          <strong id="room-active-caller">暂无连线</strong>
+          <span id="room-my-status" class="room-my-status">正在观看</span>
+        </section>
+        <section class="room-panel-section">
+          <div class="room-panel-head"><span>连线队列</span><b id="room-queue-count">0</b></div>
+          <ol id="room-queue-list" class="room-queue-list"><li class="room-queue-empty">当前无人排队</li></ol>
+        </section>
+        <section class="room-panel-section room-identity">
+          <div class="room-panel-label">系统分配身份</div>
+          <span id="room-generated-names">生成中…</span>
+        </section>
+      </aside>
+
     </div>
+
+    <dialog id="room-name-dialog" class="modal room-name-dialog">
+      <form id="room-name-form" class="modal-content" method="dialog">
+        <header class="modal-header"><h2>修改直播间名字</h2></header>
+        <label class="field"><span>显示名称</span><input id="room-name-input" maxlength="24" autocomplete="nickname" required /></label>
+        <p id="room-name-error" class="room-name-error" role="alert"></p>
+        <footer class="modal-footer">
+          <button class="btn" value="cancel" type="submit">取消</button>
+          <button class="btn primary" value="save" type="submit">保存</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="admin-unlock-modal" class="modal admin-unlock-modal">
+      <form id="admin-unlock-form" class="modal-content" method="dialog">
+        <header class="modal-header"><h2>管理设置验证</h2></header>
+        <p class="admin-unlock-hint">请输入管理密码后才能打开工具或系统设置。</p>
+        <label class="field">
+          <span>管理密码</span>
+          <input id="admin-password" type="password" inputmode="numeric" autocomplete="current-password" required />
+        </label>
+        <p id="admin-unlock-error" class="admin-unlock-error" role="alert"></p>
+        <footer class="modal-footer">
+          <button class="btn" type="submit" value="cancel">取消</button>
+          <button class="btn primary" type="submit" value="unlock">验证并打开</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <section id="room-viewers-popover" class="room-viewers-popover" role="dialog" aria-label="在线观众" hidden>
+      <header>
+        <div><strong>在线观众</strong><small id="room-viewers-summary">0 人在线</small></div>
+        <button id="room-viewers-close" type="button" aria-label="关闭在线观众名单">×</button>
+      </header>
+      <ul id="room-viewers-list" class="room-viewers-list" aria-live="polite"></ul>
+      <p id="room-viewers-empty" class="room-viewers-empty">暂时没有其他观众</p>
+    </section>
 
     <!-- Ephemeral chat bubbles anchored to the top-right -->
     <div id="bubble-stack" class="bubble-stack" aria-live="polite" aria-atomic="false"></div>
+
+    <!-- Shared room chat: voice transcripts and viewer text use the same feed. -->
+    <section id="room-live-chat" class="room-live-chat is-collapsed" aria-label="直播间聊天">
+      <header class="room-live-chat-head">
+        <span><i aria-hidden="true"></i>直播互动</span>
+        <button id="room-chat-toggle" class="room-chat-toggle" type="button" aria-expanded="false" aria-controls="room-live-transcript room-chat-form">
+          <span id="room-chat-toggle-label">展开</span>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5" /></svg>
+        </button>
+      </header>
+      <div id="room-live-transcript" class="room-live-transcript" role="log" aria-live="polite" aria-relevant="additions text">
+        <p id="room-chat-empty" class="room-chat-empty">还没有消息，来打个招呼吧</p>
+      </div>
+      <form id="room-chat-form" class="room-chat-form">
+        <input id="room-chat-input" type="text" maxlength="200" autocomplete="off" placeholder="和直播间的大家聊聊…" aria-label="发送直播间消息" />
+        <button id="room-chat-send" type="submit">发送</button>
+      </form>
+      <p id="room-chat-error" class="room-chat-error" role="alert"></p>
+    </section>
 
     <!-- Webcam self-view, shown bottom-left while the camera tool is enabled -->
     <div id="cam-pip" class="cam-pip" aria-hidden="true">
@@ -190,6 +269,17 @@
                 Where assistant audio plays. Chrome/Edge support switching outputs.
               </small>
             </label>
+
+            <div class="tool-row barge-in-setting">
+              <div class="tool-info">
+                <span class="tool-name">允许语音打断</span>
+                <span class="tool-desc">关闭时优先完整播放数字人的整段回复；开启后可直接说话打断。</span>
+              </div>
+              <label class="switch">
+                <input id="barge-in" type="checkbox" aria-label="允许语音打断" />
+                <span class="switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
 
             <div class="field avatar-tune">
               <span>数字人形象</span>
@@ -273,6 +363,14 @@
         <p class="tools-intro">Let the assistant act during the conversation. Changes apply live.</p>
 
         <div class="tool-list">
+          <div class="tool-row mcp-tool-row">
+            <div class="tool-info">
+              <span class="tool-name">实时资讯 MCP</span>
+              <span id="mcp-tool-status" class="tool-desc">正在连接 CoinGecko、Exa、GDELT…</span>
+            </div>
+            <span class="mcp-managed-badge">服务端</span>
+          </div>
+
           <div class="tool-row" id="tool-web-row">
             <div class="tool-info">
               <span class="tool-name">Web search</span>
@@ -318,7 +416,8 @@
     </dialog>
 
     <script src="/vendor/mpegts.min.js"></script>
-    <script src="/avatar-sync.js?v=20260819q"></script>
-    <script type="module" src="main.js?v=20260819q"></script>
+    <script src="/avatar-sync.js?v=20260819u"></script>
+    <script type="module" src="room.js?v=20260819e"></script>
+    <script type="module" src="main.js?v=20260819x"></script>
   </body>
 </html>

@@ -16,7 +16,7 @@
  * @typedef {"idle" | "connecting" | "queued" | "your-turn" | "listening" | "user-speaking" | "processing" | "ai-speaking" | "error"} AppState
  */
 
-import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js?v=20260819k";
+import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js?v=20260819o";
 import { ToolCallBatcher } from "./tool-call-batcher.js";
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js?v=20260819c";
@@ -45,6 +45,7 @@ const STORAGE_KEYS = {
   noiseGate: "s2s.ws.noiseGate",
   audioInputId: "s2s.audio.inputId",
   audioOutputId: "s2s.audio.outputId",
+  bargeIn: "s2s.audio.bargeIn",
   avatarId: "s2s.avatar.id",
 };
 
@@ -106,6 +107,9 @@ function loadSettings() {
     noiseGate: loadGateThreshold(),
     audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
     audioOutputId: localStorage.getItem(STORAGE_KEYS.audioOutputId) || "",
+    // Complete playback is the safe default. Interruption must be explicitly
+    // enabled because speaker echo can otherwise be mistaken for barge-in.
+    bargeIn: localStorage.getItem(STORAGE_KEYS.bargeIn) === "1",
   };
 }
 
@@ -130,6 +134,7 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
   localStorage.setItem(STORAGE_KEYS.audioInputId, s.audioInputId || "");
   localStorage.setItem(STORAGE_KEYS.audioOutputId, s.audioOutputId || "");
+  localStorage.setItem(STORAGE_KEYS.bargeIn, s.bargeIn ? "1" : "0");
 }
 
 /** @returns {{ web_search: boolean, camera_snapshot: boolean }} */
@@ -153,15 +158,15 @@ function saveTools() {
 
 /** @type {Record<AppState, { caption: string; disabled: boolean }>} */
 const STATE_VIEWS = {
-  idle:            { caption: "Tap to start",  disabled: false },
-  connecting:      { caption: "Connecting",    disabled: true  },
-  queued:          { caption: "Finding you a spot…", disabled: true },
-  "your-turn":     { caption: "You're up! 🎉", disabled: true  },
+  idle:            { caption: "申请连线",      disabled: false },
+  connecting:      { caption: "正在申请连线",  disabled: true  },
+  queued:          { caption: "正在排队…",     disabled: true  },
+  "your-turn":     { caption: "轮到你了",       disabled: true  },
   listening:       { caption: "",              disabled: false },
   "user-speaking": { caption: "",              disabled: false },
   processing:      { caption: "",              disabled: false },
-  "ai-speaking":   { caption: "",              disabled: false },
-  error:           { caption: "Tap to retry",  disabled: false },
+  "ai-speaking":   { caption: "点击打断",       disabled: false },
+  error:           { caption: "点击重试",      disabled: false },
 };
 
 /** @type {Record<AppState, string>} */
@@ -178,7 +183,7 @@ const STATE_CLASS = {
 };
 
 const STATE_STATUS = {
-  idle: ["对话未连接", "idle"],
+  idle: ["正在观看", "idle"],
   connecting: ["对话连接中", "connecting"],
   queued: ["对话排队中", "connecting"],
   "your-turn": ["正在进入对话", "connecting"],
@@ -237,6 +242,16 @@ const toolCamHint = $("#tool-cam-hint");
 /** @type {HTMLInputElement} */
 const searchKeyInput = $("#search-key");
 /** @type {HTMLElement} */
+const mcpToolStatus = $("#mcp-tool-status");
+/** @type {HTMLDialogElement} */
+const adminUnlockModal = $("#admin-unlock-modal");
+/** @type {HTMLFormElement} */
+const adminUnlockForm = $("#admin-unlock-form");
+/** @type {HTMLInputElement} */
+const adminPassword = $("#admin-password");
+/** @type {HTMLElement} */
+const adminUnlockError = $("#admin-unlock-error");
+/** @type {HTMLElement} */
 const camPip = $("#cam-pip");
 /** @type {HTMLVideoElement} */
 const camVideo = $("#cam-video");
@@ -255,6 +270,8 @@ const inputAudioInput = $("#audio-input");
 const inputAudioOutput = $("#audio-output");
 /** @type {HTMLElement} */
 const audioOutputHint = $("#audio-output-hint");
+/** @type {HTMLInputElement} */
+const inputBargeIn = $("#barge-in");
 /** @type {HTMLTextAreaElement} */
 const inputInstructions = $("#instructions");
 /** @type {HTMLInputElement} */
@@ -300,11 +317,18 @@ let pinnedUrl = "";
 // Optional hidden user prompt supplied by the deployment. When non-empty, the
 // client asks the model to greet once after the initial session configuration.
 let startupGreeting = "";
+let idlePrompt = "";
+let idlePromptMinSeconds = 35;
+let idlePromptMaxSeconds = 55;
 
 // ── Tool state ──────────────────────────────────────────────────────────────
 let toolsEnabled = loadTools();
 // Whether the server holds a Serper key (learned from /api/config on load).
 let serverSearchKey = false;
+/** @type {import("./ws/s2s-ws-client.js").ToolDef[]} */
+let mcpToolDefs = [];
+/** @type {string[]} */
+let mcpSources = [];
 // A user-supplied key (fallback when the deploy has none). localStorage only.
 let userSearchKey = localStorage.getItem(STORAGE_KEYS.searchKey) || "";
 /** @type {MediaStream | null} */
@@ -320,6 +344,7 @@ function activeToolDefs() {
   const defs = [];
   if (toolsEnabled.web_search && searchAvailable()) defs.push(TOOL_DEFS.web_search);
   if (toolsEnabled.camera_snapshot) defs.push(TOOL_DEFS.camera_snapshot);
+  defs.push(...mcpToolDefs);
   return defs;
 }
 
@@ -409,7 +434,7 @@ function setState(next) {
   // Warm reassurance under the terse position, only while waiting in line.
   if (next === "queued") {
     circleSubcaption.textContent =
-      "Sorry, we overhugged! 🤗 Every slot is busy, so we saved you a spot. Hang tight, you're moving up.";
+      "当前已有观众在连线，已为你保留排队位置，请不要关闭页面。";
     circleSubcaption.hidden = false;
   } else {
     circleSubcaption.hidden = true;
@@ -426,8 +451,8 @@ function updateRestartAvailability() {
     currentState === "connecting" || currentState === "queued" || currentState === "your-turn";
   restartHint.hidden = false;
   restartHint.textContent = LIVE_STATES.has(currentState)
-    ? "Reconnects now with the settings above."
-    : "Starts a conversation with the settings above.";
+    ? "使用上面的设置重新连线。"
+    : "使用上面的设置申请连线。";
 }
 
 /**
@@ -444,12 +469,76 @@ function openSettings() {
   syncConnectionUi();
   inputVoice.value = settings.voice;
   inputInstructions.value = settings.instructions;
+  inputBargeIn.checked = settings.bargeIn;
   syncGateUi();
   updateRestartAvailability();
   void refreshAudioDeviceLists();
   void refreshAvatarPicker();
   settingsModal.showModal();
 }
+
+function openTools() {
+  syncToolsUi();
+  toolsModal.showModal();
+}
+
+/** @type {"settings" | "tools" | ""} */
+let pendingAdminPanel = "";
+
+function openAdminPanel(panel) {
+  if (panel === "settings") openSettings();
+  else if (panel === "tools") openTools();
+}
+
+async function requestAdminPanel(panel) {
+  try {
+    const response = await fetch("/api/admin/status", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (response.ok && data.unlocked) {
+      openAdminPanel(panel);
+      return;
+    }
+  } catch {
+    // Fall through to the password dialog. Unlock itself fails closed.
+  }
+  pendingAdminPanel = panel;
+  adminPassword.value = "";
+  adminUnlockError.textContent = "";
+  adminUnlockModal.showModal();
+  requestAnimationFrame(() => adminPassword.focus());
+}
+
+adminUnlockForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const submitter = /** @type {SubmitEvent} */ (event).submitter;
+  if (submitter?.value === "cancel") {
+    pendingAdminPanel = "";
+    adminUnlockModal.close();
+    return;
+  }
+  const password = adminPassword.value;
+  if (!password) return;
+  adminPassword.disabled = true;
+  adminUnlockError.textContent = "";
+  try {
+    const response = await fetch("/api/admin/unlock", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "密码验证失败");
+    const panel = pendingAdminPanel;
+    pendingAdminPanel = "";
+    adminUnlockModal.close();
+    if (panel) openAdminPanel(panel);
+  } catch (error) {
+    adminUnlockError.textContent = error instanceof Error ? error.message : String(error);
+    adminPassword.select();
+  } finally {
+    adminPassword.disabled = false;
+  }
+});
 
 async function refreshAvatarPicker() {
   const root = document.getElementById("avatar-picker");
@@ -626,7 +715,7 @@ const endGateDrag = (/** @type {PointerEvent} */ e) => {
 mgaHit.addEventListener("pointerup", endGateDrag);
 mgaHit.addEventListener("pointercancel", endGateDrag);
 
-settingsBtn.addEventListener("click", openSettings);
+settingsBtn.addEventListener("click", () => void requestAdminPanel("settings"));
 
 // ── Tools panel ───────────────────────────────────────────────────────────
 
@@ -637,6 +726,9 @@ function syncToolsUi() {
   toolWebSwitch.disabled = !avail;
   toolWebRow.classList.toggle("disabled", !avail);
   toolCamSwitch.checked = toolsEnabled.camera_snapshot;
+  mcpToolStatus.textContent = mcpToolDefs.length
+    ? `${mcpSources.join("、")} 已连接，共 ${mcpToolDefs.length} 个实时工具`
+    : "MCP 服务暂时不可用";
 
   if (serverSearchKey) {
     // Key lives server-side: show it as configured, never expose it.
@@ -654,7 +746,7 @@ function syncToolsUi() {
   }
 }
 
-toolsBtn.addEventListener("click", () => { syncToolsUi(); toolsModal.showModal(); });
+toolsBtn.addEventListener("click", () => void requestAdminPanel("tools"));
 toolsClose.addEventListener("click", () => toolsModal.close());
 toolsModal.addEventListener("click", (e) => {
   if (e.target === toolsModal) toolsModal.close();
@@ -835,7 +927,9 @@ async function runTool(name, argsJson, callId) {
   /** @type {{ output: string, image?: string }} */
   let result = { output: "" };
   try {
-    if (name === "web_search") {
+    if (name.startsWith("mcp_")) {
+      result.output = await execMcpTool(name, args);
+    } else if (name === "web_search") {
       const query = typeof args.query === "string" ? args.query : "";
       result.output = await execWebSearch(query);
     } else if (name === "camera_snapshot") {
@@ -856,6 +950,18 @@ async function runTool(name, argsJson, callId) {
     result.output = `Tool failed: ${msg}`;
   }
   return result;
+}
+
+/** @param {string} name @param {Record<string, unknown>} args @returns {Promise<string>} */
+async function execMcpTool(name, args) {
+  const response = await fetch("/api/mcp/call", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, arguments: args }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || `MCP error (${response.status})`);
+  return typeof data.output === "string" ? data.output : JSON.stringify(data.output ?? {});
 }
 
 /** @param {string} query @returns {Promise<string>} */
@@ -889,6 +995,34 @@ async function execWebSearch(query) {
   return lines.length > 1 ? lines.join("\n") : `${lines[0]}\nNo results found.`;
 }
 
+async function fetchMcpTools() {
+  try {
+    const response = await fetch("/api/mcp/tools", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "MCP tools unavailable");
+    const tools = Array.isArray(data.tools) ? data.tools : [];
+    mcpToolDefs = tools
+      .filter((tool) => tool?.type === "function" && typeof tool.name === "string")
+      .map((tool) => ({
+        type: "function",
+        name: tool.name,
+        description: String(tool.description || tool.name),
+        parameters: tool.parameters && typeof tool.parameters === "object"
+          ? tool.parameters
+          : { type: "object", properties: {} },
+      }));
+    mcpSources = Array.isArray(data.sources)
+      ? data.sources.map((source) => String(source)).filter(Boolean)
+      : [];
+  } catch (error) {
+    console.warn("[mcp] tool discovery failed", error);
+    mcpToolDefs = [];
+    mcpSources = [];
+  }
+  syncToolsUi();
+  pushToolsToSession();
+}
+
 /** Learn server config (search key + connection target), then refresh the UI. */
 async function fetchConfig() {
   try {
@@ -904,7 +1038,11 @@ async function fetchConfig() {
       startupGreeting = typeof json.startupGreeting === "string"
         ? json.startupGreeting.trim()
         : "";
+      idlePrompt = typeof json.idlePrompt === "string" ? json.idlePrompt.trim() : "";
+      idlePromptMinSeconds = Number(json.idlePromptMinSeconds) || 35;
+      idlePromptMaxSeconds = Number(json.idlePromptMaxSeconds) || 55;
       loginRequired = !!json.requireLogin;
+      if (json.mcp) await fetchMcpTools();
       // The conversation-time limiter rides on the LB being present.
       limiterOn = lbMode;
     }
@@ -993,6 +1131,7 @@ function readSettingsFromForm() {
     noiseGate: readGateThreshold(),
     audioInputId: inputAudioInput.value || "",
     audioOutputId: inputAudioOutput.value || "",
+    bargeIn: inputBargeIn.checked,
   };
 }
 
@@ -1037,8 +1176,13 @@ function missingServerUrl() {
 
 /** Open Settings and point the user at the empty server-URL field. */
 function promptServerUrl() {
-  if (settingsModal.open) syncConnectionUi();
-  else openSettings();
+  if (!settingsModal.open) {
+    // This path can be reached from the central call button in direct-mode
+    // deployments, so it must use the same password gate as the gear button.
+    void requestAdminPanel("settings");
+    return;
+  }
+  syncConnectionUi();
   connHint.textContent = "Set the speech-to-speech server URL to start.";
   connHint.classList.add("error");
   inputLbUrl.focus();
@@ -1058,6 +1202,7 @@ settingsForm.addEventListener("submit", (event) => {
   if (client && LIVE_STATES.has(currentState)) {
     client.updateSession({ voice: settings.voice, instructions: settings.instructions });
     void client.setAudioOutputDevice(settings.audioOutputId);
+    client.setBargeInEnabled(settings.bargeIn);
   }
 });
 
@@ -1065,6 +1210,12 @@ settingsForm.addEventListener("submit", (event) => {
 // update the label/marker, persist, and push straight to the running client.
 inputNoiseGate.addEventListener("input", () => {
   setGateThreshold(readGateThreshold());
+});
+
+inputBargeIn.addEventListener("change", () => {
+  settings.bargeIn = inputBargeIn.checked;
+  localStorage.setItem(STORAGE_KEYS.bargeIn, settings.bargeIn ? "1" : "0");
+  client?.setBargeInEnabled(settings.bargeIn);
 });
 
 restartBtn.addEventListener("click", async () => {
@@ -1090,6 +1241,18 @@ restartBtn.addEventListener("click", async () => {
 
 circleBtn.addEventListener("click", async () => {
   try {
+    if (currentState === "ai-speaking" && client) {
+      client.manualInterrupt();
+      try {
+        const response = await fetch("/api/avatar/interrupt", { method: "POST" });
+        if (!response.ok) throw new Error(`interrupt failed (${response.status})`);
+        window.dispatchEvent(new CustomEvent("avatar-manual-interrupt"));
+      } catch (error) {
+        console.warn("[avatar] manual interrupt failed", error);
+      }
+      setState("listening");
+      return;
+    }
     if (currentState === "idle" || currentState === "error") {
       if (loginRequired && !account.loggedIn) {
         account.showLoginRequired();
@@ -1135,8 +1298,8 @@ async function handleStartError(err) {
     setState("error");
     setCaption(
       err.code === "join-expired"
-        ? "Your spot expired. Tap to rejoin."
-        : "That took a while. Tap to rejoin.",
+        ? "连线席位已过期，点击重新排队。"
+        : "排队凭证已过期，点击重新排队。",
       "error",
     );
     return;
@@ -1291,7 +1454,7 @@ async function acquireMicStream() {
 /** @param {number} position Update the queued caption ("You're #N in line"). */
 function onQueuePosition(position) {
   const n = Number(position) || 0;
-  setCaption(n > 0 ? `You're #${n} in line` : "Finding you a spot…", "muted");
+  setCaption(n > 0 ? `当前排在第 ${n} 位` : "正在排队…", "muted");
 }
 
 // ── "Your turn" join countdown ──────────────────────────────────────────────
@@ -1304,14 +1467,14 @@ function startJoinCountdown(sec) {
   stopJoinCountdown();
   let left = Math.max(0, Math.floor(sec));
   const paint = () => {
-    joinQueueBtn.textContent = left > 0 ? `Join now (${left}s)` : "Join now";
+    joinQueueBtn.textContent = left > 0 ? `立即连线（${left}秒）` : "立即连线";
   };
   paint();
   joinCountdownTimer = window.setInterval(() => {
     left -= 1;
     if (left <= 0) {
       stopJoinCountdown();
-      joinQueueBtn.textContent = "Join now";
+      joinQueueBtn.textContent = "立即连线";
       return;
     }
     paint();
@@ -1366,9 +1529,13 @@ async function doStart(audioContext = null) {
     voice: settings.voice,
     instructions: settings.instructions,
     startupGreeting,
+    idlePrompt,
+    idlePromptMinSeconds,
+    idlePromptMaxSeconds,
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),
     noiseGate: gateParams(settings.noiseGate),
+    bargeIn: settings.bargeIn,
     audioOutputId: settings.audioOutputId || "",
     ...(audioContext ? { audioContext } : {}),
   });
@@ -1467,11 +1634,13 @@ async function doStart(audioContext = null) {
     // A slot was granted — we're out of the queue; drop the ticket reference so
     // teardown doesn't try to leave a line we already left.
     queuedTicketId = "";
-    // A metered tier (anon / free): heartbeat so the server can extend the
-    // reservation and tell us when the daily budget runs out. PRO isn't limited.
-    if (info.limited && info.sessionId) {
+    // Always retain the session id so teardown immediately releases the shared
+    // room slot. Metered deployments additionally need a periodic heartbeat.
+    if (info.sessionId) {
       trackedSessionId = info.sessionId;
-      trackedTier = info.tier || "anon";
+      trackedTier = info.tier || "room";
+    }
+    if (info.limited && info.sessionId) {
       startHeartbeat(info.heartbeatSec || 5);
     }
   });

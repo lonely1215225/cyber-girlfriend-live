@@ -41,17 +41,29 @@ the moment a slot is actually claimed (a grant), never while queued.
 """
 
 import asyncio
+import base64
+import contextlib
+import hashlib
+import hmac
+import json
 import logging
 import os
+import secrets
+import time
+from urllib.parse import quote
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+import websockets
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import auth
 import limiter
+from mcp_gateway import McpGateway
+from mention_reply import MentionReplyWorker
+from room_manager import LiveRoom, RoomError
 
 logger = logging.getLogger("s2s.search")
 
@@ -70,6 +82,23 @@ LOAD_BALANCER_URL = os.environ.get("LOAD_BALANCER_URL", "").strip()
 SPEECH_TO_SPEECH_URL = os.environ.get("SPEECH_TO_SPEECH_URL", "").strip()
 if SPEECH_TO_SPEECH_URL:
     LOAD_BALANCER_URL = ""
+LIVE_ROOM_ENABLED = os.environ.get("LIVE_ROOM_ENABLED", "1").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+S2S_INTERNAL_WS_URL = os.environ.get(
+    "S2S_INTERNAL_WS_URL", "ws://127.0.0.1:8765/v1/realtime"
+).strip()
+ROOM_COOKIE = "cg_live_room"
+ADMIN_COOKIE = "cg_admin_settings"
+ADMIN_SETTINGS_PASSWORD = os.environ.get("ADMIN_SETTINGS_PASSWORD", "123456")
+ADMIN_SESSION_TTL_SECONDS = max(300, int(os.environ.get("ADMIN_SESSION_TTL_SECONDS", "1800")))
+_admin_secret = (os.environ.get("ADMIN_SESSION_SECRET", "").encode() or secrets.token_bytes(32))
+_admin_attempts: dict[str, list[float]] = {}
+live_room = LiveRoom(
+    queue_limit=int(os.environ.get("LIVE_ROOM_QUEUE_LIMIT", "100")),
+    pending_timeout_s=int(os.environ.get("LIVE_ROOM_JOIN_TIMEOUT", "60")),
+    max_call_s=int(os.environ.get("LIVE_ROOM_MAX_CALL_SECONDS", "600")),
+)
 # HF injects SPACE_ID ("owner/space") into every Space runtime; it's absent
 # locally and on a plain `docker run`. We meter conversation time ONLY on the
 # deployed Space — i.e. when BOTH the LB is configured AND we're on a Space.
@@ -90,6 +119,17 @@ DEFAULT_STARTUP_GREETING = (
     "Keep it to one sentence, invite the user in naturally, and vary the wording each time."
 )
 STARTUP_GREETING = os.environ.get("STARTUP_GREETING", DEFAULT_STARTUP_GREETING).strip()
+IDLE_PROMPT = os.environ.get(
+    "IDLE_PROMPT",
+    "对方安静了一会儿。请主动关心对方还在不在，并自然挑一个轻松的新话题聊，"
+    "例如最近在做什么、喜欢的动漫、动物、音乐、电影、游戏或想去的地方。"
+    "不要说这是系统要求，不要重复刚聊过的话题，用一到两句口语表达。",
+).strip()
+IDLE_PROMPT_MIN_SECONDS = max(15, int(os.environ.get("IDLE_PROMPT_MIN_SECONDS", "35")))
+IDLE_PROMPT_MAX_SECONDS = max(
+    IDLE_PROMPT_MIN_SECONDS, int(os.environ.get("IDLE_PROMPT_MAX_SECONDS", "55"))
+)
+AVATAR_LISTEN_URL = os.environ.get("AVTR1_LOCAL_TEE_URL", "").rstrip("/")
 SERPER_URL = "https://google.serper.dev/search"
 # Cap results so the tool output stays small enough to feed back to the model.
 MAX_RESULTS = 5
@@ -97,6 +137,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LB_USER_AGENT = "hf-realtime-voice-space"
 
 app = FastAPI(title="s2s-demo")
+mcp_gateway = McpGateway()
+mention_replies = MentionReplyWorker(
+    live_room,
+    mcp_gateway,
+    S2S_INTERNAL_WS_URL,
+    AVATAR_LISTEN_URL,
+    max_queue=int(os.environ.get("MENTION_REPLY_QUEUE_LIMIT", "30")),
+)
 
 # Wire HF OAuth before the app serves (no-op unless the OAuth env is present).
 # Sign-in only matters when we're metering (prod Space), so gate it on that.
@@ -106,10 +154,23 @@ AUTH_ENABLED = LIMITER_ENABLED and auth.attach(app)
 @app.on_event("startup")
 async def _startup():
     """Stand up the usage DB and a periodic sweeper — metered (prod Space) only."""
+    if LIVE_ROOM_ENABLED:
+        live_room.start()
+        mention_replies.start()
+    if mcp_gateway.enabled:
+        asyncio.create_task(mcp_gateway.warmup())
     if not LIMITER_ENABLED:
         return
     limiter.init()
     asyncio.create_task(_sweeper())
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    if LIVE_ROOM_ENABLED:
+        await mention_replies.stop()
+        await live_room.stop()
+    await mcp_gateway.close()
 
 
 async def _sweeper():
@@ -126,6 +187,15 @@ class SearchRequest(BaseModel):
     # Optional user-supplied key (fallback when the deploy has no server key).
     # Used for this request only; never stored.
     key: str | None = None
+
+
+class AdminUnlockRequest(BaseModel):
+    password: str
+
+
+class McpCallRequest(BaseModel):
+    name: str
+    arguments: dict
 
 
 def _public_ws_url(request: Request) -> str:
@@ -152,6 +222,85 @@ def _public_ws_url(request: Request) -> str:
     return f"{proto}://{host}/v1/realtime"
 
 
+def _room_ws_url(request: Request, ticket: str) -> str:
+    forwarded = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    proto = "wss" if forwarded == "https" else "ws"
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "127.0.0.1").split(",")[0].strip()
+    return f"{proto}://{host}/api/realtime?ticket={quote(ticket, safe='')}"
+
+
+def _set_room_cookie(response, participant_token: str, request: Request) -> None:
+    forwarded = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    response.set_cookie(
+        ROOM_COOKIE,
+        participant_token,
+        max_age=365 * 24 * 60 * 60,
+        httponly=True,
+        secure=forwarded == "https",
+        samesite="lax",
+        path="/",
+    )
+
+
+def _request_is_https(request: Request) -> bool:
+    forwarded = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    return forwarded == "https"
+
+
+def _admin_token(expires: int) -> str:
+    value = str(expires)
+    signature = hmac.new(_admin_secret, value.encode(), hashlib.sha256).hexdigest()
+    return f"{value}.{signature}"
+
+
+def _admin_unlocked(request: Request) -> bool:
+    token = request.cookies.get(ADMIN_COOKIE, "")
+    try:
+        raw_expiry, signature = token.split(".", 1)
+        expires = int(raw_expiry)
+    except (TypeError, ValueError):
+        return False
+    expected = hmac.new(_admin_secret, raw_expiry.encode(), hashlib.sha256).hexdigest()
+    return expires >= int(time.time()) and hmac.compare_digest(signature, expected)
+
+
+def _admin_client_key(request: Request) -> str:
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    return real_ip or (request.client.host if request.client else "unknown")
+
+
+def _set_admin_cookie(response: JSONResponse, request: Request) -> None:
+    expires = int(time.time()) + ADMIN_SESSION_TTL_SECONDS
+    response.set_cookie(
+        ADMIN_COOKIE,
+        _admin_token(expires),
+        max_age=ADMIN_SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=_request_is_https(request),
+        samesite="strict",
+        path="/",
+    )
+
+
+async def _room_identity(request: Request, *, create: bool = True):
+    return await live_room.identify(request.cookies.get(ROOM_COOKIE), create=create)
+
+
+def _room_error(exc: RoomError) -> JSONResponse:
+    body = {"detail": str(exc), "reason": exc.code}
+    if exc.code == "at_capacity":
+        body = {"state": "at_capacity", "detail": str(exc)}
+    return JSONResponse(body, status_code=exc.status)
+
+
+def _room_grant_payload(request: Request, data: dict) -> dict:
+    if data.get("state") == "queued":
+        return data
+    ticket = str(data.get("session_token") or "")
+    connect_url = _room_ws_url(request, ticket)
+    return {**data, "connect_url": connect_url, "websocket_url": connect_url}
+
+
 @app.get("/avatar-sync.js", include_in_schema=False)
 async def avatar_sync_js():
     return FileResponse(os.path.join(HERE, "avatar-sync.js"), media_type="application/javascript")
@@ -176,15 +325,49 @@ def config(request: Request):
         s2s_url = _public_ws_url(request)
     return {
         "search": bool(SERPER_KEY),
-        "lb": bool(LOAD_BALANCER_URL),
-        "allowDirect": not LOAD_BALANCER_URL,
+        "lb": LIVE_ROOM_ENABLED or bool(LOAD_BALANCER_URL),
+        "liveRoom": LIVE_ROOM_ENABLED,
+        "allowDirect": not LIVE_ROOM_ENABLED and not LOAD_BALANCER_URL,
         # Deploy-pinned direct s2s URL (empty when unset). Not a secret: the
         # browser dials it itself, and Settings shows it locked.
-        "s2sUrl": s2s_url,
+        "s2sUrl": "" if LIVE_ROOM_ENABLED else s2s_url,
         "startupGreeting": STARTUP_GREETING,
+        "idlePrompt": IDLE_PROMPT,
+        "idlePromptMinSeconds": IDLE_PROMPT_MIN_SECONDS,
+        "idlePromptMaxSeconds": IDLE_PROMPT_MAX_SECONDS,
+        "mcp": mcp_gateway.enabled,
         "auth": AUTH_ENABLED,
         "requireLogin": REQUIRE_LOGIN,
     }
+
+
+@app.get("/api/admin/status")
+async def admin_status(request: Request):
+    return {"unlocked": _admin_unlocked(request), "expiresIn": ADMIN_SESSION_TTL_SECONDS}
+
+
+@app.post("/api/admin/unlock")
+async def admin_unlock(body: AdminUnlockRequest, request: Request):
+    key = _admin_client_key(request)
+    now = time.monotonic()
+    attempts = [stamp for stamp in _admin_attempts.get(key, []) if now - stamp < 60]
+    if len(attempts) >= 5:
+        raise HTTPException(status_code=429, detail="尝试次数过多，请一分钟后再试")
+    if not hmac.compare_digest(str(body.password), ADMIN_SETTINGS_PASSWORD):
+        attempts.append(now)
+        _admin_attempts[key] = attempts
+        raise HTTPException(status_code=401, detail="管理密码不正确")
+    _admin_attempts.pop(key, None)
+    response = JSONResponse({"unlocked": True, "expiresIn": ADMIN_SESSION_TTL_SECONDS})
+    _set_admin_cookie(response, request)
+    return response
+
+
+@app.post("/api/admin/lock")
+async def admin_lock():
+    response = JSONResponse({"unlocked": False})
+    response.delete_cookie(ADMIN_COOKIE, path="/")
+    return response
 
 
 @app.get("/api/me")
@@ -299,6 +482,149 @@ async def search(req: SearchRequest):
     return JSONResponse({"query": query, "answer": answer, "results": results})
 
 
+@app.get("/api/mcp/tools")
+async def mcp_tools():
+    if not mcp_gateway.enabled:
+        return {"enabled": False, "tools": [], "sources": []}
+    try:
+        tools = await mcp_gateway.list_tools()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("MCP tools unavailable: %s", exc)
+        raise HTTPException(status_code=502, detail="MCP 服务暂时不可用")
+    sources = sorted({str(tool.get("source")) for tool in tools if tool.get("source")})
+    return {"enabled": True, "tools": tools, "sources": sources}
+
+
+@app.post("/api/mcp/call")
+async def mcp_call(body: McpCallRequest, request: Request):
+    if not mcp_gateway.enabled:
+        raise HTTPException(status_code=503, detail="MCP 未启用")
+    if LIVE_ROOM_ENABLED:
+        try:
+            participant, _ = await _room_identity(request, create=False)
+            state = await live_room.snapshot(participant.token)
+        except RoomError as exc:
+            return _room_error(exc)
+        if state.get("me", {}).get("status") != "calling":
+            raise HTTPException(status_code=403, detail="只有当前连线者可以调用 MCP 工具")
+    try:
+        output = await mcp_gateway.call(body.name, body.arguments)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="未知的 MCP 工具")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except (httpx.HTTPError, RuntimeError, json.JSONDecodeError) as exc:
+        logger.warning("MCP call %s failed: %s", body.name, exc)
+        raise HTTPException(status_code=502, detail="MCP 工具调用失败")
+    return {"name": body.name, "output": output}
+
+
+@app.post("/api/avatar/interrupt")
+async def avatar_interrupt(request: Request):
+    """Let only the active caller cut queued avatar audio for manual barge-in."""
+    try:
+        participant, _ = await _room_identity(request, create=False)
+        state = await live_room.snapshot(participant.token)
+    except RoomError as exc:
+        return _room_error(exc)
+    if state.get("me", {}).get("status") != "calling":
+        raise HTTPException(status_code=403, detail="只有当前连线者可以打断数字人")
+    if AVATAR_LISTEN_URL:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.post(f"{AVATAR_LISTEN_URL}/interrupt")
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("manual avatar interrupt failed: %s", exc)
+            raise HTTPException(status_code=502, detail="数字人打断失败")
+    return {"ok": True}
+
+
+class RenameRequest(BaseModel):
+    name: str
+
+
+class RoomChatRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/room/join")
+async def room_join(request: Request):
+    if not LIVE_ROOM_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found.")
+    participant, is_new = await _room_identity(request)
+    data = await live_room.snapshot(participant.token)
+    response = JSONResponse(data)
+    if is_new:
+        _set_room_cookie(response, participant.token, request)
+    return response
+
+
+@app.get("/api/room/state")
+async def room_state(request: Request):
+    if not LIVE_ROOM_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found.")
+    try:
+        participant, _ = await _room_identity(request, create=False)
+        return await live_room.snapshot(participant.token)
+    except RoomError as exc:
+        return _room_error(exc)
+
+
+@app.patch("/api/room/name")
+async def room_rename(body: RenameRequest, request: Request):
+    if not LIVE_ROOM_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found.")
+    try:
+        participant, _ = await _room_identity(request, create=False)
+        return {"me": await live_room.rename(participant.token, body.name)}
+    except RoomError as exc:
+        return _room_error(exc)
+
+
+@app.post("/api/room/chat")
+async def room_chat(body: RoomChatRequest, request: Request):
+    if not LIVE_ROOM_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found.")
+    try:
+        participant, _ = await _room_identity(request, create=False)
+        message = await live_room.publish_chat(participant.token, body.text)
+        mention_position = mention_replies.enqueue(message)
+        return {"message": message, "mentionQueuePosition": mention_position}
+    except RoomError as exc:
+        return _room_error(exc)
+
+
+@app.get("/api/room/events")
+async def room_events(request: Request):
+    if not LIVE_ROOM_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found.")
+    try:
+        participant, _ = await _room_identity(request, create=False)
+    except RoomError as exc:
+        return _room_error(exc)
+    channel = await live_room.subscribe(participant.token)
+
+    async def stream():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(channel.get(), timeout=15)
+                    yield f"event: room\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            await live_room.unsubscribe(channel)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/session")
 async def session(request: Request):
     """Proxy the session handshake to the load balancer, keeping its URL secret,
@@ -310,6 +636,21 @@ async def session(request: Request):
     (compute host + short-lived token) the browser must dial directly — that one
     URL is unavoidably exposed, but the stable load-balancer address is not. On a
     successful grant we reserve the first time chunk against the day's budget."""
+    if LIVE_ROOM_ENABLED:
+        try:
+            participant, is_new = await _room_identity(request)
+            data = await live_room.request_session(participant.token)
+            # A newly granted/queued live interaction always outranks an
+            # audience mention response. This is a no-op unless the room bot is
+            # currently using the speech pipeline.
+            await mention_replies.interrupt()
+            response = JSONResponse(_room_grant_payload(request, data))
+            if is_new:
+                _set_room_cookie(response, participant.token, request)
+            return response
+        except RoomError as exc:
+            return _room_error(exc)
+
     if not LOAD_BALANCER_URL:
         # No LB configured — this deploy is direct-mode only; the browser should
         # never call this. 404 so it's indistinguishable from a missing route.
@@ -412,6 +753,14 @@ async def queue_status(queue_id: str, request: Request):
     """Poll a waiting ticket: relay the position, or — when the head of the line
     claims a freed slot — reserve the budget now and return the grant. Re-checks the
     daily budget at claim, since a multi-minute wait could have spent it elsewhere."""
+    if LIVE_ROOM_ENABLED:
+        try:
+            participant, _ = await _room_identity(request, create=False)
+            data = await live_room.poll_queue(participant.token, queue_id)
+            return JSONResponse(_room_grant_payload(request, data))
+        except RoomError as exc:
+            return _room_error(exc)
+
     if not LOAD_BALANCER_URL:
         raise HTTPException(status_code=404, detail="Not found.")
 
@@ -468,8 +817,15 @@ async def queue_status(queue_id: str, request: Request):
 
 
 @app.delete("/api/queue/{queue_id}")
-async def queue_leave(queue_id: str):
+async def queue_leave(queue_id: str, request: Request):
     """Leave the queue from the explicit 'Leave queue' button (a real fetch)."""
+    if LIVE_ROOM_ENABLED:
+        try:
+            participant, _ = await _room_identity(request, create=False)
+            await live_room.leave_queue(participant.token, queue_id)
+            return {"ok": True}
+        except RoomError as exc:
+            return _room_error(exc)
     if not LOAD_BALANCER_URL:
         raise HTTPException(status_code=404, detail="Not found.")
     await _lb_leave(queue_id)
@@ -480,6 +836,14 @@ async def queue_leave(queue_id: str):
 async def queue_end(request: Request):
     """Leave the queue on teardown/tab-close (navigator.sendBeacon, which can only
     POST). Body: { queueId }. Best-effort; the LB reaps the ticket on TTL anyway."""
+    if LIVE_ROOM_ENABLED:
+        try:
+            participant, _ = await _room_identity(request, create=False)
+            qid = await _queue_id(request)
+            await live_room.leave_queue(participant.token, qid or None)
+            return {"ok": True}
+        except RoomError as exc:
+            return _room_error(exc)
     if not LOAD_BALANCER_URL:
         raise HTTPException(status_code=404, detail="Not found.")
     qid = await _queue_id(request)
@@ -548,6 +912,13 @@ async def _session_id(request: Request) -> str:
 async def session_heartbeat(request: Request):
     """Extend the live reservation one chunk at a time. `expired` once the day's
     budget is spent — the client then tears down."""
+    if LIVE_ROOM_ENABLED:
+        try:
+            participant, _ = await _room_identity(request, create=False)
+            snapshot = await live_room.snapshot(participant.token)
+            return {"expired": snapshot["me"].get("status") not in {"ready", "calling"}}
+        except RoomError:
+            return {"expired": True}
     if not LIMITER_ENABLED:
         raise HTTPException(status_code=404, detail="Not found.")
     sid = await _session_id(request)
@@ -559,12 +930,221 @@ async def session_heartbeat(request: Request):
 async def session_end(request: Request):
     """Clean teardown: reconcile to real elapsed time and refund the unused
     chunk. Sent via navigator.sendBeacon, so it must succeed without a response."""
+    if LIVE_ROOM_ENABLED:
+        try:
+            participant, _ = await _room_identity(request, create=False)
+            sid = await _session_id(request)
+            await live_room.end_session(participant.token, sid or None)
+            mention_replies.notify()
+            return {"ok": True}
+        except RoomError as exc:
+            return _room_error(exc)
     if not LIMITER_ENABLED:
         raise HTTPException(status_code=404, detail="Not found.")
     sid = await _session_id(request)
     if sid:
         await asyncio.to_thread(limiter.end, sid)
     return {"ok": True}
+
+
+def _add_caller_identity(message: str, display_name: str) -> str:
+    """Attach server-owned identity/tool policy to a full instruction update."""
+    try:
+        payload = json.loads(message)
+    except (TypeError, json.JSONDecodeError):
+        return message
+    if payload.get("type") != "session.update" or not isinstance(payload.get("session"), dict):
+        return message
+    session_data = payload["session"]
+    # A later tools-only update is a patch. Adding an `instructions` key to it
+    # would replace the complete personality prompt with only the caller name.
+    if "instructions" not in session_data:
+        return message
+    identity = f"当前正在与你连线的观众名字是“{display_name}”。请自然地用这个名字称呼对方。"
+    tool_policy = (
+        "如果用户询问实时价格、最新新闻、近期公告或其他会变化的信息，并且会话提供了相关工具，"
+        "必须在当前轮立即调用最合适的工具，禁止只说‘我去查’、‘稍等’或把调用拖到下一轮。"
+        "收到工具结果后直接用中文回答用户；如果工具报错，要明确说明查询失败原因，不能假装已经查到。"
+        "查询币价优先使用 mcp_coingecko_price；查询国际新闻优先使用 Exa 或 GDELT。"
+    )
+    instructions = str(session_data.get("instructions") or "").strip()
+    additions = [item for item in (identity, tool_policy) if item not in instructions]
+    if additions:
+        session_data["instructions"] = "\n".join([instructions, *additions]).strip()
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+@app.websocket("/api/realtime")
+async def room_realtime(websocket: WebSocket):
+    """Authenticated one-at-a-time proxy to the internal S2S WebSocket."""
+    if not LIVE_ROOM_ENABLED:
+        await websocket.close(code=4404)
+        return
+    token = websocket.cookies.get(ROOM_COOKIE, "")
+    ticket = websocket.query_params.get("ticket", "")
+    try:
+        session_id, display_name = await live_room.claim_websocket(token, ticket)
+    except RoomError:
+        await websocket.close(code=4403)
+        return
+
+    try:
+        async with websockets.connect(
+            S2S_INTERNAL_WS_URL,
+            max_size=None,
+            ping_interval=20,
+            ping_timeout=20,
+        ) as upstream:
+            await websocket.accept()
+            assistant_text: dict[str, str] = {}
+            listen_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=16)
+
+            async def listener_to_avatar() -> None:
+                """Batch caller PCM so AVTR-1 can render active listening."""
+                if not AVATAR_LISTEN_URL:
+                    return
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    try:
+                        while True:
+                            chunk = bytearray(await listen_queue.get())
+                            deadline = asyncio.get_running_loop().time() + 0.16
+                            while len(chunk) < 6400:
+                                remaining = deadline - asyncio.get_running_loop().time()
+                                if remaining <= 0:
+                                    break
+                                try:
+                                    chunk.extend(await asyncio.wait_for(listen_queue.get(), remaining))
+                                except asyncio.TimeoutError:
+                                    break
+                            try:
+                                await client.post(
+                                    f"{AVATAR_LISTEN_URL}/listen-chunk",
+                                    content=bytes(chunk),
+                                    headers={"Content-Type": "application/octet-stream"},
+                                )
+                            except httpx.HTTPError as exc:
+                                # Listening motion is cosmetic. A renderer
+                                # hiccup must never tear down the voice call.
+                                logger.debug("avatar listener tee failed: %r", exc)
+                    finally:
+                        with contextlib.suppress(Exception):
+                            await client.post(f"{AVATAR_LISTEN_URL}/listen-reset")
+
+            async def publish_room_transcript(message: str) -> None:
+                try:
+                    event = json.loads(message)
+                except (TypeError, json.JSONDecodeError):
+                    return
+                event_type = str(event.get("type") or "")
+                if event_type == "conversation.item.input_audio_transcription.completed":
+                    await live_room.publish_transcript(
+                        session_id=session_id,
+                        event_id=str(event.get("item_id") or "user"),
+                        role="user",
+                        speaker=display_name,
+                        text=str(event.get("transcript") or ""),
+                    )
+                    return
+                if event_type in {
+                    "response.audio_transcript.delta",
+                    "response.output_audio_transcript.delta",
+                }:
+                    response_id = str(event.get("response_id") or "assistant")
+                    assistant_text[response_id] = assistant_text.get(response_id, "") + str(event.get("delta") or "")
+                    await live_room.publish_transcript(
+                        session_id=session_id,
+                        event_id=response_id,
+                        role="assistant",
+                        speaker="小雅",
+                        text=assistant_text[response_id],
+                        partial=True,
+                    )
+                    return
+                if event_type in {
+                    "response.audio_transcript.done",
+                    "response.output_audio_transcript.done",
+                }:
+                    response_id = str(event.get("response_id") or "assistant")
+                    transcript = str(event.get("transcript") or assistant_text.get(response_id) or "")
+                    assistant_text[response_id] = transcript
+                    await live_room.publish_transcript(
+                        session_id=session_id,
+                        event_id=response_id,
+                        role="assistant",
+                        speaker="小雅",
+                        text=transcript,
+                    )
+                    return
+                response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                if event_type == "response.done" and response.get("status") == "cancelled":
+                    response_id = str(response.get("id") or "")
+                    if response_id and assistant_text.get(response_id):
+                        await live_room.publish_transcript(
+                            session_id=session_id,
+                            event_id=response_id,
+                            role="assistant",
+                            speaker="小雅",
+                            text=assistant_text[response_id],
+                            interrupted=True,
+                        )
+
+            async def browser_to_upstream():
+                while True:
+                    event = await websocket.receive()
+                    if event["type"] == "websocket.disconnect":
+                        return
+                    if event.get("text") is not None:
+                        message = event["text"]
+                        await upstream.send(_add_caller_identity(message, display_name))
+                        if AVATAR_LISTEN_URL:
+                            try:
+                                payload = json.loads(message)
+                                if payload.get("type") == "input_audio_buffer.append":
+                                    pcm = base64.b64decode(payload.get("audio") or "", validate=True)
+                                    if pcm:
+                                        if listen_queue.full():
+                                            listen_queue.get_nowait()
+                                        listen_queue.put_nowait(pcm)
+                            except (ValueError, TypeError, json.JSONDecodeError, asyncio.QueueFull):
+                                pass
+                    elif event.get("bytes") is not None:
+                        await upstream.send(event["bytes"])
+
+            async def upstream_to_browser():
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+                        await publish_room_transcript(message)
+
+            async def bridge():
+                tasks = {
+                    asyncio.create_task(browser_to_upstream()),
+                    asyncio.create_task(upstream_to_browser()),
+                }
+                if AVATAR_LISTEN_URL:
+                    tasks.add(asyncio.create_task(listener_to_avatar()))
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
+
+            await asyncio.wait_for(bridge(), timeout=live_room.max_call_s)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(RuntimeError):
+            await websocket.close(code=1000, reason="本次连线时间已结束")
+    except (WebSocketDisconnect, websockets.ConnectionClosed):
+        pass
+    except Exception as exc:
+        logger.warning("room realtime proxy ended: %r", exc)
+        with contextlib.suppress(RuntimeError):
+            await websocket.close(code=1011, reason="语音服务连接中断")
+    finally:
+        await live_room.end_session(token, session_id)
+        mention_replies.notify()
 
 
 # Static front-end. Registered last so the /api routes win. `html=True` serves

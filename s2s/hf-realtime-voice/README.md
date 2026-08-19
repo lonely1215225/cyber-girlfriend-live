@@ -13,6 +13,11 @@ hf_oauth_expiration_minutes: 10080
 
 # Minimal Conversation App (S2S backend, **WebSocket** transport)
 
+> 本项目的默认部署已在此基础上启用多人直播间模式：`room_manager.py`
+> 管理随机身份、在线状态和 FIFO 连线队列，`room.js` 通过 SSE 实时渲染观众数、
+> 当前连线人和排队列表。浏览器只能使用 `/api/session` 取得一次性票据，再通过
+> `/api/realtime` 的同源代理连接内部 S2S，不会暴露可绕过队列的内部地址。
+
 Drop-in alternative to [`amir-tfrere/minimal-conversation-app-s2s-backend`](https://huggingface.co/spaces/amir-tfrere/minimal-conversation-app-s2s-backend)
 that uses the **WebSocket** route of the Hugging Face speech-to-speech
 backend instead of the WebRTC SDP proxy. Same load balancer, same
@@ -130,6 +135,8 @@ leaves the app unmetered. Tunable via env:
 | `LIMIT_FREE_SEC` | `600` | Daily seconds for signed-in non-PRO users (10 min) |
 | `REQUIRE_LOGIN` | unset | Set to `true` to require HF sign-in before allocating or claiming a session |
 | `STARTUP_GREETING` | one-sentence greeting prompt | Hidden prompt that opens the conversation and warms the model; set empty to disable |
+| `IDLE_PROMPT` | proactive topic prompt | Hidden prompt used after the active caller stays quiet; set empty to disable |
+| `IDLE_PROMPT_MIN_SECONDS` / `IDLE_PROMPT_MAX_SECONDS` | `35` / `55` | Random quiet interval before the avatar starts a new topic |
 | `UNLIMITED_ORGS` | _(adds to defaults)_ | Extra HF org names whose members get **unlimited** usage, like PRO |
 | `USAGE_HASH_SECRET` | _(random)_ | HMAC secret for hashing identity keys + signing the anon cookie |
 

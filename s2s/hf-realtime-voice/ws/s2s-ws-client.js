@@ -53,6 +53,10 @@
  * @property {string} instructions
  * @property {string} [startupGreeting] Hidden user prompt that asks the model
  *   to greet once after the initial session configuration is sent.
+ * @property {string} [idlePrompt] Hidden prompt used to start a fresh topic
+ *   after both sides have been quiet for a configured interval.
+ * @property {number} [idlePromptMinSeconds]
+ * @property {number} [idlePromptMaxSeconds]
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
  * @property {() => Promise<MediaStream>} [acquireMic] Lazily obtain the mic stream,
  *   called only once a session is actually granted (after any queue wait). Lets the
@@ -69,6 +73,8 @@
  *   before it's sent. Tunable live via `setNoiseGate`.
  * @property {string} [audioOutputId] MediaDeviceInfo.deviceId for speakers.
  *   Applied via AudioContext.setSinkId when the browser supports it.
+ * @property {boolean} [bargeIn] Whether mic speech may interrupt assistant
+ *   playout. Defaults off to prevent speaker echo from truncating replies.
  *
  * @typedef {Object} NoiseGate
  * @property {boolean} enabled
@@ -113,6 +119,11 @@ function _codedError(message, code, extra) {
 const OUTPUT_SAMPLE_RATE = 16000;
 const MIC_CHUNK_MS = 40;
 const RESPONSE_CREATE_ID_METADATA_KEY = "s2s_demo_create_id";
+// The server generates audio faster than realtime, while AVTR-1 sends it to the
+// browser through a paced HTTP-FLV stream. Keep the mic upstream closed until
+// that independently buffered audio has actually had time to play.
+const ASSISTANT_PLAYOUT_LEAD_MS = 900;
+const ASSISTANT_PLAYOUT_TAIL_MS = 600;
 
 export class S2sWsRealtimeClient extends EventTarget {
   /** @param {WsClientOptions} options */
@@ -186,6 +197,14 @@ export class S2sWsRealtimeClient extends EventTarget {
      * with legacy endpoints that emitted a done event for every text segment. */
     this._asstFullByResp = new Map();
     this._muted = false;
+    this._bargeInEnabled = options.bargeIn === true;
+    // Estimated end of audible assistant playout on performance.now()'s clock.
+    // Every received PCM chunk extends this realtime schedule even when the
+    // WebSocket audio copy is muted in favour of AVTR-1's muxed FLV audio.
+    this._assistantPlayoutUntil = 0;
+    this._manualBargeInUntil = 0;
+    /** @type {ReturnType<typeof setTimeout> | 0} */
+    this._assistantPlayoutTimer = 0;
     // ── Response lock ────────────────────────────────────────────────────
     // The backend allows only ONE response in flight: creating a second while
     // one is active fails with `conversation_already_has_active_response`. So
@@ -212,6 +231,14 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._sessionConfigured = false;
     this._startupGreeting = options.startupGreeting?.trim() ?? "";
     this._startupGreetingSent = false;
+    this._idlePrompt = options.idlePrompt?.trim() ?? "";
+    this._idlePromptMinMs = Math.max(15, options.idlePromptMinSeconds ?? 35) * 1000;
+    this._idlePromptMaxMs = Math.max(
+      this._idlePromptMinMs,
+      Math.max(15, options.idlePromptMaxSeconds ?? 55) * 1000,
+    );
+    /** @type {ReturnType<typeof setTimeout> | 0} */
+    this._idlePromptTimer = 0;
     // Bounded, browser-local copy of the exact PCM frames sent over this
     // socket. Backend VAD timestamps turn it into replayable user utterances.
     this._userAudioRecorder = new SentAudioRecorder();
@@ -543,7 +570,7 @@ export class S2sWsRealtimeClient extends EventTarget {
       numberOfOutputs: 1,
       outputChannelCount: [1],
     });
-    playbackNode.port.postMessage({ kind: "config", inputRate: OUTPUT_SAMPLE_RATE, prerollMs: 540 });
+    playbackNode.port.postMessage({ kind: "config", inputRate: OUTPUT_SAMPLE_RATE, prerollMs: 420 });
     playbackNode.port.onmessage = (e) => this._onPlaybackMessage(e.data);
 
     // Output analyser sits between the playback worklet and the speakers.
@@ -628,6 +655,11 @@ export class S2sWsRealtimeClient extends EventTarget {
     if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
     if (!this._sessionConfigured) return; // Server rejects audio before session.update.
     if (this._muted) return;
+    if (
+      !this._bargeInEnabled &&
+      performance.now() >= this._manualBargeInUntil &&
+      performance.now() < this._assistantPlayoutUntil + ASSISTANT_PLAYOUT_TAIL_MS
+    ) return;
     const b64 = base64FromArrayBuffer(pcm16Buffer);
     this._send({ type: "input_audio_buffer.append", audio: b64 });
     // Record only after the append is accepted for sending. This intentionally
@@ -681,6 +713,7 @@ export class S2sWsRealtimeClient extends EventTarget {
         // ordered, so this hidden item and response.create are handled only
         // after the session.update sent immediately above.
         this._sendStartupGreeting();
+        this._scheduleIdlePrompt();
         if (this._status === "connecting") this._setStatus("connected");
         break;
 
@@ -690,6 +723,7 @@ export class S2sWsRealtimeClient extends EventTarget {
         break;
 
       case "input_audio_buffer.speech_started":
+        this._cancelIdlePrompt();
         // User started speaking — stop any audio still playing OR queued, every
         // time. We clear unconditionally (not just when `_aiSpeaking`): after a
         // reply or a tool result the worklet's ring buffer can still be draining
@@ -731,6 +765,8 @@ export class S2sWsRealtimeClient extends EventTarget {
         // our explicit create; automatic responses carry no such marker.
         this._waitingForResponseAfterCollision = false;
         this._activeResponseId = event.response?.id ?? "";
+        // A new response owns a fresh playout timeline. Do not discard an
+        // existing tail until it has elapsed; queued responses may be adjacent.
         if (event.response?.metadata?.[RESPONSE_CREATE_ID_METADATA_KEY] === this._pendingCreateId) {
           this._pendingCreateId = "";
           this._pendingCreateSawResponse = false;
@@ -750,6 +786,8 @@ export class S2sWsRealtimeClient extends EventTarget {
 
       case "response.audio.delta":
       case "response.output_audio.delta": {
+        this._manualBargeInUntil = 0;
+        this._cancelIdlePrompt();
         const rid = event.response_id ?? event.response?.id;
         if (rid) this._audibleResponses.add(rid);
         if (!this._aiSpeaking) {
@@ -770,22 +808,20 @@ export class S2sWsRealtimeClient extends EventTarget {
       }
 
       case "response.done": {
-        this._aiSpeaking = false;
         // Completion and cancellation both arrive as response.done. Clear only
         // the matching owner: a late terminal for an older response must not
         // unlock a newer one.
         const responseId = event.response?.id ?? "";
         if (this._activeResponseId === responseId) this._activeResponseId = "";
         this._waitingForResponseAfterCollision = false;
-        if (this._status === "ai-speaking" || this._status === "processing") {
-          this._setStatus("connected");
-        }
         // A response closes here for BOTH normal completion and cancellation
         // (the s2s server signals a speculative-turn interrupt as
         // `response.done` with status "cancelled" — there is no separate
         // `response.cancelled` event). Surface the id + status so the UI can
         // drop a cancelled response's transcript and commit a completed one.
         const status = event.response?.status ?? "completed";
+        if (status === "cancelled") this._assistantPlayoutUntil = 0;
+        this._schedulePlayoutSettled(status);
         // Did this response ever play audio? Distinguishes a barge-in cut (the
         // user heard part of it) from a speculative response that never played.
         const audible = responseId ? this._audibleResponses.has(responseId) : false;
@@ -956,9 +992,14 @@ export class S2sWsRealtimeClient extends EventTarget {
   /** @param {string} b64 */
   _pushAudioDelta(b64) {
     if (!this._playbackNode) return;
-    if (window.AVATAR_MUTE_TTS) return;
     if (!b64) return;
     const bytes = base64ToBytes(b64);
+    const chunkMs = (bytes.byteLength / 2 / OUTPUT_SAMPLE_RATE) * 1000;
+    const now = performance.now();
+    const earliestAudibleStart = now + ASSISTANT_PLAYOUT_LEAD_MS;
+    this._assistantPlayoutUntil =
+      Math.max(this._assistantPlayoutUntil, earliestAudibleStart) + chunkMs;
+    if (window.AVATAR_MUTE_TTS) return;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const samples = new Float32Array(bytes.byteLength / 2);
     for (let i = 0; i < samples.length; i++) {
@@ -970,6 +1011,7 @@ export class S2sWsRealtimeClient extends EventTarget {
 
   /** @param {CloseEvent} ev */
   _onWsClose(ev) {
+    this._cancelIdlePrompt();
     if (ev.code !== 1000) {
       console.warn("[ws] socket closed:", ev.code, ev.reason);
     }
@@ -1090,6 +1132,40 @@ export class S2sWsRealtimeClient extends EventTarget {
     if (this._debug) console.debug("[ws] startup greeting queued");
   }
 
+  /** Cancel the current quiet-period countdown. */
+  _cancelIdlePrompt() {
+    if (this._idlePromptTimer) {
+      clearTimeout(this._idlePromptTimer);
+      this._idlePromptTimer = 0;
+    }
+  }
+
+  /** Arm a randomized quiet-period countdown. Only the active caller owns a
+   * realtime socket, so spectators can never accidentally trigger a turn. */
+  _scheduleIdlePrompt() {
+    this._cancelIdlePrompt();
+    if (!this._idlePrompt || this._closed || !this._ws || this._ws.readyState !== WebSocket.OPEN) return;
+    const span = Math.max(0, this._idlePromptMaxMs - this._idlePromptMinMs);
+    const delay = this._idlePromptMinMs + Math.random() * span;
+    this._idlePromptTimer = setTimeout(() => {
+      this._idlePromptTimer = 0;
+      if (this._closed || this._status === "user-speaking" || this._responsePending()) {
+        this._scheduleIdlePrompt();
+        return;
+      }
+      this._send({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: this._idlePrompt }],
+        },
+      });
+      this.requestResponse();
+      if (this._debug) console.debug("[ws] proactive idle prompt queued");
+    }, delay);
+  }
+
   /**
    * Ask the model to generate a response now (after feeding tool results).
    * Serialized: if a response is already in flight we queue this request and
@@ -1155,6 +1231,48 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._muted = muted;
   }
 
+  /** Enable/disable natural voice barge-in without reconnecting. */
+  setBargeInEnabled(enabled) {
+    this._bargeInEnabled = enabled === true;
+    if (this._bargeInEnabled) this._schedulePlayoutSettled("completed");
+  }
+
+  /** Explicit user gesture: stop this reply and temporarily bypass the
+   * completeness guard so the caller's next utterance reaches VAD. */
+  manualInterrupt() {
+    this._assistantPlayoutUntil = 0;
+    this._manualBargeInUntil = performance.now() + 15000;
+    this._playbackNode?.port.postMessage({ kind: "clear" });
+    this._send({ type: "response.cancel" });
+    this._schedulePlayoutSettled("cancelled");
+  }
+
+  /** Keep the UI and idle timer in "assistant speaking" until muxed FLV audio
+   * has drained. Response.done means generation ended, not audible playback. */
+  _schedulePlayoutSettled(status) {
+    if (this._assistantPlayoutTimer) {
+      clearTimeout(this._assistantPlayoutTimer);
+      this._assistantPlayoutTimer = 0;
+    }
+    const remaining =
+      status === "completed" && !this._bargeInEnabled
+        ? Math.max(0, this._assistantPlayoutUntil + ASSISTANT_PLAYOUT_TAIL_MS - performance.now())
+        : 0;
+    const settle = () => {
+      this._assistantPlayoutTimer = 0;
+      this._aiSpeaking = false;
+      if (this._status === "ai-speaking" || this._status === "processing") {
+        this._setStatus("connected");
+      }
+      this._scheduleIdlePrompt();
+    };
+    if (remaining > 0) {
+      this._assistantPlayoutTimer = setTimeout(settle, remaining);
+    } else {
+      settle();
+    }
+  }
+
   /**
    * Update the mic noise gate live (the user moved the Settings cursor).
    * @param {NoiseGate} gate
@@ -1174,6 +1292,11 @@ export class S2sWsRealtimeClient extends EventTarget {
     // Abort a queue wait in progress: flag it and wake the poll sleep so
     // `_pollQueue` throws "aborted" and connect() unwinds cleanly.
     this._closed = true;
+    this._cancelIdlePrompt();
+    if (this._assistantPlayoutTimer) {
+      clearTimeout(this._assistantPlayoutTimer);
+      this._assistantPlayoutTimer = 0;
+    }
     this._userAudioRecorder.reset();
     if (this._queueWake) {
       clearTimeout(this._queueTimer);

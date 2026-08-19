@@ -44,7 +44,7 @@
   }
 
   let avatarView = loadAvatarView();
-  window.AVATAR_MUTE_TTS = false;
+  window.AVATAR_MUTE_TTS = true;
   const gw = () => CFG.gatewayBase.replace(/\/+$/, '');
 
   const maskGradient = `linear-gradient(90deg, rgba(0,0,0,0) 0%,
@@ -91,7 +91,10 @@
     #av-layer.av-no-mask #av-live-video {
       -webkit-mask-image:none; mask-image:none;
     }
-    body > *:not(#av-layer) { position:relative; z-index:1; }
+    /* Keep the app above the video without rewriting every body child's
+       positioning. The old broad selector changed fixed overlays (notably the
+       room chat) to position:relative and pushed them below the clipped page. */
+    #app { position:relative; z-index:1; }
     #av-status {
       position:fixed; left:max(14px, env(safe-area-inset-left));
       top:max(16px, env(safe-area-inset-top)); bottom:auto; z-index:9999;
@@ -105,11 +108,20 @@
 
   let layer, idle, liveVideo, statusEl;
   let flvPlayer = null;
+  let audioUnlocked = false;
   let connecting = false;
   let retryHandle = null;
   let watchdogHandle = null;
   let lastProgressAt = 0;
   let lastMediaTime = -1;
+
+  function syncAudioRoute() {
+    if (liveVideo) liveVideo.muted = !audioUnlocked;
+    // Audio and video must share the FLV muxer's timestamp. Never play the
+    // lower-latency WebSocket copy in parallel: it leads the rendered mouth
+    // and creates an audible echo once the FLV audio catches up.
+    window.AVATAR_MUTE_TTS = true;
+  }
 
   function setStatus(s) {
     if (!statusEl) return;
@@ -219,7 +231,7 @@
   function scheduleReconnect(delayMs = 1200) {
     if (retryHandle || document.hidden) return;
     setStatus('重连中');
-    window.AVATAR_MUTE_TTS = false;
+    syncAudioRoute();
     layer?.classList.remove('live');
     retryHandle = setTimeout(() => {
       retryHandle = null;
@@ -267,17 +279,37 @@
         isLive: true,
         url: `${gw()}/livestream.flv?t=${Date.now()}`,
       }, {
-        enableStashBuffer: false,
-        stashInitialSize: 16 * 1024,
+        // A small bounded stash is smoother on real-world mobile/public
+        // networks than zero-buffer chasing. Audio and video stay muxed, so
+        // the added latency never changes lip-sync.
+        enableStashBuffer: true,
+        stashInitialSize: 128 * 1024,
         liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 1.6,
-        liveBufferLatencyMinRemain: 0.4,
+        liveBufferLatencyMaxLatency: 2.4,
+        liveBufferLatencyMinRemain: 0.8,
         lazyLoad: false,
         autoCleanupSourceBuffer: true,
+        autoCleanupMaxBackwardDuration: 4,
+        autoCleanupMinBackwardDuration: 2,
       });
       flvPlayer = player;
+      // Always establish playback muted first so reconnects remain eligible
+      // for autoplay even when they happen outside a user gesture. We restore
+      // audio immediately below when this page has already been unlocked.
+      liveVideo.muted = true;
       player.attachMediaElement(liveVideo);
       player.load();
+      const statsEvent = mpegts.Events?.STATISTICS_INFO;
+      if (statsEvent) {
+        player.on(statsEvent, (info) => {
+          window.AVATAR_STREAM_STATS = {
+            speed: Number(info?.speed || 0),
+            decodedFrames: Number(info?.decodedFrames || 0),
+            droppedFrames: Number(info?.droppedFrames || 0),
+            at: Date.now(),
+          };
+        });
+      }
       lastMediaTime = -1;
       lastProgressAt = Date.now();
       await Promise.race([
@@ -286,12 +318,12 @@
         new Promise((_, reject) => setTimeout(() => reject(new Error('直播首帧超时')), 8000)),
       ]);
       layer.classList.add('live');
-      window.AVATAR_MUTE_TTS = true;
+      syncAudioRoute();
       setStatus('AVTR-1 HTTP-FLV');
       startWatchdog();
     } catch (err) {
       destroyPlayer();
-      window.AVATAR_MUTE_TTS = false;
+      syncAudioRoute();
       layer.classList.remove('live');
       setStatus('连接失败: ' + (err?.message || err));
       scheduleReconnect(3000);
@@ -392,6 +424,10 @@
     liveVideo = document.createElement('video');
     liveVideo.id = 'av-live-video';
     liveVideo.autoplay = true;
+    // Muted autoplay gets the picture moving immediately. The first user
+    // gesture unlocks the muxed FLV audio for the rest of the page lifetime.
+    liveVideo.muted = true;
+    liveVideo.preload = 'auto';
     liveVideo.playsInline = true;
     liveVideo.setAttribute('playsinline', '');
     layer.appendChild(liveVideo);
@@ -409,8 +445,10 @@
     }
     setStatus('idle');
     document.addEventListener('pointerdown', () => {
+      audioUnlocked = true;
+      syncAudioRoute();
       liveVideo?.play().then(() => {
-        if (flvPlayer) window.AVATAR_MUTE_TTS = true;
+        syncAudioRoute();
       }).catch(() => {});
     }, { once: true, capture: true });
   }
@@ -423,7 +461,7 @@
     connecting = false;
     destroyPlayer();
     layer?.classList.remove('live');
-    window.AVATAR_MUTE_TTS = false;
+    syncAudioRoute();
     void connect();
   }
 
@@ -433,6 +471,11 @@
       const avatarId = event.detail?.avatarId || currentAvatarId();
       setStill(avatarId);
       markLookPressed(avatarId);
+      reconnectLive();
+    });
+    window.addEventListener('avatar-manual-interrupt', () => {
+      // Recreate MSE playback to discard audio already buffered in the browser;
+      // the server endpoint has simultaneously cleared the renderer queue.
       reconnectLive();
     });
     void connect();

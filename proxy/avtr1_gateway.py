@@ -20,6 +20,11 @@ PORT = int(os.environ.get("AVATAR_GW_PORT", "18011"))
 AVATAR_ID = os.environ.get("AVTR1_AVATAR_ID", "xiaoya")
 BG_ID = os.environ.get("AVTR1_BG_ID", "plain_white")
 H264_BITRATE = int(os.environ.get("AVTR1_H264_BITRATE", "1800000"))
+CFG_SELF_AUDIO = float(os.environ.get("AVTR1_CFG_SELF_AUDIO", "2.3"))
+CFG_OTHER_AUDIO = float(os.environ.get("AVTR1_CFG_OTHER_AUDIO", "2.0"))
+CFG_KP = float(os.environ.get("AVTR1_CFG_KP", "3.0"))
+NOISE_ALPHA = float(os.environ.get("AVTR1_NOISE_ALPHA", "1.5"))
+NOISE_TRUNC_Z = float(os.environ.get("AVTR1_NOISE_TRUNC_Z", "1.0"))
 
 SAMPLE_RATE = 16_000
 CHUNK_SIZE = 5
@@ -29,17 +34,18 @@ CURRENT_SAMPLES = CHUNK_SIZE * FRAME_LEN
 FUTURE_SAMPLES = CHUNK_SIZE * FRAME_LEN + AUDIO_SHIFT
 WINDOW_SAMPLES = CURRENT_SAMPLES + FUTURE_SAMPLES
 PCM_PACKET_BYTES = 640
-MAX_SPEECH_BYTES = SAMPLE_RATE * 2 * 4
+MAX_SPEECH_BYTES = SAMPLE_RATE * 2 * 30
 
 last_frame_at = 0.0
 connected = False
 state_blob: bytes | None = None
 state_avatar_id: str | None = None
 speech_pcm = bytearray()
+listen_pcm = bytearray()
 buf_lock = asyncio.Lock()
 flv_subscribers: set[asyncio.Queue] = set()
 video_pace_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
-audio_pace_queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+audio_pace_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 h264_encoder: H264Encoder | None = None
 h264_bytes = 0
 renderer_session: aiohttp.ClientSession | None = None
@@ -301,16 +307,30 @@ def _window_from_speech(buf: bytearray) -> tuple[bytes, bytes, bytes]:
     return cur, fut, cur
 
 
+def _window_from_listen(buf: bytearray) -> tuple[bytes, bytes]:
+    """Return a look-ahead listener window without consuming partial audio.
+
+    AVTR-1 needs about 405ms of current+future context. Holding the first
+    partial window avoids alternating real microphone audio and padded silence,
+    which otherwise makes the listening motion visibly twitch.
+    """
+    need = WINDOW_SAMPLES * 2
+    if len(buf) < need:
+        return bytes(CURRENT_SAMPLES * 2), bytes(FUTURE_SAMPLES * 2)
+    window = bytes(buf[:need])
+    del buf[: CURRENT_SAMPLES * 2]
+    return window[: CURRENT_SAMPLES * 2], window[CURRENT_SAMPLES * 2 :]
+
+
 async def render_loop() -> None:
     global last_frame_at, connected, state_blob, state_avatar_id, h264_encoder, h264_bytes, renderer_session
     loop = asyncio.get_running_loop()
-    silence_listen_cur = bytes(CURRENT_SAMPLES * 2)
-    silence_listen_fut = bytes(FUTURE_SAMPLES * 2)
     while True:
         t0 = loop.time()
         try:
             async with buf_lock:
                 cur, fut, played = _window_from_speech(speech_pcm)
+                listen_cur, listen_fut = _window_from_listen(listen_pcm)
                 avatar_id = AVATAR_ID
                 blob = state_blob if state_avatar_id == avatar_id else None
             form = aiohttp.FormData()
@@ -318,13 +338,13 @@ async def render_loop() -> None:
             form.add_field("future_chunk", fut, filename="fut.raw", content_type="application/octet-stream")
             form.add_field(
                 "current_chunk_listen",
-                silence_listen_cur,
+                listen_cur,
                 filename="curl.raw",
                 content_type="application/octet-stream",
             )
             form.add_field(
                 "future_chunk_listen",
-                silence_listen_fut,
+                listen_fut,
                 filename="futl.raw",
                 content_type="application/octet-stream",
             )
@@ -334,6 +354,11 @@ async def render_loop() -> None:
                 "avatar_id": avatar_id,
                 "bg_id": BG_ID,
                 "pixel_format": "yuv_i420",
+                "cfg_self_audio": str(CFG_SELF_AUDIO),
+                "cfg_other_audio": str(CFG_OTHER_AUDIO),
+                "cfg_kp": str(CFG_KP),
+                "noise_alpha": str(NOISE_ALPHA),
+                "noise_trunc_z": str(NOISE_TRUNC_Z),
             }
             if renderer_session is None:
                 raise RuntimeError("renderer HTTP session is not initialized")
@@ -399,6 +424,16 @@ async def append_speech(pcm: bytes) -> None:
             del speech_pcm[: overflow - (overflow % 2)]
 
 
+async def append_listen(pcm: bytes) -> None:
+    if not pcm:
+        return
+    async with buf_lock:
+        listen_pcm.extend(pcm)
+        overflow = len(listen_pcm) - MAX_SPEECH_BYTES
+        if overflow > 0:
+            del listen_pcm[: overflow - (overflow % 2)]
+
+
 AVATAR_LABELS = {
     "xiaoya": "小雅",
     "xiaoya_beach_close": "海边近景",
@@ -438,6 +473,7 @@ async def handle_status(_request):
             "avatar_id": AVATAR_ID,
             "age_ms": int((time.time() - last_frame_at) * 1000) if last_frame_at else None,
             "speech_ms": int(len(speech_pcm) / 2 / SAMPLE_RATE * 1000),
+            "listen_ms": int(len(listen_pcm) / 2 / SAMPLE_RATE * 1000),
             "flv_clients": len(flv_subscribers),
             "h264_bitrate": H264_BITRATE,
             "h264_bytes": h264_bytes,
@@ -475,6 +511,7 @@ async def handle_set_avatar(request):
     async with buf_lock:
         AVATAR_ID = avatar_id
         speech_pcm.clear()
+        listen_pcm.clear()
         state_blob = None
         state_avatar_id = None
         h264_encoder = None
@@ -545,6 +582,18 @@ async def handle_audio_chunk(request):
     return web.json_response({"ok": True, "bytes": len(raw)})
 
 
+async def handle_listen_chunk(request):
+    raw = await request.read()
+    await append_listen(raw)
+    return web.json_response({"ok": True, "bytes": len(raw)})
+
+
+async def handle_listen_reset(_request):
+    async with buf_lock:
+        listen_pcm.clear()
+    return web.json_response({"ok": True})
+
+
 async def handle_interrupt(_request):
     global state_blob
     async with buf_lock:
@@ -585,6 +634,8 @@ def main():
     app.router.add_get("/livestream.flv", handle_livestream)
     app.router.add_post("/audio", handle_audio)
     app.router.add_post("/audio-chunk", handle_audio_chunk)
+    app.router.add_post("/listen-chunk", handle_listen_chunk)
+    app.router.add_post("/listen-reset", handle_listen_reset)
     app.router.add_post("/interrupt", handle_interrupt)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
