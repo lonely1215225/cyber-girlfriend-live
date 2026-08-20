@@ -572,6 +572,7 @@ async def append_listen(pcm: bytes) -> None:
 
 AVATAR_LABELS = {
     "xiaoya": "小雅",
+    "xiaoya_idle": "暖光正脸",
     "xiaoya_beach_close": "海边近景",
     "xiaoya_beach": "海边",
     "xiaoya_locket": "白背心",
@@ -596,7 +597,13 @@ async def _list_avatar_ids() -> tuple[list[str], list[str]]:
             pass
     if not ids:
         ids = [AVATAR_ID]
-    preferred = ["xiaoya", "xiaoya_beach_close", "xiaoya_beach", "xiaoya_locket"]
+    preferred = [
+        "xiaoya",
+        "xiaoya_idle",
+        "xiaoya_beach_close",
+        "xiaoya_beach",
+        "xiaoya_locket",
+    ]
     ordered = [item for item in preferred if item in ids]
     return ordered or [AVATAR_ID], loaded
 

@@ -571,48 +571,64 @@ adminUnlockForm.addEventListener("submit", async (event) => {
 async function refreshAvatarPicker() {
   const root = document.getElementById("avatar-picker");
   if (!root) return;
+  const fallbackAvatars = [
+    { id: "xiaoya", label: "小雅" },
+    { id: "xiaoya_idle", label: "暖光正脸" },
+    { id: "xiaoya_beach_close", label: "海边近景" },
+    { id: "xiaoya_beach", label: "海边" },
+    { id: "xiaoya_locket", label: "白背心" },
+  ];
+  let avatars = fallbackAvatars;
+  let activeAvatar = "xiaoya";
   try {
     const response = await fetch("/av/avatars", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    const avatars = Array.isArray(data.avatars) ? data.avatars : [];
-    const selected = localStorage.getItem(STORAGE_KEYS.avatarId) || data.avatar_id || "xiaoya";
-    root.replaceChildren();
-    for (const item of avatars) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "avatar-pick";
-      button.dataset.id = item.id;
-      button.setAttribute("aria-pressed", item.id === selected ? "true" : "false");
-      button.innerHTML = `<img src="${item.preview}" alt="${item.label}"><span>${item.label}</span>`;
-      button.addEventListener("click", () => {
-        void selectAvatar(item.id);
-      });
-      root.appendChild(button);
-    }
+    if (Array.isArray(data.avatars) && data.avatars.length) avatars = data.avatars;
+    activeAvatar = data.avatar_id || activeAvatar;
   } catch (err) {
     console.warn("[main] avatar list failed:", err);
+  }
+  const saved = localStorage.getItem(STORAGE_KEYS.avatarId);
+  const selected = avatars.some((item) => item.id === saved) ? saved : activeAvatar;
+  root.replaceChildren();
+  for (const item of avatars) {
+    const button = document.createElement("button");
+    const image = document.createElement("img");
+    const label = document.createElement("span");
+    button.type = "button";
+    button.className = "avatar-pick";
+    button.dataset.id = item.id;
+    button.setAttribute("aria-pressed", item.id === selected ? "true" : "false");
+    image.src = item.preview || `/avatar/avatars/${encodeURIComponent(item.id)}.jpg`;
+    image.alt = item.label;
+    label.textContent = item.label;
+    button.append(image, label);
+    button.addEventListener("click", () => void selectAvatar(item.id));
+    root.appendChild(button);
   }
 }
 
 async function selectAvatar(avatarId) {
   const root = document.getElementById("avatar-picker");
-  if (root) {
-    for (const button of root.querySelectorAll(".avatar-pick")) {
-      button.setAttribute("aria-pressed", button.dataset.id === avatarId ? "true" : "false");
-    }
-  }
   try {
-    const response = await fetch("/av/avatar", {
+    const response = await fetch("/api/admin/avatar", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ avatar_id: avatarId }),
     });
     const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (!response.ok || !data.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
     localStorage.setItem(STORAGE_KEYS.avatarId, avatarId);
+    if (root) {
+      for (const button of root.querySelectorAll(".avatar-pick")) {
+        button.setAttribute("aria-pressed", button.dataset.id === avatarId ? "true" : "false");
+      }
+    }
     window.dispatchEvent(new CustomEvent("avtr1-avatar-changed", { detail: { avatarId } }));
   } catch (err) {
     console.warn("[main] avatar switch failed:", err);
+    window.alert(err instanceof Error ? err.message : "形象切换失败");
   }
 }
 

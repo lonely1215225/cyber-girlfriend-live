@@ -353,24 +353,24 @@
   }
 
   async function switchAvatar(avatarId) {
-    setStill(avatarId);
     try {
-      localStorage.setItem(AVATAR_STORAGE_KEY, avatarId);
-    } catch (_) { /* ignore */ }
-    markLookPressed(avatarId);
-    layer?.classList.remove('live');
-    try {
-      const response = await fetch(gw() + '/avatar', {
+      const response = await fetch('/api/admin/avatar', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ avatar_id: avatarId }),
       });
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(data.error || 'switch failed');
+      if (!response.ok || !data.ok) throw new Error(data.detail || data.error || 'switch failed');
+      setStill(avatarId);
+      try {
+        localStorage.setItem(AVATAR_STORAGE_KEY, avatarId);
+      } catch (_) { /* ignore */ }
+      markLookPressed(avatarId);
+      layer?.classList.remove('live');
+      reconnectLive();
     } catch (err) {
       console.warn('[avatar] switch failed:', err);
     }
-    reconnectLive();
   }
 
   function markLookPressed(avatarId) {
@@ -382,6 +382,7 @@
   async function buildLooks() {
     let avatars = [
       { id: 'xiaoya', label: '小雅' },
+      { id: 'xiaoya_idle', label: '暖光正脸' },
       { id: 'xiaoya_beach_close', label: '海边近景' },
       { id: 'xiaoya_beach', label: '海边' },
       { id: 'xiaoya_locket', label: '白背心' },

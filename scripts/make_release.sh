@@ -55,6 +55,7 @@ need=(
   scripts/log_guard.sh
   assets/idle.mp4
   assets/looks/xiaoya.png
+  assets/looks/xiaoya_idle.png
   assets/looks/xiaoya_locket.png
   proxy/nginx.conf.tpl
   proxy/avtr1_gateway.py

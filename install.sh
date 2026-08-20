@@ -132,7 +132,7 @@ done
 HF_HOME="$AVTR1_HF_HOME" "$AVTR1_PY" "$AVTR1/scripts/download_artifacts.py"
 
 say "[6/7] 写入默认形象并编译 TensorRT（首次较久）"
-LOOKS=(xiaoya xiaoya_beach_close xiaoya_beach xiaoya_locket)
+LOOKS=(xiaoya xiaoya_idle xiaoya_beach_close xiaoya_beach xiaoya_locket)
 FRAMES="$AVTR1/artifacts/main/avatars_artifacts/reference_frames"
 BGS="$AVTR1/artifacts/main/avatars_artifacts/backgrounds"
 mkdir -p "$FRAMES" "$BGS" "$AVTR1/artifacts/main/renderer_runtime_artifacts"

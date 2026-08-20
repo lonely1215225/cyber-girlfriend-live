@@ -228,6 +228,17 @@ export AVTR1_NOISE_TRUNC_Z="${AVTR1_NOISE_TRUNC_Z:-1.0}"
 export AVTR1_URL="http://127.0.0.1:${AVTR1_PORT:-18012}"
 export AVTR1_LOCAL_TEE_URL="http://127.0.0.1:${AVATAR_GW_PORT:-18011}"
 export LOAD_BALANCER_URL=disabled
+# Keep bundled portraits in the renderer artifact directory on every start.
+# This makes newly shipped looks available without rerunning the heavyweight
+# installer or rebuilding TensorRT engines; AVTR-1 loads non-default looks on
+# first selection.
+AVTR1_FRAMES="$AVTR1_ROOT/artifacts/main/avatars_artifacts/reference_frames"
+mkdir -p "$AVTR1_FRAMES"
+for avatar_id in xiaoya xiaoya_idle xiaoya_beach_close xiaoya_beach xiaoya_locket; do
+  avatar_source="$ROOT/assets/looks/${avatar_id}.png"
+  [[ -f "$avatar_source" ]] || die "missing avatar portrait $avatar_source"
+  cp -f "$avatar_source" "$AVTR1_FRAMES/${avatar_id}.png"
+done
 if alive "$RUN/avtr1_renderer.pid"; then
   say "avtr1 renderer already running (pid $(cat "$RUN/avtr1_renderer.pid"))"
 else

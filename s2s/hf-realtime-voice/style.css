@@ -3353,10 +3353,10 @@ body[data-room-status="calling"] .room-my-status {
 .room-name-dialog .modal-content { width: min(420px, calc(100vw - 28px)); }
 .room-name-error { min-height: 18px; margin: 0; color: var(--error); font-size: 12px; }
 
-/* Avatar selection is a host-level control in a shared room. A viewer must not
- * change the live appearance for everybody else. */
-#av-looks,
-.avatar-tune {
+/* Keep the public quick-switch strip hidden because changing the shared avatar
+ * is a host-level action. The picker remains visible inside the password-
+ * protected Settings dialog. */
+#av-looks {
   display: none !important;
 }
 

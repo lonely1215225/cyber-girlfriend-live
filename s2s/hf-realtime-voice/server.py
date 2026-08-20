@@ -233,6 +233,10 @@ class AdminUnlockRequest(BaseModel):
     password: str
 
 
+class AdminAvatarRequest(BaseModel):
+    avatar_id: str
+
+
 class McpCallRequest(BaseModel):
     name: str
     arguments: dict
@@ -409,6 +413,37 @@ async def admin_lock():
     response = JSONResponse({"unlocked": False})
     response.delete_cookie(ADMIN_COOKIE, path="/")
     return response
+
+
+@app.post("/api/admin/avatar")
+async def admin_set_avatar(body: AdminAvatarRequest, request: Request):
+    """Switch the shared avatar through the password-protected web backend.
+
+    Nginx intentionally blocks direct public writes to ``/av/avatar``.  The
+    settings page therefore uses this authenticated same-origin route, which
+    forwards only a validated avatar id to the local gateway.
+    """
+    if not _admin_unlocked(request):
+        raise HTTPException(status_code=401, detail="管理设置已锁定，请重新验证")
+    avatar_id = body.avatar_id.strip()
+    if not avatar_id or "/" in avatar_id or ".." in avatar_id:
+        raise HTTPException(status_code=400, detail="无效的数字人形象")
+    if not AVATAR_LISTEN_URL:
+        raise HTTPException(status_code=503, detail="数字人网关未配置")
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                f"{AVATAR_LISTEN_URL}/avatar",
+                json={"avatar_id": avatar_id},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("admin avatar switch failed: %s", exc)
+        raise HTTPException(status_code=502, detail="数字人网关暂时不可用") from exc
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400 or not payload.get("ok"):
+        detail = payload.get("error") or f"数字人网关返回 HTTP {response.status_code}"
+        raise HTTPException(status_code=502, detail=detail)
+    return payload
 
 
 @app.get("/api/me")
