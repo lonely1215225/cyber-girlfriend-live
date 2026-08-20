@@ -19,6 +19,7 @@
 
   const CFG = Object.assign({}, DEFAULTS, window.AVATAR_CONFIG || {});
   const VIEW_STORAGE_KEY = 'avtr1.avatarView.v1';
+  const MUSIC_STORAGE_KEY = 'avtr1.backgroundMusic.v1';
   const VIEW_DEFAULTS = {
     size: 100,
     position: Math.round(-parseFloat(CFG.rightOffset || '-4')),
@@ -44,6 +45,7 @@
   }
 
   let avatarView = loadAvatarView();
+  let musicEnabled = localStorage.getItem(MUSIC_STORAGE_KEY) !== '0';
   window.AVATAR_MUTE_TTS = true;
   const gw = () => CFG.gatewayBase.replace(/\/+$/, '');
 
@@ -277,7 +279,7 @@
       const player = mpegts.createPlayer({
         type: 'flv',
         isLive: true,
-        url: `${gw()}/livestream.flv?t=${Date.now()}`,
+        url: `${gw()}/livestream.flv?music=${musicEnabled ? '1' : '0'}&t=${Date.now()}`,
       }, {
         // A small bounded stash is smoother on real-world mobile/public
         // networks than zero-buffer chasing. Audio and video stay muxed, so
@@ -444,6 +446,7 @@
       document.body.appendChild(statusEl);
     }
     setStatus('idle');
+    bindMusicToggle();
     document.addEventListener('pointerdown', () => {
       audioUnlocked = true;
       syncAudioRoute();
@@ -451,6 +454,26 @@
         syncAudioRoute();
       }).catch(() => {});
     }, { once: true, capture: true });
+  }
+
+  function bindMusicToggle() {
+    const button = document.getElementById('background-music-toggle');
+    if (!button) return;
+    const render = () => {
+      button.setAttribute('aria-pressed', musicEnabled ? 'true' : 'false');
+      button.setAttribute('aria-label', musicEnabled ? '关闭背景音乐' : '开启背景音乐');
+      button.title = musicEnabled ? '关闭我的背景音乐' : '开启我的背景音乐';
+      button.classList.toggle('is-muted', !musicEnabled);
+    };
+    render();
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      musicEnabled = !musicEnabled;
+      try { localStorage.setItem(MUSIC_STORAGE_KEY, musicEnabled ? '1' : '0'); } catch (_) { /* ignore */ }
+      render();
+      reconnectLive();
+    });
   }
 
   function reconnectLive() {

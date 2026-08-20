@@ -55,6 +55,8 @@
  *   to greet once after the initial session configuration is sent.
  * @property {string} [idlePrompt] Hidden prompt used to start a fresh topic
  *   after both sides have been quiet for a configured interval.
+ * @property {string} [idleTopicUrl] Same-origin endpoint that returns a fresh
+ *   `{ prompt }` for each idle turn. Falls back to `idlePrompt` on failure.
  * @property {number} [idlePromptMinSeconds]
  * @property {number} [idlePromptMaxSeconds]
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
@@ -232,6 +234,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._startupGreeting = options.startupGreeting?.trim() ?? "";
     this._startupGreetingSent = false;
     this._idlePrompt = options.idlePrompt?.trim() ?? "";
+    this._idleTopicUrl = options.idleTopicUrl?.trim() ?? "";
     this._idlePromptMinMs = Math.max(15, options.idlePromptMinSeconds ?? 35) * 1000;
     this._idlePromptMaxMs = Math.max(
       this._idlePromptMinMs,
@@ -1144,12 +1147,33 @@ export class S2sWsRealtimeClient extends EventTarget {
    * realtime socket, so spectators can never accidentally trigger a turn. */
   _scheduleIdlePrompt() {
     this._cancelIdlePrompt();
-    if (!this._idlePrompt || this._closed || !this._ws || this._ws.readyState !== WebSocket.OPEN) return;
+    if ((!this._idlePrompt && !this._idleTopicUrl) || this._closed || !this._ws || this._ws.readyState !== WebSocket.OPEN) return;
     const span = Math.max(0, this._idlePromptMaxMs - this._idlePromptMinMs);
     const delay = this._idlePromptMinMs + Math.random() * span;
-    this._idlePromptTimer = setTimeout(() => {
+    this._idlePromptTimer = setTimeout(async () => {
       this._idlePromptTimer = 0;
       if (this._closed || this._status === "user-speaking" || this._responsePending()) {
+        this._scheduleIdlePrompt();
+        return;
+      }
+      let prompt = this._idlePrompt;
+      if (this._idleTopicUrl) {
+        try {
+          const response = await fetch(this._idleTopicUrl, {
+            method: "POST",
+            headers: { "Accept": "application/json" },
+            credentials: "same-origin",
+          });
+          const data = await response.json().catch(() => ({}));
+          if (response.ok && typeof data.prompt === "string" && data.prompt.trim()) {
+            prompt = data.prompt.trim();
+          }
+        } catch (error) {
+          if (this._debug) console.debug("[ws] idle topic fetch failed", error);
+        }
+      }
+      // The caller may have started speaking while the news request was in flight.
+      if (!prompt || this._closed || this._status === "user-speaking" || this._responsePending()) {
         this._scheduleIdlePrompt();
         return;
       }
@@ -1158,7 +1182,7 @@ export class S2sWsRealtimeClient extends EventTarget {
         item: {
           type: "message",
           role: "user",
-          content: [{ type: "input_text", text: this._idlePrompt }],
+          content: [{ type: "input_text", text: prompt }],
         },
       });
       this.requestResponse();

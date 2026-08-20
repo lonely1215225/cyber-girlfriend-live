@@ -22,6 +22,8 @@ DEFAULT_TOOL_ALLOWLIST = {
     "exa:web_search_exa",
     "exa:web_fetch_exa",
     "gdelt:gdelt_search_articles",
+    "tavily:tavily-search",
+    "tavily:tavily-extract",
 }
 _configured_allowlist = os.environ.get("MCP_TOOL_ALLOWLIST", "").strip()
 TOOL_ALLOWLIST = (
@@ -177,6 +179,9 @@ class McpGateway:
                     os.environ.get("MCP_GDELT_URL", "https://gdelt.caseyjhand.com/mcp").strip(),
                 ),
             ]
+            tavily_url = os.environ.get("MCP_TAVILY_URL", "").strip()
+            if tavily_url:
+                configs.append(McpServerConfig("tavily", "Tavily", tavily_url))
         self.clients = {config.key: McpHttpClient(config) for config in configs if config.url}
         self._tools: list[dict[str, Any]] = []
         self._mapping: dict[str, tuple[McpHttpClient, str]] = {}

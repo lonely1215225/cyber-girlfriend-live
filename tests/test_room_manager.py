@@ -46,10 +46,13 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(session_id, first["session_id"])
         self.assertEqual(caller_name, self.alice.display_name)
+        self.assertTrue(await self.room.is_active_caller(self.alice.token))
+        self.assertFalse(await self.room.is_active_caller(self.bob.token))
         with self.assertRaises(RoomError):
             await self.room.claim_websocket(self.alice.token, first["session_token"])
 
         self.assertTrue(await self.room.end_session(self.alice.token, session_id))
+        self.assertFalse(await self.room.is_active_caller(self.alice.token))
         # Polling out of order cannot jump the first person in line.
         cara_waiting = await self.room.poll_queue(self.cara.token, third["queue_id"])
         self.assertEqual(cara_waiting["position"], 2)
@@ -170,6 +173,31 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(reply["speaker"], "小麻")
         self.assertEqual(reply["reply_to"]["id"], message["id"])
+
+        status = await self.room.publish_bot_reply(
+            message_id=message["id"],
+            text="正在查询相关新闻…",
+            reply_to=message,
+            partial=True,
+        )
+        self.assertTrue(status["partial"])
+        final = await self.room.publish_bot_reply(
+            message_id=message["id"],
+            text="这是查询后的最终回答",
+            reply_to=message,
+        )
+        self.assertFalse(final["partial"])
+        snapshot = await self.room.snapshot(self.alice.token)
+        matching = [item for item in snapshot["messages"] if item["id"] == final["id"]]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["text"], "这是查询后的最终回答")
+
+        proactive = await self.room.publish_bot_reply(
+            message_id="proactive:1",
+            text="刚看到一条很有意思的热点新闻。",
+            reply_to=None,
+        )
+        self.assertNotIn("reply_to", proactive)
 
 
 if __name__ == "__main__":

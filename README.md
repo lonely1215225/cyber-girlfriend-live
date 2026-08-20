@@ -32,7 +32,7 @@
 | MCP 工具 | 对话可调用 CoinGecko、Exa 与 GDELT，查询行情、网页内容和全球新闻 |
 | 双层记忆 | 热上下文保留近期原文，旧内容先本地结构化压缩，再于空闲期异步进行语义整理 |
 | 管理设置保护 | 右上角工具与设置需要密码解锁，带 HttpOnly 会话与失败频率限制 |
-| 本地 AI 栈 | Faster-Whisper、Ollama/Qwen、Qwen3-TTS 和 AVTR-1 全部运行在自己的 GPU 服务器上 |
+| 本地 AI 栈 | SenseVoice、Ollama/Qwen、Qwen3-TTS 和 AVTR-1 全部运行在自己的 GPU 服务器上 |
 
 ## 交互规则
 
@@ -59,7 +59,7 @@ flowchart LR
     N --> W[FastAPI 直播间服务]
     W --> R[房间、队列、评论与鉴权]
     R -->|仅当前连线者| S[Speech-to-Speech]
-    S --> STT[Faster-Whisper STT]
+    S --> STT[FunASR SenseVoice STT]
     STT --> L[Ollama + Qwen LLM]
     L <--> M[MCP Gateway]
     M --> C[CoinGecko]
@@ -73,13 +73,13 @@ flowchart LR
     N --> A
 ```
 
-音频不会在浏览器和数字人之间分别走两套播放器。TTS 音频进入 AVTR-1 后与视频一起封装为 HTTP-FLV，再广播给所有观众，因此声音与口型使用同一个时间轴。`AVATAR_TEE_PREROLL_MS` 提供首包预缓冲，降低网络或推理抖动造成的半句丢失。
+音频不会在浏览器和数字人之间分别走两套播放器。TTS 音频进入 AVTR-1 后与视频一起封装为 HTTP-FLV，因此声音与口型使用同一个时间轴。网关同时生成“语音原轨”和“语音加背景音乐”两种时间戳一致的直播变体；每位观众可用 LIVE 旁的喇叭独立选择，关闭音乐不会影响数字人语音，也不会改变其他观众。根目录下的 MP3 作为纯音乐播放列表循环混入音乐变体；检测到数字人或连线用户说话时自动平滑降低音乐音量，音乐本身不会进入口型模型。`AVATAR_TEE_PREROLL_MS` 提供首包预缓冲，降低网络或推理抖动造成的半句丢失。
 
 ## 技术栈
 
 - **Web / 房间服务：** FastAPI、Uvicorn、原生 JavaScript、SSE、WebSocket
 - **公网入口：** Nginx、HTTPS、自签名证书
-- **语音识别：** Faster-Whisper `large-v3` + Silero VAD
+- **语音识别：** FunASR `SenseVoiceSmall` + Silero VAD（中/英/粤/日/韩）
 - **大语言模型：** Ollama + `jaahas/qwen3.5-uncensored:9b`
 - **语音合成：** Qwen3-TTS 1.7B，支持参考音频音色克隆
 - **数字人渲染：** AVTR-1、TensorRT、H.264/AAC、HTTP-FLV
@@ -129,7 +129,7 @@ sudo -E ./install.sh
 
 1. 安装系统依赖、uv、Pixi 与 Ollama；
 2. 创建 Python 3.12 语音环境；
-3. 下载 Faster-Whisper、Silero VAD、Qwen3-TTS 和 AVTR-1 权重；
+3. 下载 SenseVoiceSmall、Silero VAD、Qwen3-TTS 和 AVTR-1 权重；
 4. 拉取默认 Qwen LLM；
 5. 为当前 GPU 编译 AVTR-1 TensorRT 引擎；
 6. 生成 `config.env` 与本地 HTTPS 证书。
@@ -190,40 +190,74 @@ sudo -E ./install.sh
 
 | 参数 | 默认值 | 说明 |
 | --- | ---: | --- |
-| `STT_MODEL` | `large-v3` | Faster-Whisper 模型 |
+| `STT_BACKEND` | `sensevoice` | 语音识别后端；可改为 `faster-whisper` 回退 |
+| `SENSEVOICE_MODEL` | `models/sensevoice/SenseVoiceSmall` | SenseVoiceSmall 本地模型目录 |
+| `FASTER_WHISPER_MODEL` | `large-v3` | 回退到 Faster-Whisper 时使用的模型 |
+| `SENSEVOICE_LANGUAGE` | `auto` | 自动识别中/英/粤/日/韩；纯中文场景可设为 `zh` |
+| `SENSEVOICE_USE_ITN` | `1` | 数字、日期等逆文本归一化 |
+| `SENSEVOICE_EMOTION_ENABLED` | `1` | 将开心、难过、愤怒等声学情绪作为私有线索交给 LLM；不会显示在公屏 |
 | `VAD_THRESH` | `0.6` | 语音活动检测阈值 |
 | `MIN_SPEECH_MS` | `192` | 最短有效语音时长 |
 | `MIN_SILENCE_MS` | `700` | 结束一句话所需静音时间 |
 | `REOPEN_MS` | `1200` | 短暂停顿后重新合并窗口 |
 | `QWEN3_TTS_CHUNK_SIZE` | `4` | TTS 流式分块大小 |
+| `TTS_EMOTION_ENABLED` | `1` | 根据用户声学情绪和回复语义选择温柔、平静、轻快或沉稳语气 |
+| `TTS_STYLE_INSTRUCT_ENABLED` | `1` | 向 Base 克隆模型发送逐句风格指令；关闭后仍保留文本停顿优化 |
+| `TTS_TEMPERATURE` | `0.75` | TTS 采样温度；越低越稳定，过低可能偏平 |
+| `TTS_TOP_K` | `40` | TTS Top-K 采样范围 |
+| `TTS_TOP_P` | `0.90` | TTS 核采样范围 |
+| `TTS_DO_SAMPLE` | `1` | 保留自然采样；设为 `0` 会更固定但可能更机械 |
+| `TTS_REPETITION_PENALTY` | `1.05` | 声码重复惩罚 |
 | `AVATAR_TEE_PREROLL_MS` | `400` | 数字人直播音频预缓冲时间 |
 | `AVTR1_H264_BITRATE` | `900000` | 直播视频码率，带宽不足时可适当降低 |
 | `AVTR1_CFG_SELF_AUDIO` | `2.3` | 说话动作的音频引导强度 |
 | `AVTR1_CFG_OTHER_AUDIO` | `2.0` | 倾听动作的音频引导强度 |
 | `AVTR1_NOISE_ALPHA` | `1.5` | 动作随机性强度 |
+| `BACKGROUND_MUSIC_ENABLED` | `1` | 循环播放背景纯音乐 |
+| `BACKGROUND_MUSIC_DIR` | `.` | MP3 播放列表目录；相对路径从项目根目录解析 |
+| `BACKGROUND_MUSIC_VOLUME` | `0.16` | 无人说话时的背景音乐音量 |
+| `BACKGROUND_MUSIC_DUCK_VOLUME` | `0.04` | 数字人或用户说话时的背景音乐音量 |
+| `BACKGROUND_MUSIC_USER_RMS` | `450` | 触发用户说话闪避的麦克风 RMS 阈值 |
 
 默认关闭自然语音打断，以保证长回复完整播放。数字人说话期间，当前连线者仍可点击页面中央圆圈手动打断；也可在管理员设置中打开自然打断。当前连线者的麦克风仅用于识别和驱动倾听动作，不会混入面向所有观众的直播声音。
+
+TTS 默认只使用 `REF_AUDIO` 指向的一段小雅参考音频，不需要为不同观众或情绪准备额外录音。SenseVoice 的短期情绪只参与当前回复的语气规划：难过或哭声使用温柔安慰，生气使用平静语气，开心或笑声使用轻快语气；没有可靠声学线索时再根据回复文字判断。公屏仍展示 LLM 原文，TTS 会在自己的副本上规范省略号、补齐句末标点和必要停顿。Qwen3-TTS Base 的风格指令属于增强项，若某台机器上效果不稳定，可只设置 `TTS_STYLE_INSTRUCT_ENABLED=0`，无需关闭整套语气规划。
+
+背景音乐由服务端一次解码，分别输出带音乐和不带音乐的 HTTP-FLV 音轨。把纯音乐 `.mp3` 放进 `BACKGROUND_MUSIC_DIR` 后重启服务即可加入播放列表；多首音乐会按文件名顺序播放，播完后从头循环。观众的开关偏好保存在自己的浏览器中，切换只会快速重连该观众的直播流。
 
 ### 主动欢迎与空闲话题
 
 | 参数 | 默认值 | 说明 |
 | --- | ---: | --- |
 | `STARTUP_GREETING` | 内置提示词 | 连线确认后主动欢迎并询问一个简单问题 |
-| `IDLE_PROMPT` | 内置提示词 | 安静时主动发起轻松话题 |
+| `IDLE_PROMPT` | 内置提示词 | RSS 不可用时的主动话题降级提示 |
 | `IDLE_PROMPT_MIN_SECONDS` | `35` | 最短空闲等待时间 |
 | `IDLE_PROMPT_MAX_SECONDS` | `55` | 最长空闲等待时间 |
+| `PROACTIVE_NEWS_MIN_SECONDS` | `90` | 无人连线时热点播报的最短间隔 |
+| `PROACTIVE_NEWS_MAX_SECONDS` | `150` | 无人连线时热点播报的最长间隔 |
+
+当前连线者持续安静达到随机等待时间后，浏览器会向受房间权限保护的接口请求一个主动话题。服务端从最新 RSS 热点中为该连线者轮换一条尚未讲过的新闻，把带来源和时间的资料注入当前对话，再由数字人用两到三句口语讲述并询问对方看法。新闻获取期间如果用户重新开口，本次主动播报会取消；RSS 不可用时才回退到 `IDLE_PROMPT` 的普通轻松话题。
+
+无人连线、无人排队且没有待回复的 `@小麻` 评论时，服务端也会按较低频率轮换一条热点向全直播间主动播报。连线申请和评论回复始终拥有更高优先级，可以抢占尚未完成的主动播报。
 
 ## MCP 工具
 
-开启 `MCP_ENABLED=1` 后，模型会加载 6 个精简工具：
+涉及“最新新闻、当前价格、涨跌原因”的 `@小麻` 评论不会依赖小模型自行决定是否调用工具：后端会先并行查询价格与新闻，在评论区显示查询状态，再把有时间戳的结果交给模型生成可直接播报的最终答案。
+
+新闻默认优先走无需 API Key 的本地 RSS 聚合层，包括 Google News 查询 RSS、UN News、Al Jazeera、NPR World 和 DW World。聚合器并行拉取 RSS/Atom，只保留标题、发布时间、简短摘要、来源和原文链接，按查询相关性与发布时间去重排序；不抓取或转载新闻全文。
 
 | 服务 | 工具能力 | 默认地址 |
 | --- | --- | --- |
 | CoinGecko | 稳定币价查询、行情工具执行、文档检索 | `https://mcp.api.coingecko.com/mcp` |
 | Exa | 网页搜索、正文抓取 | `https://mcp.exa.ai/mcp` |
 | GDELT | 全球新闻检索 | `https://gdelt.caseyjhand.com/mcp` |
+| Tavily（可选） | 搜索与正文提取 | 通过 `MCP_TAVILY_URL` 配置 |
 
-可通过 `MCP_COINGECKO_URL`、`MCP_EXA_URL`、`MCP_GDELT_URL` 替换服务地址。单次工具结果默认限制为 `MCP_MAX_OUTPUT_CHARS=6000`，防止外部内容挤占全部模型上下文。
+完整新闻降级顺序为 RSS → Tavily（若配置）→ Exa → GDELT；价格和 MCP 新闻分别缓存 30 秒与 180 秒，RSS 查询缓存 120 秒，避免热门问题瞬间打满免费服务。可通过 `MCP_COINGECKO_URL`、`MCP_EXA_URL`、`MCP_GDELT_URL` 替换服务地址，或将带 API Key 的 Tavily MCP 地址填入 `MCP_TAVILY_URL`。单次工具结果默认限制为 `MCP_MAX_OUTPUT_CHARS=6000`，防止外部内容挤占全部模型上下文。
+
+`NEWS_RSS_ENABLED` 和 `NEWS_GOOGLE_RSS_ENABLED` 可分别控制 RSS 聚合与查询型 RSS；默认只采用最近 168 小时的条目，可通过 `NEWS_RSS_MAX_AGE_HOURS` 调整。`NEWS_RSS_FEEDS` 可用 `来源名=https://...;来源名=https://...` 自定义订阅，并需在 `NEWS_RSS_ALLOWED_HOSTS` 中列出新增域名。RSS 只是信息入口，不等于内容没有版权；对外展示或商业使用时仍应保留来源署名并遵守各发布方条款。
+
+`MENTION_RESEARCH_TIMEOUT` 控制单个研究工具超时，`MENTION_PRICE_CACHE_SECONDS` 和 `MENTION_NEWS_CACHE_SECONDS` 控制短缓存。来源失败时会继续尝试后备方案；所有来源都失败时，数字人会明确说明无法核实，不会用旧知识猜测实时事实。
 
 只有当前连线者或被调度到的 `@小麻` 回复任务能够驱动工具调用；公开接口不能绕过房间权限直接替数字人调用工具。
 
@@ -243,6 +277,7 @@ assets/ref16k.wav             # Qwen3-TTS 默认参考音色
 
 ```text
 cyber-girlfriend-live/
+├── *.mp3                           # 共享直播背景纯音乐播放列表
 ├── assets/                         # 默认形象、背景与参考音色
 ├── docs/images/                    # README 演示素材
 ├── proxy/

@@ -16,7 +16,7 @@
  * @typedef {"idle" | "connecting" | "queued" | "your-turn" | "listening" | "user-speaking" | "processing" | "ai-speaking" | "error"} AppState
  */
 
-import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js?v=20260819o";
+import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js?v=20260820p";
 import { ToolCallBatcher } from "./tool-call-batcher.js";
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js?v=20260819c";
@@ -251,6 +251,8 @@ const adminUnlockForm = $("#admin-unlock-form");
 const adminPassword = $("#admin-password");
 /** @type {HTMLElement} */
 const adminUnlockError = $("#admin-unlock-error");
+/** @type {HTMLButtonElement} */
+const adminUnlockCancel = $("#admin-unlock-cancel");
 /** @type {HTMLElement} */
 const camPip = $("#cam-pip");
 /** @type {HTMLVideoElement} */
@@ -318,6 +320,7 @@ let pinnedUrl = "";
 // client asks the model to greet once after the initial session configuration.
 let startupGreeting = "";
 let idlePrompt = "";
+let idleTopicUrl = "";
 let idlePromptMinSeconds = 35;
 let idlePromptMaxSeconds = 55;
 
@@ -484,6 +487,18 @@ function openTools() {
 
 /** @type {"settings" | "tools" | ""} */
 let pendingAdminPanel = "";
+let adminUnlockAttempt = 0;
+
+function closeAdminUnlock() {
+  // Invalidates an in-flight password request so a late successful response
+  // cannot open Settings after the viewer has already dismissed the dialog.
+  adminUnlockAttempt += 1;
+  pendingAdminPanel = "";
+  adminPassword.value = "";
+  adminPassword.disabled = false;
+  adminUnlockError.textContent = "";
+  if (adminUnlockModal.open) adminUnlockModal.close();
+}
 
 function openAdminPanel(panel) {
   if (panel === "settings") openSettings();
@@ -501,23 +516,34 @@ async function requestAdminPanel(panel) {
   } catch {
     // Fall through to the password dialog. Unlock itself fails closed.
   }
+  adminUnlockAttempt += 1;
   pendingAdminPanel = panel;
   adminPassword.value = "";
   adminUnlockError.textContent = "";
-  adminUnlockModal.showModal();
+  if (!adminUnlockModal.open) adminUnlockModal.showModal();
   requestAnimationFrame(() => adminPassword.focus());
 }
 
+adminUnlockCancel.addEventListener("click", closeAdminUnlock);
+adminUnlockModal.addEventListener("click", (event) => {
+  if (event.target === adminUnlockModal) closeAdminUnlock();
+});
+adminUnlockModal.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeAdminUnlock();
+});
+adminUnlockModal.addEventListener("close", () => {
+  pendingAdminPanel = "";
+  adminPassword.value = "";
+  adminPassword.disabled = false;
+  adminUnlockError.textContent = "";
+});
+
 adminUnlockForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const submitter = /** @type {SubmitEvent} */ (event).submitter;
-  if (submitter?.value === "cancel") {
-    pendingAdminPanel = "";
-    adminUnlockModal.close();
-    return;
-  }
   const password = adminPassword.value;
   if (!password) return;
+  const attempt = ++adminUnlockAttempt;
   adminPassword.disabled = true;
   adminUnlockError.textContent = "";
   try {
@@ -528,15 +554,17 @@ adminUnlockForm.addEventListener("submit", async (event) => {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || "密码验证失败");
+    if (attempt !== adminUnlockAttempt) return;
     const panel = pendingAdminPanel;
     pendingAdminPanel = "";
     adminUnlockModal.close();
     if (panel) openAdminPanel(panel);
   } catch (error) {
+    if (attempt !== adminUnlockAttempt) return;
     adminUnlockError.textContent = error instanceof Error ? error.message : String(error);
     adminPassword.select();
   } finally {
-    adminPassword.disabled = false;
+    if (attempt === adminUnlockAttempt) adminPassword.disabled = false;
   }
 });
 
@@ -1039,6 +1067,7 @@ async function fetchConfig() {
         ? json.startupGreeting.trim()
         : "";
       idlePrompt = typeof json.idlePrompt === "string" ? json.idlePrompt.trim() : "";
+      idleTopicUrl = typeof json.idleTopicUrl === "string" ? json.idleTopicUrl.trim() : "";
       idlePromptMinSeconds = Number(json.idlePromptMinSeconds) || 35;
       idlePromptMaxSeconds = Number(json.idlePromptMaxSeconds) || 55;
       loginRequired = !!json.requireLogin;
@@ -1530,6 +1559,7 @@ async function doStart(audioContext = null) {
     instructions: settings.instructions,
     startupGreeting,
     idlePrompt,
+    idleTopicUrl,
     idlePromptMinSeconds,
     idlePromptMaxSeconds,
     acquireMic: acquireMicStream,

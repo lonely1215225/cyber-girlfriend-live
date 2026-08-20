@@ -19,6 +19,8 @@ const chatForm = /** @type {HTMLFormElement | null} */ ($("#room-chat-form"));
 const chatInput = /** @type {HTMLInputElement | null} */ ($("#room-chat-input"));
 const chatSend = /** @type {HTMLButtonElement | null} */ ($("#room-chat-send"));
 const chatError = $("#room-chat-error");
+const mentionMenu = $("#room-mention-menu");
+const mentionOption = /** @type {HTMLButtonElement | null} */ ($("#room-mention-xiaoma"));
 const liveChat = $("#room-live-chat");
 const chatToggle = /** @type {HTMLButtonElement | null} */ ($("#room-chat-toggle"));
 const chatToggleLabel = $("#room-chat-toggle-label");
@@ -48,6 +50,41 @@ function setChatExpanded(expanded) {
   if (chatExpanded && liveTranscript) {
     requestAnimationFrame(() => { liveTranscript.scrollTop = liveTranscript.scrollHeight; });
   }
+}
+
+function mentionRange() {
+  if (!chatInput) return null;
+  const cursor = chatInput.selectionStart ?? chatInput.value.length;
+  const beforeCursor = chatInput.value.slice(0, cursor);
+  const at = beforeCursor.lastIndexOf("@");
+  if (at < 0) return null;
+  const query = beforeCursor.slice(at + 1);
+  if (/\s/.test(query) || !"小麻".startsWith(query)) return null;
+  return { start: at, end: cursor };
+}
+
+function setMentionOpen(open) {
+  const visible = Boolean(open && mentionMenu && mentionOption && !chatInput?.disabled);
+  if (mentionMenu) mentionMenu.hidden = !visible;
+  mentionOption?.setAttribute("aria-selected", String(visible));
+  chatInput?.setAttribute("aria-expanded", String(visible));
+}
+
+function updateMentionMenu() {
+  setMentionOpen(Boolean(mentionRange()));
+}
+
+function insertXiaomaMention() {
+  if (!chatInput) return;
+  const range = mentionRange();
+  if (!range) return;
+  const suffix = chatInput.value.slice(range.end);
+  const spacer = suffix.startsWith(" ") ? "" : " ";
+  chatInput.value = `${chatInput.value.slice(0, range.start)}@小麻${spacer}${suffix}`;
+  const cursor = range.start + 3 + spacer.length;
+  chatInput.setSelectionRange(cursor, cursor);
+  setMentionOpen(false);
+  chatInput.focus();
 }
 
 function setViewersOpen(open) {
@@ -147,8 +184,26 @@ viewersClose?.addEventListener("click", () => setViewersOpen(false));
 viewersPopover?.addEventListener("click", (event) => event.stopPropagation());
 document.addEventListener("click", () => setViewersOpen(false));
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") setViewersOpen(false);
+  if (event.key === "Escape") {
+    setViewersOpen(false);
+    setMentionOpen(false);
+  }
 });
+
+chatInput?.addEventListener("input", updateMentionMenu);
+chatInput?.addEventListener("click", updateMentionMenu);
+chatInput?.addEventListener("keydown", (event) => {
+  if (mentionMenu?.hidden) return;
+  if (["Enter", "Tab", "ArrowDown", "ArrowUp"].includes(event.key)) {
+    event.preventDefault();
+    insertXiaomaMention();
+  }
+});
+chatInput?.addEventListener("blur", () => {
+  window.setTimeout(() => setMentionOpen(false), 120);
+});
+mentionOption?.addEventListener("pointerdown", (event) => event.preventDefault());
+mentionOption?.addEventListener("click", insertXiaomaMention);
 
 function renderTranscript(messages) {
   if (!liveTranscript) return;
@@ -221,6 +276,7 @@ chatForm?.addEventListener("submit", async (event) => {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || "发送失败");
     chatInput.value = "";
+    setMentionOpen(false);
   } catch (error) {
     text(chatError, error instanceof Error ? error.message : String(error));
   } finally {

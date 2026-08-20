@@ -423,22 +423,36 @@ class LiveRoom:
             self._expire_active_locked()
             return self._active is None and not self._queue
 
+    async def is_active_caller(self, token: str) -> bool:
+        """Return whether this participant currently owns a connected call."""
+        async with self._lock:
+            self._require_locked(token).last_seen = time.monotonic()
+            self._expire_active_locked()
+            return bool(
+                self._active
+                and self._active.participant_token == token
+                and self._active.connected_at is not None
+            )
+
     async def publish_bot_reply(
         self,
         *,
         message_id: str,
         text: str,
-        reply_to: dict[str, Any],
+        reply_to: dict[str, Any] | None,
+        partial: bool = False,
     ) -> dict[str, Any] | None:
-        """Publish one final assistant reply linked to the triggering comment."""
+        """Upsert a quoted comment reply or an unquoted proactive room message."""
         clean = _clean_public_text(text)[:500]
         if not clean:
             return None
-        quote = {
-            "id": str(reply_to.get("id") or ""),
-            "speaker": str(reply_to.get("speaker") or "观众")[:24],
-            "text": _clean_public_text(str(reply_to.get("text") or ""))[:120],
-        }
+        quote = None
+        if reply_to:
+            quote = {
+                "id": str(reply_to.get("id") or ""),
+                "speaker": str(reply_to.get("speaker") or "观众")[:24],
+                "text": _clean_public_text(str(reply_to.get("text") or ""))[:120],
+            }
         async with self._lock:
             item = {
                 "id": f"bot:{message_id}",
@@ -446,11 +460,12 @@ class LiveRoom:
                 "role": "assistant",
                 "speaker": "小麻",
                 "text": clean,
-                "reply_to": quote,
-                "partial": False,
+                "partial": partial,
                 "interrupted": False,
                 "created_at": time.time(),
             }
+            if quote:
+                item["reply_to"] = quote
             existing = next((index for index, old in enumerate(self._messages) if old["id"] == item["id"]), None)
             if existing is None:
                 self._messages.append(item)

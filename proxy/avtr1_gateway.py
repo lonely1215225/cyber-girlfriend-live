@@ -25,6 +25,20 @@ CFG_OTHER_AUDIO = float(os.environ.get("AVTR1_CFG_OTHER_AUDIO", "2.0"))
 CFG_KP = float(os.environ.get("AVTR1_CFG_KP", "3.0"))
 NOISE_ALPHA = float(os.environ.get("AVTR1_NOISE_ALPHA", "1.5"))
 NOISE_TRUNC_Z = float(os.environ.get("AVTR1_NOISE_TRUNC_Z", "1.0"))
+BACKGROUND_MUSIC_ENABLED = os.environ.get("BACKGROUND_MUSIC_ENABLED", "1").lower() not in {
+    "0", "false", "off", "no"
+}
+BACKGROUND_MUSIC_DIR = os.path.realpath(os.environ.get("BACKGROUND_MUSIC_DIR", "."))
+BACKGROUND_MUSIC_VOLUME = min(
+    1.0, max(0.0, float(os.environ.get("BACKGROUND_MUSIC_VOLUME", "0.16")))
+)
+BACKGROUND_MUSIC_DUCK_VOLUME = min(
+    BACKGROUND_MUSIC_VOLUME,
+    max(0.0, float(os.environ.get("BACKGROUND_MUSIC_DUCK_VOLUME", "0.04"))),
+)
+BACKGROUND_MUSIC_USER_RMS = max(
+    1.0, float(os.environ.get("BACKGROUND_MUSIC_USER_RMS", "450"))
+)
 
 SAMPLE_RATE = 16_000
 CHUNK_SIZE = 5
@@ -37,19 +51,119 @@ PCM_PACKET_BYTES = 640
 MAX_SPEECH_BYTES = SAMPLE_RATE * 2 * 30
 
 last_frame_at = 0.0
+last_speech_input_at = 0.0
+last_user_voice_at = 0.0
 connected = False
 state_blob: bytes | None = None
 state_avatar_id: str | None = None
 speech_pcm = bytearray()
 listen_pcm = bytearray()
 buf_lock = asyncio.Lock()
-flv_subscribers: set[asyncio.Queue] = set()
+# Queue -> whether this viewer requested the mixed background-music variant.
+flv_subscribers: dict[asyncio.Queue, bool] = {}
 video_pace_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
 audio_pace_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 h264_encoder: H264Encoder | None = None
 h264_bytes = 0
 renderer_session: aiohttp.ClientSession | None = None
-flv_muxer: FlvMuxer | None = None
+flv_muxer_music: FlvMuxer | None = None
+flv_muxer_voice: FlvMuxer | None = None
+
+
+class BackgroundMusic:
+    """Decode a local MP3 playlist once, then mix it into the shared FLV audio.
+
+    Music is added after AVTR-1 has generated the face motion, so instrumental
+    energy can never drive the mouth. Gain changes use a short attack and a
+    slower release to avoid audible pumping around pauses between words.
+    """
+
+    def __init__(self) -> None:
+        self.tracks: list[tuple[str, np.ndarray]] = []
+        self.track_index = 0
+        self.sample_index = 0
+        self.gain = BACKGROUND_MUSIC_VOLUME
+
+    @property
+    def available(self) -> bool:
+        return bool(self.tracks)
+
+    @property
+    def track_name(self) -> str | None:
+        return self.tracks[self.track_index][0] if self.tracks else None
+
+    def load(self) -> None:
+        self.tracks.clear()
+        self.track_index = 0
+        self.sample_index = 0
+        self.gain = BACKGROUND_MUSIC_VOLUME
+        if not BACKGROUND_MUSIC_ENABLED or not os.path.isdir(BACKGROUND_MUSIC_DIR):
+            return
+        names = sorted((
+            name
+            for name in os.listdir(BACKGROUND_MUSIC_DIR)
+            if name.lower().endswith(".mp3")
+            and os.path.isfile(os.path.join(BACKGROUND_MUSIC_DIR, name))
+        ), key=str.casefold)
+        for name in names:
+            path = os.path.join(BACKGROUND_MUSIC_DIR, name)
+            chunks: list[np.ndarray] = []
+            try:
+                with av.open(path) as container:
+                    stream = container.streams.audio[0]
+                    resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+                    for frame in container.decode(stream):
+                        for output in resampler.resample(frame):
+                            chunks.append(output.to_ndarray().reshape(-1).copy())
+                    for output in resampler.resample(None):
+                        chunks.append(output.to_ndarray().reshape(-1).copy())
+                samples = np.concatenate(chunks).astype(np.int16, copy=False) if chunks else None
+                if samples is not None and samples.size:
+                    self.tracks.append((name, samples))
+            except Exception as exc:
+                print(f"[avtr1-gw] skip background music {name}: {exc}", flush=True)
+        if self.tracks:
+            duration = sum(samples.size for _, samples in self.tracks) / SAMPLE_RATE
+            print(
+                f"[avtr1-gw] background music tracks={len(self.tracks)} "
+                f"duration={duration:.1f}s volume={BACKGROUND_MUSIC_VOLUME:.2f} "
+                f"duck={BACKGROUND_MUSIC_DUCK_VOLUME:.2f}",
+                flush=True,
+            )
+
+    def _take(self, count: int) -> np.ndarray:
+        output = np.empty(count, dtype=np.int16)
+        written = 0
+        while written < count and self.tracks:
+            _, samples = self.tracks[self.track_index]
+            available = samples.size - self.sample_index
+            size = min(count - written, available)
+            output[written : written + size] = samples[self.sample_index : self.sample_index + size]
+            written += size
+            self.sample_index += size
+            if self.sample_index >= samples.size:
+                self.track_index = (self.track_index + 1) % len(self.tracks)
+                self.sample_index = 0
+        if written < count:
+            output[written:] = 0
+        return output
+
+    def mix(self, voice_pcm: bytes, *, ducked: bool) -> bytes:
+        if not self.tracks or not voice_pcm:
+            return voice_pcm
+        voice = np.frombuffer(voice_pcm, dtype=np.int16)
+        music = self._take(voice.size).astype(np.float32)
+        target = BACKGROUND_MUSIC_DUCK_VOLUME if ducked else BACKGROUND_MUSIC_VOLUME
+        duration = max(voice.size / SAMPLE_RATE, 0.001)
+        tau = 0.12 if target < self.gain else 0.75
+        end_gain = target + (self.gain - target) * np.exp(-duration / tau)
+        gains = np.linspace(self.gain, end_gain, num=voice.size, dtype=np.float32)
+        self.gain = float(end_gain)
+        mixed = voice.astype(np.float32) + music * gains
+        return np.clip(mixed, -32768, 32767).astype(np.int16).tobytes()
+
+
+background_music = BackgroundMusic()
 
 
 class H264Encoder:
@@ -217,10 +331,12 @@ class FlvMuxer:
         self.timestamp_ms += ms
 
 
-def publish_flv(data: bytes) -> None:
+def publish_flv(data: bytes, *, music: bool) -> None:
     if not data:
         return
-    for q in tuple(flv_subscribers):
+    for q, wants_music in tuple(flv_subscribers.items()):
+        if wants_music != music:
+            continue
         if q.full():
             try:
                 q.get_nowait()
@@ -276,20 +392,32 @@ async def pace_av() -> None:
             fresh_video = None
         if fresh_video:
             packets = fresh_video
-            if flv_muxer is not None:
+            if flv_muxer_music is not None and flv_muxer_voice is not None:
                 for packet, keyframe in packets:
-                    for tag in flv_muxer.video_tags(packet, keyframe):
-                        publish_flv(tag)
+                    for tag in flv_muxer_music.video_tags(packet, keyframe):
+                        publish_flv(tag, music=True)
+                    for tag in flv_muxer_voice.video_tags(packet, keyframe):
+                        publish_flv(tag, music=False)
         for _ in range(2):
             try:
                 last_audio = audio_pace_queue.get_nowait()
             except asyncio.QueueEmpty:
                 last_audio = b"\0" * len(last_audio)
-            if flv_muxer is not None:
-                for tag in flv_muxer.audio_tags(last_audio):
-                    publish_flv(tag)
-        if flv_muxer is not None:
-            flv_muxer.advance(40)
+            now = time.monotonic()
+            ducked = (
+                bool(speech_pcm)
+                or now - last_speech_input_at < 1.6
+                or now - last_user_voice_at < 0.8
+            )
+            output_audio = background_music.mix(last_audio, ducked=ducked)
+            if flv_muxer_music is not None and flv_muxer_voice is not None:
+                for tag in flv_muxer_music.audio_tags(output_audio):
+                    publish_flv(tag, music=True)
+                for tag in flv_muxer_voice.audio_tags(last_audio):
+                    publish_flv(tag, music=False)
+        if flv_muxer_music is not None and flv_muxer_voice is not None:
+            flv_muxer_music.advance(40)
+            flv_muxer_voice.advance(40)
         deadline += 0.04
         await asyncio.sleep(max(0.0, deadline - loop.time()))
 
@@ -415,8 +543,10 @@ async def render_loop() -> None:
 
 
 async def append_speech(pcm: bytes) -> None:
+    global last_speech_input_at
     if not pcm:
         return
+    last_speech_input_at = time.monotonic()
     async with buf_lock:
         speech_pcm.extend(pcm)
         overflow = len(speech_pcm) - MAX_SPEECH_BYTES
@@ -425,8 +555,14 @@ async def append_speech(pcm: bytes) -> None:
 
 
 async def append_listen(pcm: bytes) -> None:
+    global last_user_voice_at
     if not pcm:
         return
+    samples = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype=np.int16)
+    if samples.size:
+        rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+        if rms >= BACKGROUND_MUSIC_USER_RMS:
+            last_user_voice_at = time.monotonic()
     async with buf_lock:
         listen_pcm.extend(pcm)
         overflow = len(listen_pcm) - MAX_SPEECH_BYTES
@@ -466,6 +602,8 @@ async def _list_avatar_ids() -> tuple[list[str], list[str]]:
 
 
 async def handle_status(_request):
+    speaking = bool(speech_pcm) or time.monotonic() - last_speech_input_at < 1.6
+    music_ducked = speaking or time.monotonic() - last_user_voice_at < 0.8
     return web.json_response(
         {
             "connected": connected and last_frame_at > 0,
@@ -473,6 +611,14 @@ async def handle_status(_request):
             "avatar_id": AVATAR_ID,
             "age_ms": int((time.time() - last_frame_at) * 1000) if last_frame_at else None,
             "speech_ms": int(len(speech_pcm) / 2 / SAMPLE_RATE * 1000),
+            "speaking": speaking,
+            "background_music": {
+                "enabled": background_music.available,
+                "track": background_music.track_name,
+                "volume": BACKGROUND_MUSIC_VOLUME,
+                "duck_volume": BACKGROUND_MUSIC_DUCK_VOLUME,
+                "ducked": music_ducked,
+            },
             "listen_ms": int(len(listen_pcm) / 2 / SAMPLE_RATE * 1000),
             "flv_clients": len(flv_subscribers),
             "h264_bitrate": H264_BITRATE,
@@ -526,6 +672,9 @@ async def handle_set_avatar(request):
 
 
 async def handle_livestream(request):
+    wants_music = request.query.get("music", "1").strip().lower() not in {
+        "0", "false", "off", "no"
+    }
     resp = web.StreamResponse(
         status=200,
         headers={
@@ -538,15 +687,16 @@ async def handle_livestream(request):
     )
     await resp.prepare(request)
     q: asyncio.Queue = asyncio.Queue(maxsize=256)
-    if flv_muxer is not None:
-        bootstrap = flv_muxer.bootstrap()
+    selected_muxer = flv_muxer_music if wants_music else flv_muxer_voice
+    if selected_muxer is not None:
+        bootstrap = selected_muxer.bootstrap()
         if bootstrap:
             try:
                 await resp.write(bootstrap)
                 await resp.drain()
             except (ConnectionResetError, ConnectionError, asyncio.CancelledError):
                 return resp
-    flv_subscribers.add(q)
+    flv_subscribers[q] = wants_music
     try:
         while True:
             chunk = await q.get()
@@ -555,7 +705,7 @@ async def handle_livestream(request):
     except (ConnectionResetError, ConnectionError, asyncio.CancelledError, RuntimeError):
         pass
     finally:
-        flv_subscribers.discard(q)
+        flv_subscribers.pop(q, None)
     return resp
 
 
@@ -589,16 +739,19 @@ async def handle_listen_chunk(request):
 
 
 async def handle_listen_reset(_request):
+    global last_user_voice_at
     async with buf_lock:
         listen_pcm.clear()
+        last_user_voice_at = 0.0
     return web.json_response({"ok": True})
 
 
 async def handle_interrupt(_request):
-    global state_blob
+    global state_blob, last_speech_input_at
     async with buf_lock:
         speech_pcm.clear()
         state_blob = None
+        last_speech_input_at = 0.0
     for q in (video_pace_queue, audio_pace_queue):
         while not q.empty():
             try:
@@ -609,10 +762,12 @@ async def handle_interrupt(_request):
 
 
 async def on_startup(app):
-    global renderer_session, flv_muxer
+    global renderer_session, flv_muxer_music, flv_muxer_voice
     timeout = aiohttp.ClientTimeout(total=30, sock_connect=5, sock_read=30)
     renderer_session = aiohttp.ClientSession(timeout=timeout)
-    flv_muxer = FlvMuxer()
+    flv_muxer_music = FlvMuxer()
+    flv_muxer_voice = FlvMuxer()
+    await asyncio.to_thread(background_music.load)
     app["pacer"] = asyncio.create_task(pace_av())
     app["render"] = asyncio.create_task(render_loop())
 

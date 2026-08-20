@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>小雅直播间</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%2378d99a'/><circle cx='11' cy='14' r='2' fill='%230b0d12'/><circle cx='21' cy='14' r='2' fill='%230b0d12'/><path d='M10 21c4 3 8 3 12 0' fill='none' stroke='%230b0d12' stroke-width='2' stroke-linecap='round'/></svg>" />
-    <link rel="stylesheet" href="style.css?v=20260819u" />
+    <link rel="stylesheet" href="style.css?v=20260820a" />
   </head>
   <!--
     `booting` disables transitions/animations until the first paint commits.
@@ -17,7 +17,13 @@
     <div id="app">
       <header class="topbar">
         <div class="room-heading">
-          <div class="room-title"><span class="room-live-dot"></span><strong>小雅直播间</strong><span class="room-live-label">LIVE</span></div>
+          <div class="room-title">
+            <span class="room-live-dot"></span><strong>小雅直播间</strong><span class="room-live-label">LIVE</span>
+            <button id="background-music-toggle" class="background-music-toggle" type="button" aria-pressed="true" aria-label="关闭背景音乐" title="关闭我的背景音乐">
+              <svg class="music-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.8 5.8a9 9 0 0 1 0 12.4" fill="none"/></svg>
+              <svg class="music-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="m16 9 5 5m0-5-5 5" fill="none"/></svg>
+            </button>
+          </div>
           <div class="connection-summary" aria-live="polite">
             <span id="conversation-state" class="connection-chip" data-state="idle">正在观看</span>
             <span id="avatar-connection-state" class="connection-chip" data-state="connecting">数字人连接中</span>
@@ -157,7 +163,7 @@
         </label>
         <p id="admin-unlock-error" class="admin-unlock-error" role="alert"></p>
         <footer class="modal-footer">
-          <button class="btn" type="submit" value="cancel">取消</button>
+          <button id="admin-unlock-cancel" class="btn" type="button">取消</button>
           <button class="btn primary" type="submit" value="unlock">验证并打开</button>
         </footer>
       </form>
@@ -188,7 +194,18 @@
         <p id="room-chat-empty" class="room-chat-empty">还没有消息，来打个招呼吧</p>
       </div>
       <form id="room-chat-form" class="room-chat-form">
-        <input id="room-chat-input" type="text" maxlength="200" autocomplete="off" placeholder="和直播间的大家聊聊…" aria-label="发送直播间消息" />
+        <div class="room-chat-input-shell">
+          <input id="room-chat-input" type="text" maxlength="200" autocomplete="off"
+            placeholder="和大家聊聊，输入 @小麻 可触发语音回复…" aria-label="发送直播间消息"
+            role="combobox" aria-autocomplete="list" aria-haspopup="listbox"
+            aria-controls="room-mention-menu" aria-expanded="false" />
+          <div id="room-mention-menu" class="room-mention-menu" role="listbox" aria-label="可提及的数字人" hidden>
+            <button id="room-mention-xiaoma" class="room-mention-option" type="button" role="option" aria-selected="false">
+              <span class="room-mention-avatar" aria-hidden="true">小</span>
+              <span><strong>小麻</strong><small>触发数字人语音回复</small></span>
+            </button>
+          </div>
+        </div>
         <button id="room-chat-send" type="submit">发送</button>
       </form>
       <p id="room-chat-error" class="room-chat-error" role="alert"></p>
@@ -416,8 +433,8 @@
     </dialog>
 
     <script src="/vendor/mpegts.min.js"></script>
-    <script src="/avatar-sync.js?v=20260819u"></script>
-    <script type="module" src="room.js?v=20260819e"></script>
-    <script type="module" src="main.js?v=20260819x"></script>
+    <script src="/avatar-sync.js?v=20260820c"></script>
+    <script type="module" src="room.js?v=20260820a"></script>
+    <script type="module" src="main.js?v=20260820d"></script>
   </body>
 </html>

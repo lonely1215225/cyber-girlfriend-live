@@ -71,19 +71,26 @@ uv python install 3.12
 [[ -x "$S2S_VENV/bin/python" ]] || uv venv --python 3.12 "$S2S_VENV"
 uv pip install --python "$S2S_VENV/bin/python" -r "$ROOT/s2s/hf-realtime-voice/requirements.txt"
 uv pip install --python "$S2S_VENV/bin/python" "speech-to-speech[faster-whisper]==0.2.10" "faster-whisper==1.2.1" \
+  "funasr==1.4.2" \
   "faster-qwen3-tts==0.3.2" "qwen-tts==0.1.1" "transformers==4.57.3" \
   "torch==2.6.0" "torchaudio==2.6.0" \
   "numpy<2.3" "numba>=0.61" "nvidia-cudnn-cu12>=9,<10" nvidia-cublas-cu12 hf_transfer
 [[ -x "$S2S_VENV/bin/speech-to-speech" ]] || die "speech-to-speech 安装失败"
 export TORCH_HOME="${TORCH_HOME:-$ROOT/.cache/torch}"
-mkdir -p "$TORCH_HOME"
+export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$ROOT/.cache/modelscope}"
+export SENSEVOICE_DIR="$ROOT/models/sensevoice/SenseVoiceSmall"
+mkdir -p "$TORCH_HOME" "$MODELSCOPE_CACHE"
 "$S2S_VENV/bin/python" - <<'PY'
+import os
 import nltk
 import torch
 from huggingface_hub import snapshot_download
 nltk.download("punkt_tab")
 nltk.download("averaged_perceptron_tagger_eng")
-snapshot_download("Systran/faster-whisper-large-v3")
+snapshot_download(
+    "FunAudioLLM/SenseVoiceSmall",
+    local_dir=os.environ["SENSEVOICE_DIR"],
+)
 torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True, skip_validation=True)
 PY
 

@@ -30,6 +30,16 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 _uvicorn_config_init = uvicorn.Config.__init__
 install_tiered_memory()
 
+if os.environ.get("STT_BACKEND", "sensevoice") == "sensevoice":
+    from sensevoice_stt import install_sensevoice_adapter
+
+    install_sensevoice_adapter()
+
+if os.environ.get("TTS_EMOTION_ENABLED", "1") != "0":
+    from emotion_aware_tts import install_emotion_aware_tts
+
+    install_emotion_aware_tts()
+
 
 def _quiet_uvicorn_config(self, *args, **kwargs):
     kwargs.setdefault("access_log", False)
