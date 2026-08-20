@@ -143,6 +143,8 @@ cp -f "$PLUGIN_SRC" \
 for id in "${LOOKS[@]}"; do
   [[ -f "$ROOT/assets/looks/${id}.png" ]] || die "缺少形象 $ROOT/assets/looks/${id}.png"
   cp -f "$ROOT/assets/looks/${id}.png" "$FRAMES/${id}.png"
+  [[ -f "$ROOT/assets/looks/pasteback_mask_soft.png" ]] \
+    && cp -f "$ROOT/assets/looks/pasteback_mask_soft.png" "$FRAMES/${id}.pbmask.png"
 done
 [[ -f "$ROOT/assets/looks/plain_white.png" ]] && cp -f "$ROOT/assets/looks/plain_white.png" "$BGS/plain_white.png"
 [[ -f "$ROOT/assets/looks/pasteback_mask.png" ]] && cp -f "$ROOT/assets/looks/pasteback_mask.png" \

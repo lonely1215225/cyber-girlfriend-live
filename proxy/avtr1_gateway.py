@@ -25,6 +25,15 @@ CFG_OTHER_AUDIO = float(os.environ.get("AVTR1_CFG_OTHER_AUDIO", "2.0"))
 CFG_KP = float(os.environ.get("AVTR1_CFG_KP", "3.0"))
 NOISE_ALPHA = float(os.environ.get("AVTR1_NOISE_ALPHA", "1.5"))
 NOISE_TRUNC_Z = float(os.environ.get("AVTR1_NOISE_TRUNC_Z", "1.0"))
+IDLE_NOISE_ALPHA = float(os.environ.get("AVTR1_IDLE_NOISE_ALPHA", "10.0"))
+IDLE_NOISE_TRUNC_Z = float(os.environ.get("AVTR1_IDLE_NOISE_TRUNC_Z", "0.25"))
+MOTION_AUDIO_RMS = max(1.0, float(os.environ.get("AVTR1_MOTION_AUDIO_RMS", "80")))
+MOTION_LISTEN_RMS = max(
+    MOTION_AUDIO_RMS, float(os.environ.get("AVTR1_MOTION_LISTEN_RMS", "450"))
+)
+MOTION_ACTIVE_HOLD_SECONDS = max(
+    0.0, float(os.environ.get("AVTR1_MOTION_ACTIVE_HOLD_SECONDS", "0.8"))
+)
 BACKGROUND_MUSIC_ENABLED = os.environ.get("BACKGROUND_MUSIC_ENABLED", "1").lower() not in {
     "0", "false", "off", "no"
 }
@@ -53,6 +62,7 @@ MAX_SPEECH_BYTES = SAMPLE_RATE * 2 * 30
 last_frame_at = 0.0
 last_speech_input_at = 0.0
 last_user_voice_at = 0.0
+last_motion_audio_at = 0.0
 connected = False
 state_blob: bytes | None = None
 state_avatar_id: str | None = None
@@ -450,8 +460,18 @@ def _window_from_listen(buf: bytearray) -> tuple[bytes, bytes]:
     return window[: CURRENT_SAMPLES * 2], window[CURRENT_SAMPLES * 2 :]
 
 
+def _pcm_rms(*chunks: bytes) -> float:
+    """Return int16 PCM RMS without a Python-level sample loop."""
+    usable = [chunk[: len(chunk) - len(chunk) % 2] for chunk in chunks if len(chunk) >= 2]
+    if not usable:
+        return 0.0
+    samples = np.frombuffer(b"".join(usable), dtype="<i2").astype(np.float32)
+    return float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
+
+
 async def render_loop() -> None:
     global last_frame_at, connected, state_blob, state_avatar_id, h264_encoder, h264_bytes, renderer_session
+    global last_motion_audio_at
     loop = asyncio.get_running_loop()
     while True:
         t0 = loop.time()
@@ -461,6 +481,14 @@ async def render_loop() -> None:
                 listen_cur, listen_fut = _window_from_listen(listen_pcm)
                 avatar_id = AVATAR_ID
                 blob = state_blob if state_avatar_id == avatar_id else None
+            now = time.monotonic()
+            speech_active = _pcm_rms(cur, fut) >= MOTION_AUDIO_RMS
+            listen_active = _pcm_rms(listen_cur, listen_fut) >= MOTION_LISTEN_RMS
+            if speech_active or listen_active:
+                last_motion_audio_at = now
+            motion_active = now - last_motion_audio_at <= MOTION_ACTIVE_HOLD_SECONDS
+            noise_alpha = NOISE_ALPHA if motion_active else IDLE_NOISE_ALPHA
+            noise_trunc_z = NOISE_TRUNC_Z if motion_active else IDLE_NOISE_TRUNC_Z
             form = aiohttp.FormData()
             form.add_field("current_chunk", cur, filename="cur.raw", content_type="application/octet-stream")
             form.add_field("future_chunk", fut, filename="fut.raw", content_type="application/octet-stream")
@@ -485,8 +513,8 @@ async def render_loop() -> None:
                 "cfg_self_audio": str(CFG_SELF_AUDIO),
                 "cfg_other_audio": str(CFG_OTHER_AUDIO),
                 "cfg_kp": str(CFG_KP),
-                "noise_alpha": str(NOISE_ALPHA),
-                "noise_trunc_z": str(NOISE_TRUNC_Z),
+                "noise_alpha": str(noise_alpha),
+                "noise_trunc_z": str(noise_trunc_z),
             }
             if renderer_session is None:
                 raise RuntimeError("renderer HTTP session is not initialized")
@@ -630,6 +658,15 @@ async def handle_status(_request):
             "flv_clients": len(flv_subscribers),
             "h264_bitrate": H264_BITRATE,
             "h264_bytes": h264_bytes,
+            "motion": {
+                "active_noise_alpha": NOISE_ALPHA,
+                "active_noise_trunc_z": NOISE_TRUNC_Z,
+                "idle_noise_alpha": IDLE_NOISE_ALPHA,
+                "idle_noise_trunc_z": IDLE_NOISE_TRUNC_Z,
+                "audio_rms_threshold": MOTION_AUDIO_RMS,
+                "listen_rms_threshold": MOTION_LISTEN_RMS,
+                "active_hold_seconds": MOTION_ACTIVE_HOLD_SECONDS,
+            },
         }
     )
 

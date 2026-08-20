@@ -225,6 +225,11 @@ export AVTR1_CFG_OTHER_AUDIO="${AVTR1_CFG_OTHER_AUDIO:-2.0}"
 export AVTR1_CFG_KP="${AVTR1_CFG_KP:-3.0}"
 export AVTR1_NOISE_ALPHA="${AVTR1_NOISE_ALPHA:-1.5}"
 export AVTR1_NOISE_TRUNC_Z="${AVTR1_NOISE_TRUNC_Z:-1.0}"
+export AVTR1_IDLE_NOISE_ALPHA="${AVTR1_IDLE_NOISE_ALPHA:-10.0}"
+export AVTR1_IDLE_NOISE_TRUNC_Z="${AVTR1_IDLE_NOISE_TRUNC_Z:-0.25}"
+export AVTR1_MOTION_AUDIO_RMS="${AVTR1_MOTION_AUDIO_RMS:-80}"
+export AVTR1_MOTION_LISTEN_RMS="${AVTR1_MOTION_LISTEN_RMS:-450}"
+export AVTR1_MOTION_ACTIVE_HOLD_SECONDS="${AVTR1_MOTION_ACTIVE_HOLD_SECONDS:-0.8}"
 export AVTR1_URL="http://127.0.0.1:${AVTR1_PORT:-18012}"
 export AVTR1_LOCAL_TEE_URL="http://127.0.0.1:${AVATAR_GW_PORT:-18011}"
 export LOAD_BALANCER_URL=disabled
@@ -238,6 +243,9 @@ for avatar_id in xiaoya xiaoya_idle xiaoya_beach_close xiaoya_beach xiaoya_locke
   avatar_source="$ROOT/assets/looks/${avatar_id}.png"
   [[ -f "$avatar_source" ]] || die "missing avatar portrait $avatar_source"
   cp -f "$avatar_source" "$AVTR1_FRAMES/${avatar_id}.png"
+  [[ -f "$ROOT/assets/looks/pasteback_mask_soft.png" ]] \
+    && cp -f "$ROOT/assets/looks/pasteback_mask_soft.png" \
+      "$AVTR1_FRAMES/${avatar_id}.pbmask.png"
 done
 if alive "$RUN/avtr1_renderer.pid"; then
   say "avtr1 renderer already running (pid $(cat "$RUN/avtr1_renderer.pid"))"

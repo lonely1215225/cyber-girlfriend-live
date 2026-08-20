@@ -57,6 +57,7 @@ need=(
   assets/looks/xiaoya.png
   assets/looks/xiaoya_idle.png
   assets/looks/xiaoya_locket.png
+  assets/looks/pasteback_mask_soft.png
   proxy/nginx.conf.tpl
   proxy/avtr1_gateway.py
   assets/libgrid_sample_3d_plugin.so

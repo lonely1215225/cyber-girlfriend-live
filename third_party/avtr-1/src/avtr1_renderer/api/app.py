@@ -26,6 +26,7 @@ import asyncio
 import logging
 import math
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -47,6 +48,7 @@ from avtr1_renderer.utils.asyncio import run_in_thread
 from avtr1_renderer.utils.cuda_health import CudaHealthChecker
 
 LOG = logging.getLogger(__name__)
+_RENDER_LOCK = threading.Lock()
 
 _INT16_MAX = 32768.0
 
@@ -81,7 +83,22 @@ def _build_chunk(
     return Chunk(audio_speech=speech, audio_listen=listen)
 
 
-def run_chunk(
+def _send_frame_safely(send: MemoryObjectSendStream[bytes], data: bytes) -> None:
+    """Ignore a late worker frame after its HTTP client has disconnected."""
+    try:
+        send.send_nowait(data)
+    except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+        pass
+
+
+def _close_send_safely(send: MemoryObjectSendStream[bytes]) -> None:
+    try:
+        send.close()
+    except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+        pass
+
+
+def _run_chunk_locked(
     loop: asyncio.AbstractEventLoop,
     state_fut: asyncio.Future[bytes],
     send: MemoryObjectSendStream[bytes],
@@ -111,7 +128,7 @@ def run_chunk(
         loop.call_soon_threadsafe(state_fut.set_result, state_to_safetensors(next_state))
 
         for f in frames_iter:
-            loop.call_soon_threadsafe(send.send_nowait, f.data.tobytes())
+            loop.call_soon_threadsafe(_send_frame_safely, send, f.data.tobytes())
 
     except BaseException as exc:
         if not state_fut.done():
@@ -119,7 +136,13 @@ def run_chunk(
         else:
             LOG.exception("post-state worker failure; closing connection")
     finally:
-        loop.call_soon_threadsafe(send.close)
+        loop.call_soon_threadsafe(_close_send_safely, send)
+
+
+def run_chunk(*args, **kwargs) -> None:
+    """Serialize TensorRT work because its shared execution contexts are not re-entrant."""
+    with _RENDER_LOCK:
+        _run_chunk_locked(*args, **kwargs)
 
 
 @asynccontextmanager
@@ -259,6 +282,9 @@ async def process_audio_v3(
             async with recv:
                 async for frame_chunk in recv:
                     yield frame_chunk
+        except asyncio.CancelledError:
+            # Normal when the gateway restarts or a client cancels a request.
+            pass
         except BaseException:
             logging.warning("Body streaming ended abruptly", exc_info=True)
 
