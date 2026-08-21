@@ -16,7 +16,7 @@
     maskFade: 0.42,
     showStatus: true,
     overallBreath: true,
-    overallBreathSeconds: 5.2,
+    overallBreathSeconds: 4.6,
   };
 
   const CFG = Object.assign({}, DEFAULTS, window.AVATAR_CONFIG || {});
@@ -64,7 +64,7 @@
        object-fit:cover; object-position:${CFG.objectPosition};`
     : `top:calc(50% + var(--av-vertical)); right:var(--av-right); height:var(--av-height); width:auto;
        max-width:none; object-fit:cover; transform:translateY(-50%);`;
-  const overallBreathSeconds = Math.min(9, Math.max(3.5, Number(CFG.overallBreathSeconds) || 5.2));
+  const overallBreathSeconds = Math.min(9, Math.max(3.5, Number(CFG.overallBreathSeconds) || 4.6));
   const overallBreathCss = CFG.overallBreath === false ? '' : `
     #av-idle, #av-live-video {
       transform-origin:78% 72%;
@@ -72,12 +72,14 @@
       will-change:scale, translate;
     }
     @keyframes av-overall-breathe {
-      0%, 100% { scale:1.003 1.006; translate:0 .04%; }
-      44% { scale:1.006 1.012; translate:0 -.20%; }
-      58% { scale:1.005 1.010; translate:.03% -.14%; }
+      0%, 100% { scale:1.006 1.012; translate:-.10% .10%; }
+      24% { scale:1.010 1.020; translate:.08% -.18%; }
+      46% { scale:1.015 1.030; translate:.16% -.58%; }
+      64% { scale:1.012 1.024; translate:.02% -.34%; }
+      82% { scale:1.008 1.016; translate:-.14% -.02%; }
     }
     @media (prefers-reduced-motion:reduce) {
-      #av-idle, #av-live-video { animation:none; scale:1.004 1.008; translate:none; }
+      #av-idle, #av-live-video { animation-duration:6.5s; }
     }
   `;
 

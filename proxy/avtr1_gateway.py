@@ -29,7 +29,7 @@ CFG_KP = float(os.environ.get("AVTR1_CFG_KP", "3.0"))
 NOISE_ALPHA = float(os.environ.get("AVTR1_NOISE_ALPHA", "1.5"))
 NOISE_TRUNC_Z = float(os.environ.get("AVTR1_NOISE_TRUNC_Z", "1.0"))
 IDLE_NOISE_ALPHA = float(os.environ.get("AVTR1_IDLE_NOISE_ALPHA", "8.0"))
-IDLE_NOISE_TRUNC_Z = float(os.environ.get("AVTR1_IDLE_NOISE_TRUNC_Z", "0.65"))
+IDLE_NOISE_TRUNC_Z = float(os.environ.get("AVTR1_IDLE_NOISE_TRUNC_Z", "0.82"))
 MOTION_AUDIO_RMS = max(1.0, float(os.environ.get("AVTR1_MOTION_AUDIO_RMS", "80")))
 MOTION_LISTEN_RMS = max(
     MOTION_AUDIO_RMS, float(os.environ.get("AVTR1_MOTION_LISTEN_RMS", "450"))
@@ -86,16 +86,16 @@ IDLE_BREATH_ENABLED = os.environ.get("AVTR1_IDLE_BREATH_ENABLED", "1").lower() n
     "no",
 }
 IDLE_BREATH_POSE_DEGREES = min(
-    0.5, max(0.0, float(os.environ.get("AVTR1_IDLE_BREATH_POSE_DEGREES", "0.38")))
+    0.5, max(0.0, float(os.environ.get("AVTR1_IDLE_BREATH_POSE_DEGREES", "0.48")))
 )
 IDLE_BREATH_YAW_RATIO = min(
-    1.0, max(-1.0, float(os.environ.get("AVTR1_IDLE_BREATH_YAW_RATIO", "0.32")))
+    1.0, max(-1.0, float(os.environ.get("AVTR1_IDLE_BREATH_YAW_RATIO", "0.48")))
 )
 IDLE_BREATH_ROLL_RATIO = min(
-    1.0, max(-1.0, float(os.environ.get("AVTR1_IDLE_BREATH_ROLL_RATIO", "-0.14")))
+    1.0, max(-1.0, float(os.environ.get("AVTR1_IDLE_BREATH_ROLL_RATIO", "-0.22")))
 )
 IDLE_BREATH_PRIMARY_SECONDS = min(
-    12.0, max(2.5, float(os.environ.get("AVTR1_IDLE_BREATH_PRIMARY_SECONDS", "4.4")))
+    12.0, max(2.5, float(os.environ.get("AVTR1_IDLE_BREATH_PRIMARY_SECONDS", "4.0")))
 )
 IDLE_BREATH_DRIFT_SECONDS = min(
     16.0, max(4.0, float(os.environ.get("AVTR1_IDLE_BREATH_DRIFT_SECONDS", "9.1")))
