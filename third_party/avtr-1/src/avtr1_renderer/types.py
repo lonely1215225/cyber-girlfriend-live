@@ -156,10 +156,16 @@ class RenderOptions:
     noise_alpha: float = 2.0
     noise_trunc_z: float = 1.2
 
-    # Optional deterministic eye-expression offset. The gateway uses this for
-    # short idle blinks because AVTR-1's random idle micro-motion does not
-    # guarantee that every source portrait will blink.
+    # Optional deterministic eye-expression offset. ``blink_weights`` carries
+    # one eyelid value per output frame, allowing asymmetric, multi-chunk and
+    # partial blinks instead of repeating one fixed curve every time.
     blink_strength: float = 0.0
+    blink_weights: tuple[float, ...] = ()
+
+    # Low-frequency per-frame pose envelope used for barely perceptible idle
+    # breathing/sway. The value is multiplied by ``micro_pose_degrees``.
+    micro_pose_degrees: float = 0.0
+    micro_pose_weights: tuple[float, ...] = ()
 
     stream_frames: bool = True
 

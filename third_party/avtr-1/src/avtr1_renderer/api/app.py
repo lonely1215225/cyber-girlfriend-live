@@ -72,14 +72,18 @@ def _build_chunk(
     fut_n: int,
 ) -> Chunk:
     cur, fut, curl, futl = audio_bytes
-    speech = np.concatenate([
-        _bytes_to_float32(cur, cur_n, "speech_current"),
-        _bytes_to_float32(fut, fut_n, "speech_future"),
-    ])
-    listen = np.concatenate([
-        _bytes_to_float32(curl, cur_n, "listen_current"),
-        _bytes_to_float32(futl, fut_n, "listen_future"),
-    ])
+    speech = np.concatenate(
+        [
+            _bytes_to_float32(cur, cur_n, "speech_current"),
+            _bytes_to_float32(fut, fut_n, "speech_future"),
+        ]
+    )
+    listen = np.concatenate(
+        [
+            _bytes_to_float32(curl, cur_n, "listen_current"),
+            _bytes_to_float32(futl, fut_n, "listen_future"),
+        ]
+    )
     return Chunk(audio_speech=speech, audio_listen=listen)
 
 
@@ -151,6 +155,7 @@ async def lifespan(app: FastAPI):
 
     # Auto-discover all portrait PNGs in reference_frames.
     from avtr1_renderer.avtr1_artifact_manager import get_artifact_manager
+
     mgr = get_artifact_manager()
     portraits_dir = Path(mgr.get_artifact_path("reference_frames"))
     avatar_ids = [p.stem for p in sorted(portraits_dir.glob("*.png"))]
@@ -180,6 +185,7 @@ async def lifespan(app: FastAPI):
     app.state.avatar_loader = pipeline._avatar_loader
     app.state.avatar_load_lock = asyncio.Lock()
     mg = pipeline._motion_generator
+    app.state.chunk_size = mg.chunk_size
     app.state.current_samples = mg.chunk_size * mg.frame_len
     app.state.future_samples = mg.future_size * mg.frame_len + mg.audio_shift
     app.state.health = CudaHealthChecker()
@@ -207,6 +213,9 @@ async def process_audio_v3(
     noise_alpha: float = 2.0,
     noise_trunc_z: float = 1.2,
     blink_strength: float = 0.0,
+    blink_weights: str = "",
+    micro_pose_degrees: float = 0.0,
+    micro_pose_weights: str = "",
 ) -> StreamingResponse:
     pipeline: Pipeline = request.app.state.pipeline
     registry: dict = request.app.state.registry
@@ -242,6 +251,19 @@ async def process_audio_v3(
     if state_blob_in is not None and len(state_blob_in) == 0:
         state_blob_in = None
 
+    def frame_weights(raw: str, *, minimum: float, maximum: float) -> tuple[float, ...]:
+        try:
+            values = tuple(float(value) for value in raw.split(",") if value.strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail="invalid per-frame motion weights"
+            ) from None
+        if values and len(values) != request.app.state.chunk_size:
+            raise HTTPException(
+                status_code=422, detail="per-frame motion weights must match chunk size"
+            )
+        return tuple(max(minimum, min(maximum, value)) for value in values)
+
     options = RenderOptions(
         pixel_format=pixel_format,
         bg_id=bg_id,
@@ -251,6 +273,9 @@ async def process_audio_v3(
         noise_alpha=noise_alpha,
         noise_trunc_z=noise_trunc_z,
         blink_strength=max(0.0, min(1.5, blink_strength)),
+        blink_weights=frame_weights(blink_weights, minimum=0.0, maximum=1.2),
+        micro_pose_degrees=max(0.0, min(0.5, micro_pose_degrees)),
+        micro_pose_weights=frame_weights(micro_pose_weights, minimum=-1.5, maximum=1.5),
     )
 
     loop = asyncio.get_running_loop()
@@ -342,7 +367,9 @@ async def health(request: Request):
 
 class _DropSuccessfulAccess(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        status = record.args[4] if isinstance(record.args, tuple) and len(record.args) >= 5 else None
+        status = (
+            record.args[4] if isinstance(record.args, tuple) and len(record.args) >= 5 else None
+        )
         if isinstance(status, int) and 200 <= status < 400:
             return False
         return True

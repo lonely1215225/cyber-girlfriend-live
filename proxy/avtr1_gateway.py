@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """AVTR-1 sidecar that publishes synchronized HTTP-FLV for the browser."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +9,7 @@ import os
 import random
 import time
 import wave
+from collections import deque
 from fractions import Fraction
 
 import aiohttp
@@ -35,22 +37,60 @@ MOTION_LISTEN_RMS = max(
 MOTION_ACTIVE_HOLD_SECONDS = max(
     0.0, float(os.environ.get("AVTR1_MOTION_ACTIVE_HOLD_SECONDS", "0.8"))
 )
-IDLE_BLINK_ENABLED = os.environ.get("AVTR1_IDLE_BLINK_ENABLED", "1").lower() not in {
-    "0", "false", "off", "no"
+BLINK_ENABLED = os.environ.get(
+    "AVTR1_BLINK_ENABLED", os.environ.get("AVTR1_IDLE_BLINK_ENABLED", "1")
+).lower() not in {"0", "false", "off", "no"}
+BLINK_MIN_SECONDS = max(
+    1.5,
+    float(
+        os.environ.get(
+            "AVTR1_BLINK_MIN_SECONDS",
+            os.environ.get("AVTR1_IDLE_BLINK_MIN_SECONDS", "2.6"),
+        )
+    ),
+)
+BLINK_MAX_SECONDS = max(
+    BLINK_MIN_SECONDS,
+    float(
+        os.environ.get(
+            "AVTR1_BLINK_MAX_SECONDS",
+            os.environ.get("AVTR1_IDLE_BLINK_MAX_SECONDS", "7.2"),
+        )
+    ),
+)
+BLINK_STRENGTH = min(
+    1.5,
+    max(
+        0.0,
+        float(
+            os.environ.get(
+                "AVTR1_BLINK_STRENGTH",
+                os.environ.get("AVTR1_IDLE_BLINK_STRENGTH", "1.45"),
+            )
+        ),
+    ),
+)
+BLINK_SPEECH_INTERVAL_SCALE = min(
+    1.2, max(0.35, float(os.environ.get("AVTR1_BLINK_SPEECH_INTERVAL_SCALE", "0.72")))
+)
+BLINK_DOUBLE_PROBABILITY = min(
+    0.35, max(0.0, float(os.environ.get("AVTR1_BLINK_DOUBLE_PROBABILITY", "0.10")))
+)
+BLINK_PARTIAL_PROBABILITY = min(
+    0.4, max(0.0, float(os.environ.get("AVTR1_BLINK_PARTIAL_PROBABILITY", "0.16")))
+)
+IDLE_BREATH_ENABLED = os.environ.get("AVTR1_IDLE_BREATH_ENABLED", "1").lower() not in {
+    "0",
+    "false",
+    "off",
+    "no",
 }
-IDLE_BLINK_MIN_SECONDS = max(
-    1.5, float(os.environ.get("AVTR1_IDLE_BLINK_MIN_SECONDS", "3.0"))
+IDLE_BREATH_POSE_DEGREES = min(
+    0.35, max(0.0, float(os.environ.get("AVTR1_IDLE_BREATH_POSE_DEGREES", "0.14")))
 )
-IDLE_BLINK_MAX_SECONDS = max(
-    IDLE_BLINK_MIN_SECONDS,
-    float(os.environ.get("AVTR1_IDLE_BLINK_MAX_SECONDS", "7.0")),
-)
-IDLE_BLINK_STRENGTH = min(
-    1.5, max(0.0, float(os.environ.get("AVTR1_IDLE_BLINK_STRENGTH", "1.5")))
-)
-BACKGROUND_MUSIC_ENABLED = os.environ.get("BACKGROUND_MUSIC_ENABLED", "1").lower() not in {
-    "0", "false", "off", "no"
-}
+BACKGROUND_MUSIC_ENABLED = os.environ.get(
+    "BACKGROUND_MUSIC_ENABLED", "1"
+).lower() not in {"0", "false", "off", "no"}
 BACKGROUND_MUSIC_DIR = os.path.realpath(os.environ.get("BACKGROUND_MUSIC_DIR", "."))
 BACKGROUND_MUSIC_VOLUME = min(
     1.0, max(0.0, float(os.environ.get("BACKGROUND_MUSIC_VOLUME", "0.16")))
@@ -77,10 +117,10 @@ last_frame_at = 0.0
 last_speech_input_at = 0.0
 last_user_voice_at = 0.0
 last_motion_audio_at = 0.0
-last_idle_blink_at = 0.0
-next_idle_blink_at = time.monotonic() + random.uniform(
-    IDLE_BLINK_MIN_SECONDS, IDLE_BLINK_MAX_SECONDS
-)
+last_blink_at = 0.0
+next_blink_at = time.monotonic() + random.uniform(BLINK_MIN_SECONDS, BLINK_MAX_SECONDS)
+blink_frames: deque[float] = deque()
+breath_mix = 0.0
 connected = False
 state_blob: bytes | None = None
 state_avatar_id: str | None = None
@@ -127,25 +167,34 @@ class BackgroundMusic:
         self.gain = BACKGROUND_MUSIC_VOLUME
         if not BACKGROUND_MUSIC_ENABLED or not os.path.isdir(BACKGROUND_MUSIC_DIR):
             return
-        names = sorted((
-            name
-            for name in os.listdir(BACKGROUND_MUSIC_DIR)
-            if name.lower().endswith(".mp3")
-            and os.path.isfile(os.path.join(BACKGROUND_MUSIC_DIR, name))
-        ), key=str.casefold)
+        names = sorted(
+            (
+                name
+                for name in os.listdir(BACKGROUND_MUSIC_DIR)
+                if name.lower().endswith(".mp3")
+                and os.path.isfile(os.path.join(BACKGROUND_MUSIC_DIR, name))
+            ),
+            key=str.casefold,
+        )
         for name in names:
             path = os.path.join(BACKGROUND_MUSIC_DIR, name)
             chunks: list[np.ndarray] = []
             try:
                 with av.open(path) as container:
                     stream = container.streams.audio[0]
-                    resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+                    resampler = av.AudioResampler(
+                        format="s16", layout="mono", rate=SAMPLE_RATE
+                    )
                     for frame in container.decode(stream):
                         for output in resampler.resample(frame):
                             chunks.append(output.to_ndarray().reshape(-1).copy())
                     for output in resampler.resample(None):
                         chunks.append(output.to_ndarray().reshape(-1).copy())
-                samples = np.concatenate(chunks).astype(np.int16, copy=False) if chunks else None
+                samples = (
+                    np.concatenate(chunks).astype(np.int16, copy=False)
+                    if chunks
+                    else None
+                )
                 if samples is not None and samples.size:
                     self.tracks.append((name, samples))
             except Exception as exc:
@@ -166,7 +215,9 @@ class BackgroundMusic:
             _, samples = self.tracks[self.track_index]
             available = samples.size - self.sample_index
             size = min(count - written, available)
-            output[written : written + size] = samples[self.sample_index : self.sample_index + size]
+            output[written : written + size] = samples[
+                self.sample_index : self.sample_index + size
+            ]
             written += size
             self.sample_index += size
             if self.sample_index >= samples.size:
@@ -226,7 +277,10 @@ class H264Encoder:
         frame = av.VideoFrame.from_ndarray(yuv, format="yuv420p")
         frame.pts = self.pts
         self.pts += 1
-        return [(bytes(packet), bool(packet.is_keyframe)) for packet in self.ctx.encode(frame)]
+        return [
+            (bytes(packet), bool(packet.is_keyframe))
+            for packet in self.ctx.encode(frame)
+        ]
 
 
 def _split_annexb(data: bytes) -> list[bytes]:
@@ -323,7 +377,9 @@ class FlvMuxer:
             record = bytes((0x01, sps[1], sps[2], sps[3], 0xFF, 0xE1))
             record += len(sps).to_bytes(2, "big") + sps + bytes((0x01,))
             record += len(pps).to_bytes(2, "big") + pps
-            header = self._tag(9, bytes((0x17, 0x00, 0x00, 0x00, 0x00)) + record, self.timestamp_ms)
+            header = self._tag(
+                9, bytes((0x17, 0x00, 0x00, 0x00, 0x00)) + record, self.timestamp_ms
+            )
             self.avc_header = header
             tags.append(header)
         framed = [n for n in nalus if n and (n[0] & 0x1F) not in (7, 8, 9)]
@@ -352,7 +408,9 @@ class FlvMuxer:
             frame = av.AudioFrame.from_ndarray(flt, format="fltp", layout="mono")
             frame.sample_rate = SAMPLE_RATE
             for packet in self._aac.encode(frame):
-                tags.append(self._tag(8, bytes((0xAE, 0x01)) + bytes(packet), self.timestamp_ms))
+                tags.append(
+                    self._tag(8, bytes((0xAE, 0x01)) + bytes(packet), self.timestamp_ms)
+                )
         return tags
 
     def advance(self, ms: int = 40) -> None:
@@ -480,17 +538,74 @@ def _window_from_listen(buf: bytearray) -> tuple[bytes, bytes]:
 
 def _pcm_rms(*chunks: bytes) -> float:
     """Return int16 PCM RMS without a Python-level sample loop."""
-    usable = [chunk[: len(chunk) - len(chunk) % 2] for chunk in chunks if len(chunk) >= 2]
+    usable = [
+        chunk[: len(chunk) - len(chunk) % 2] for chunk in chunks if len(chunk) >= 2
+    ]
     if not usable:
         return 0.0
     samples = np.frombuffer(b"".join(usable), dtype="<i2").astype(np.float32)
     return float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
 
 
+def _smoothstep(value: float) -> float:
+    value = min(1.0, max(0.0, value))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def _single_blink_profile(*, partial: bool = False) -> list[float]:
+    """Return an asymmetric 25-fps blink: fast close, slower soft reopen."""
+    close_frames = random.choice((2, 2, 2, 3))
+    hold_frames = random.choice((0, 0, 0, 1))
+    open_frames = random.choice((3, 3, 4, 4, 5))
+    peak = random.uniform(0.48, 0.72) if partial else random.uniform(0.88, 1.02)
+    closing = [peak * _smoothstep(i / close_frames) for i in range(1, close_frames + 1)]
+    opening = [
+        peak * (1.0 - _smoothstep(i / open_frames)) for i in range(1, open_frames + 1)
+    ]
+    return closing + [peak] * hold_frames + opening
+
+
+def _new_blink_profile() -> list[float]:
+    partial = random.random() < BLINK_PARTIAL_PROBABILITY
+    profile = _single_blink_profile(partial=partial)
+    if not partial and random.random() < BLINK_DOUBLE_PROBABILITY:
+        profile.extend([0.0] * random.choice((2, 3, 4)))
+        profile.extend(_single_blink_profile(partial=random.random() < 0.35))
+    return profile
+
+
+def _next_blink_delay(*, speaking: bool) -> float:
+    # A beta distribution avoids metronomic uniform intervals while retaining
+    # hard safety bounds. Conversation uses a shorter interval than quiet rest.
+    delay = BLINK_MIN_SECONDS + (
+        BLINK_MAX_SECONDS - BLINK_MIN_SECONDS
+    ) * random.betavariate(1.7, 2.2)
+    return delay * (BLINK_SPEECH_INTERVAL_SCALE if speaking else 1.0)
+
+
+def _breath_weights(now: float, *, enabled: bool) -> list[float]:
+    """Five continuous low-frequency samples; two periods prevent a loop feel."""
+    if not enabled or IDLE_BREATH_POSE_DEGREES <= 0.0:
+        return [0.0] * CHUNK_SIZE
+    # Keep float64 here: monotonic clocks can already be millions of seconds
+    # since boot, where float32 would quantize away the 40ms frame steps.
+    times = now + np.arange(CHUNK_SIZE, dtype=np.float64) / 25.0
+    slow = np.sin((2.0 * np.pi / 4.8) * times)
+    drift = np.sin((2.0 * np.pi / 7.3) * times + 1.1)
+    return ((slow * 0.78 + drift * 0.22) * breath_mix).tolist()
+
+
 async def render_loop() -> None:
-    global last_frame_at, connected, state_blob, state_avatar_id, h264_encoder, h264_bytes, renderer_session
+    global \
+        last_frame_at, \
+        connected, \
+        state_blob, \
+        state_avatar_id, \
+        h264_encoder, \
+        h264_bytes, \
+        renderer_session
     global last_motion_audio_at
-    global last_idle_blink_at, next_idle_blink_at
+    global last_blink_at, next_blink_at, breath_mix
     loop = asyncio.get_running_loop()
     while True:
         t0 = loop.time()
@@ -508,22 +623,41 @@ async def render_loop() -> None:
             motion_active = now - last_motion_audio_at <= MOTION_ACTIVE_HOLD_SECONDS
             noise_alpha = NOISE_ALPHA if motion_active else IDLE_NOISE_ALPHA
             noise_trunc_z = NOISE_TRUNC_Z if motion_active else IDLE_NOISE_TRUNC_Z
-            blink_strength = 0.0
-            if motion_active:
-                # Require a genuinely quiet interval before the next blink so
-                # deterministic idle motion never fights speech lip-sync.
-                next_idle_blink_at = max(
-                    next_idle_blink_at, now + IDLE_BLINK_MIN_SECONDS
+            # Ease breathing out during speech and back in during quiet instead
+            # of snapping the head pose at an audio boundary.
+            breath_mix = (
+                max(0.0, breath_mix - 0.25)
+                if motion_active
+                else min(1.0, breath_mix + 0.12)
+            )
+            micro_pose_weights = _breath_weights(now, enabled=IDLE_BREATH_ENABLED)
+
+            if BLINK_ENABLED and not blink_frames and now >= next_blink_at:
+                blink_frames.extend(_new_blink_profile())
+                last_blink_at = now
+                next_blink_at = (
+                    now
+                    + len(blink_frames) / 25.0
+                    + _next_blink_delay(speaking=motion_active)
                 )
-            elif IDLE_BLINK_ENABLED and now >= next_idle_blink_at:
-                blink_strength = IDLE_BLINK_STRENGTH
-                last_idle_blink_at = now
-                next_idle_blink_at = now + random.uniform(
-                    IDLE_BLINK_MIN_SECONDS, IDLE_BLINK_MAX_SECONDS
-                )
+            blink_weights = [
+                blink_frames.popleft() if blink_frames else 0.0
+                for _ in range(CHUNK_SIZE)
+            ]
+            blink_strength = BLINK_STRENGTH if any(blink_weights) else 0.0
             form = aiohttp.FormData()
-            form.add_field("current_chunk", cur, filename="cur.raw", content_type="application/octet-stream")
-            form.add_field("future_chunk", fut, filename="fut.raw", content_type="application/octet-stream")
+            form.add_field(
+                "current_chunk",
+                cur,
+                filename="cur.raw",
+                content_type="application/octet-stream",
+            )
+            form.add_field(
+                "future_chunk",
+                fut,
+                filename="fut.raw",
+                content_type="application/octet-stream",
+            )
             form.add_field(
                 "current_chunk_listen",
                 listen_cur,
@@ -537,7 +671,12 @@ async def render_loop() -> None:
                 content_type="application/octet-stream",
             )
             if blob:
-                form.add_field("state", blob, filename="state.bin", content_type="application/octet-stream")
+                form.add_field(
+                    "state",
+                    blob,
+                    filename="state.bin",
+                    content_type="application/octet-stream",
+                )
             params = {
                 "avatar_id": avatar_id,
                 "bg_id": BG_ID,
@@ -548,10 +687,17 @@ async def render_loop() -> None:
                 "noise_alpha": str(noise_alpha),
                 "noise_trunc_z": str(noise_trunc_z),
                 "blink_strength": str(blink_strength),
+                "blink_weights": ",".join(f"{value:.4f}" for value in blink_weights),
+                "micro_pose_degrees": str(IDLE_BREATH_POSE_DEGREES),
+                "micro_pose_weights": ",".join(
+                    f"{value:.4f}" for value in micro_pose_weights
+                ),
             }
             if renderer_session is None:
                 raise RuntimeError("renderer HTTP session is not initialized")
-            async with renderer_session.post(f"{RENDERER}/process-audio-v3", data=form, params=params) as r:
+            async with renderer_session.post(
+                f"{RENDERER}/process-audio-v3", data=form, params=params
+            ) as r:
                 if r.status != 200:
                     body = await r.text()
                     print(f"[avtr1-gw] renderer {r.status}: {body[:300]}", flush=True)
@@ -578,19 +724,29 @@ async def render_loop() -> None:
                 raw = frames[i * frame_len : (i + 1) * frame_len]
                 if len(raw) != frame_len:
                     break
-                if h264_encoder is None or (h264_encoder.width, h264_encoder.height) != (w, h):
+                if h264_encoder is None or (
+                    h264_encoder.width,
+                    h264_encoder.height,
+                ) != (w, h):
                     h264_encoder = H264Encoder(w, h)
-                    print(f"[avtr1-gw] H.264 {w}x{h} 25fps bitrate={H264_BITRATE}", flush=True)
+                    print(
+                        f"[avtr1-gw] H.264 {w}x{h} 25fps bitrate={H264_BITRATE}",
+                        flush=True,
+                    )
                 packets = h264_encoder.encode(raw)
                 h264_bytes += sum(len(packet) for packet, _ in packets)
                 last_frame_at = time.time()
                 connected = True
                 enqueue_paced(video_pace_queue, packets)
                 off = i * 2 * PCM_PACKET_BYTES
-                enqueue_paced(audio_pace_queue, played[off : off + PCM_PACKET_BYTES] or bytes(PCM_PACKET_BYTES))
                 enqueue_paced(
                     audio_pace_queue,
-                    played[off + PCM_PACKET_BYTES : off + 2 * PCM_PACKET_BYTES] or bytes(PCM_PACKET_BYTES),
+                    played[off : off + PCM_PACKET_BYTES] or bytes(PCM_PACKET_BYTES),
+                )
+                enqueue_paced(
+                    audio_pace_queue,
+                    played[off + PCM_PACKET_BYTES : off + 2 * PCM_PACKET_BYTES]
+                    or bytes(PCM_PACKET_BYTES),
                 )
             elapsed = loop.time() - t0
             await asyncio.sleep(max(0.0, 0.2 - elapsed))
@@ -677,7 +833,9 @@ async def handle_status(_request):
             "connected": connected and last_frame_at > 0,
             "backend": "avtr1",
             "avatar_id": AVATAR_ID,
-            "age_ms": int((time.time() - last_frame_at) * 1000) if last_frame_at else None,
+            "age_ms": int((time.time() - last_frame_at) * 1000)
+            if last_frame_at
+            else None,
             "speech_ms": int(len(speech_pcm) / 2 / SAMPLE_RATE * 1000),
             "speaking": speaking,
             "background_music": {
@@ -699,18 +857,23 @@ async def handle_status(_request):
                 "audio_rms_threshold": MOTION_AUDIO_RMS,
                 "listen_rms_threshold": MOTION_LISTEN_RMS,
                 "active_hold_seconds": MOTION_ACTIVE_HOLD_SECONDS,
-                "idle_blink_enabled": IDLE_BLINK_ENABLED,
-                "idle_blink_strength": IDLE_BLINK_STRENGTH,
-                "idle_blink_min_seconds": IDLE_BLINK_MIN_SECONDS,
-                "idle_blink_max_seconds": IDLE_BLINK_MAX_SECONDS,
-                "last_idle_blink_age_ms": (
-                    int((time.monotonic() - last_idle_blink_at) * 1000)
-                    if last_idle_blink_at
+                "blink_enabled": BLINK_ENABLED,
+                "blink_strength": BLINK_STRENGTH,
+                "blink_min_seconds": BLINK_MIN_SECONDS,
+                "blink_max_seconds": BLINK_MAX_SECONDS,
+                "blink_speech_interval_scale": BLINK_SPEECH_INTERVAL_SCALE,
+                "blink_double_probability": BLINK_DOUBLE_PROBABILITY,
+                "blink_partial_probability": BLINK_PARTIAL_PROBABILITY,
+                "blink_frames_remaining": len(blink_frames),
+                "last_blink_age_ms": (
+                    int((time.monotonic() - last_blink_at) * 1000)
+                    if last_blink_at
                     else None
                 ),
-                "next_idle_blink_ms": max(
-                    0, int((next_idle_blink_at - time.monotonic()) * 1000)
-                ),
+                "next_blink_ms": max(0, int((next_blink_at - time.monotonic()) * 1000)),
+                "idle_breath_enabled": IDLE_BREATH_ENABLED,
+                "idle_breath_pose_degrees": IDLE_BREATH_POSE_DEGREES,
+                "idle_breath_mix": round(breath_mix, 3),
             },
         }
     )
@@ -735,11 +898,13 @@ async def handle_avatars(_request):
 
 
 async def handle_set_avatar(request):
-    global AVATAR_ID, state_blob, state_avatar_id, h264_encoder, next_idle_blink_at
+    global AVATAR_ID, state_blob, state_avatar_id, h264_encoder, next_blink_at
     body = await request.json()
     avatar_id = str(body.get("avatar_id") or "").strip()
     if not avatar_id or "/" in avatar_id or ".." in avatar_id:
-        return web.json_response({"ok": False, "error": "invalid avatar_id"}, status=400)
+        return web.json_response(
+            {"ok": False, "error": "invalid avatar_id"}, status=400
+        )
     ids, _loaded = await _list_avatar_ids()
     if avatar_id not in ids:
         return web.json_response({"ok": False, "error": "unknown avatar"}, status=404)
@@ -752,7 +917,8 @@ async def handle_set_avatar(request):
         h264_encoder = None
         # Show the newly selected portrait is alive soon after switching,
         # without blinking immediately on the first generated frame.
-        next_idle_blink_at = time.monotonic() + random.uniform(1.2, 2.4)
+        blink_frames.clear()
+        next_blink_at = time.monotonic() + random.uniform(1.2, 2.4)
     for q in (video_pace_queue, audio_pace_queue):
         while not q.empty():
             try:
@@ -760,12 +926,17 @@ async def handle_set_avatar(request):
             except asyncio.QueueEmpty:
                 break
     print(f"[avtr1-gw] avatar -> {AVATAR_ID}", flush=True)
-    return web.json_response({"ok": True, "avatar_id": AVATAR_ID, "label": _avatar_label(AVATAR_ID)})
+    return web.json_response(
+        {"ok": True, "avatar_id": AVATAR_ID, "label": _avatar_label(AVATAR_ID)}
+    )
 
 
 async def handle_livestream(request):
     wants_music = request.query.get("music", "1").strip().lower() not in {
-        "0", "false", "off", "no"
+        "0",
+        "false",
+        "off",
+        "no",
     }
     resp = web.StreamResponse(
         status=200,
@@ -794,7 +965,12 @@ async def handle_livestream(request):
             chunk = await q.get()
             await resp.write(chunk)
             await resp.drain()
-    except (ConnectionResetError, ConnectionError, asyncio.CancelledError, RuntimeError):
+    except (
+        ConnectionResetError,
+        ConnectionError,
+        asyncio.CancelledError,
+        RuntimeError,
+    ):
         pass
     finally:
         flv_subscribers.pop(q, None)
@@ -886,7 +1062,10 @@ def main():
     app.router.add_post("/interrupt", handle_interrupt)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
-    print(f"avtr1 gateway {HOST}:{PORT} -> {RENDERER} avatar={AVATAR_ID} bg={BG_ID}", flush=True)
+    print(
+        f"avtr1 gateway {HOST}:{PORT} -> {RENDERER} avatar={AVATAR_ID} bg={BG_ID}",
+        flush=True,
+    )
     web.run_app(app, host=HOST, port=PORT, print=None)
 
 

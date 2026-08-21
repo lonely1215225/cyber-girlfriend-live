@@ -220,10 +220,15 @@ sudo -E ./install.sh
 | `AVTR1_MOTION_AUDIO_RMS` | `80` | 进入说话动作模式的 PCM 音量阈值 |
 | `AVTR1_MOTION_LISTEN_RMS` | `450` | 连线者触发倾听动作的 PCM 阈值，过滤静音底噪 |
 | `AVTR1_MOTION_ACTIVE_HOLD_SECONDS` | `0.8` | 音频结束后保留说话动作参数的过渡时间 |
-| `AVTR1_IDLE_BLINK_ENABLED` | `1` | 静音时启用确定性自然眨眼；说话时自动暂停 |
-| `AVTR1_IDLE_BLINK_MIN_SECONDS` | `3.0` | 两次待机眨眼的最短随机间隔 |
-| `AVTR1_IDLE_BLINK_MAX_SECONDS` | `7.0` | 两次待机眨眼的最长随机间隔 |
-| `AVTR1_IDLE_BLINK_STRENGTH` | `1.5` | 眨眼闭合幅度，建议保持在 `1.0–1.5` |
+| `AVTR1_BLINK_ENABLED` | `1` | 待机、倾听和说话时均启用自然眨眼 |
+| `AVTR1_BLINK_MIN_SECONDS` | `2.6` | 两次眨眼间隔的下限 |
+| `AVTR1_BLINK_MAX_SECONDS` | `7.2` | 两次眨眼间隔的上限；实际采用非均匀分布，避免节拍器感 |
+| `AVTR1_BLINK_STRENGTH` | `1.45` | 眨眼闭合幅度，建议保持在 `1.0–1.5` |
+| `AVTR1_BLINK_SPEECH_INTERVAL_SCALE` | `0.72` | 说话时的眨眼间隔倍率；低于 `1` 表示比待机更频繁 |
+| `AVTR1_BLINK_DOUBLE_PROBABILITY` | `0.10` | 偶发连续眨眼概率 |
+| `AVTR1_BLINK_PARTIAL_PROBABILITY` | `0.16` | 不完全闭眼的轻眨概率 |
+| `AVTR1_IDLE_BREATH_ENABLED` | `1` | 待机时启用低频呼吸/重心微动，说话时平滑淡出 |
+| `AVTR1_IDLE_BREATH_POSE_DEGREES` | `0.14` | 呼吸微动的姿态幅度；建议不超过 `0.25` |
 | `BACKGROUND_MUSIC_ENABLED` | `1` | 循环播放背景纯音乐 |
 | `BACKGROUND_MUSIC_DIR` | `.` | MP3 播放列表目录；相对路径从项目根目录解析 |
 | `BACKGROUND_MUSIC_VOLUME` | `0.16` | 无人说话时的背景音乐音量 |
@@ -350,7 +355,7 @@ s2s/.venv/bin/python -m unittest discover -s tests -v
 <details>
 <summary><strong>数字人偶尔张嘴幅度小怎么办？</strong></summary>
 
-可小幅调整 `AVTR1_CFG_SELF_AUDIO` 与 `AVTR1_CFG_KP`。数值过高可能导致动作夸张或不稳定，建议每次只调整 10% 左右并观察完整句子的表现。网关会根据实时 PCM RMS 在说话与静音两套噪声参数间自动切换；静音稳定性主要由 `AVTR1_IDLE_NOISE_ALPHA` 和 `AVTR1_IDLE_NOISE_TRUNC_Z` 控制。AVTR-1 官方的无音频模式只承诺随机微动作，并不保证每个参考形象都会眨眼，因此本项目额外从内置 idle 素材提取了可跨形象重定向的闭眼表达，并在静音时以随机间隔播放一个 200ms 眨眼；它不会在说话或倾听动作期间触发。`assets/looks/pasteback_mask_soft.png` 会作为每个内置形象的回贴蒙版，扩大头顶羽化区，减轻生成头部和原始图片之间的接缝。
+可小幅调整 `AVTR1_CFG_SELF_AUDIO` 与 `AVTR1_CFG_KP`。数值过高可能导致动作夸张或不稳定，建议每次只调整 10% 左右并观察完整句子的表现。网关会根据实时 PCM RMS 在说话与静音两套噪声参数间自动切换；静音稳定性主要由 `AVTR1_IDLE_NOISE_ALPHA` 和 `AVTR1_IDLE_NOISE_TRUNC_Z` 控制。AVTR-1 官方的无音频模式只承诺随机微动作，并不保证每个参考形象都会眨眼，因此本项目额外从内置 idle 素材提取了可跨形象重定向的闭眼表达。眨眼采用逐帧的快闭慢开曲线，时长、幅度和间隔会变化，也会偶发轻眨及连眨；待机、倾听和说话阶段均可触发。静音时还会叠加两种不同周期组成的低频呼吸微动，并在开始说话时平滑淡出。`assets/looks/pasteback_mask_soft.png` 会作为每个内置形象的回贴蒙版，扩大头顶羽化区，减轻生成头部和原始图片之间的接缝。
 
 </details>
 

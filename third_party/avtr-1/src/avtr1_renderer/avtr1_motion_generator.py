@@ -106,9 +106,7 @@ def state_to_safetensors(state: AVTR1State) -> bytes:
     return save(tensors)
 
 
-def state_from_safetensors(
-    blob: bytes, *, device: str | torch.device = "cuda"
-) -> AVTR1State:
+def state_from_safetensors(blob: bytes, *, device: str | torch.device = "cuda") -> AVTR1State:
     """Inverse of :func:`state_to_safetensors`. Loads each tensor
     directly onto ``device`` (default CUDA)."""
     from safetensors.torch import load
@@ -143,11 +141,13 @@ class AVTR1State:
     place state ever touches the host.
     """
 
-    audio_prev_speech: torch.Tensor       # (chunksize[0] * frame_len,) float32 CUDA
-    audio_prev_listen: torch.Tensor       # parallel to speech
-    audio_features: torch.Tensor          # (1, past_size, 2 * 1024) float32 CUDA -- speech || listen HuBERT history
-    past_cond: torch.Tensor               # (1, past_size, nfeats) float32 CUDA, normalised motion
-    noise_shared: torch.Tensor | None     # (1, 1, nfeats) CUDA AR(1) carry, or None on cold start
+    audio_prev_speech: torch.Tensor  # (chunksize[0] * frame_len,) float32 CUDA
+    audio_prev_listen: torch.Tensor  # parallel to speech
+    audio_features: (
+        torch.Tensor
+    )  # (1, past_size, 2 * 1024) float32 CUDA -- speech || listen HuBERT history
+    past_cond: torch.Tensor  # (1, past_size, nfeats) float32 CUDA, normalised motion
+    noise_shared: torch.Tensor | None  # (1, 1, nfeats) CUDA AR(1) carry, or None on cold start
 
 
 # ---------------------------------------------------------------------------
@@ -229,14 +229,14 @@ class Normalizer:
     intro library.
     """
 
-    offset_so3: torch.Tensor       # (3,)
-    scale_so3: torch.Tensor        # (3,)
-    offset_kp: torch.Tensor        # (21, 3)
-    scale_kp: torch.Tensor         # (21, 3)
-    offset_exp: torch.Tensor       # (21, 3)
-    scale_exp: torch.Tensor        # (21, 3)
-    exp_lipsync_offset: torch.Tensor   # (N_LIPSYNC,) -- pre-sliced for de-norm
-    exp_lipsync_scale: torch.Tensor    # (N_LIPSYNC,)
+    offset_so3: torch.Tensor  # (3,)
+    scale_so3: torch.Tensor  # (3,)
+    offset_kp: torch.Tensor  # (21, 3)
+    scale_kp: torch.Tensor  # (21, 3)
+    offset_exp: torch.Tensor  # (21, 3)
+    scale_exp: torch.Tensor  # (21, 3)
+    exp_lipsync_offset: torch.Tensor  # (N_LIPSYNC,) -- pre-sliced for de-norm
+    exp_lipsync_scale: torch.Tensor  # (N_LIPSYNC,)
 
     @classmethod
     def from_safetensors(
@@ -320,30 +320,61 @@ class AVTR1MotionGenerator:
         # ``past_times`` is constant at inference: every past chunk is
         # marked "clean" (timestep = 1.0).
         n_past_chunks = past_size // chunk_size
-        self._past_times = torch.ones(
-            (1, n_past_chunks, 1), dtype=torch.float32, device="cuda"
-        )
+        self._past_times = torch.ones((1, n_past_chunks, 1), dtype=torch.float32, device="cuda")
         # Relative closed-eye expression extracted from the bundled idle clip
         # (three closed frames minus neighbouring open frames), restricted to
         # AVTR-1's 39 predicted expression coordinates. Keeping the offset in
         # implicit-keypoint space lets the same blink retarget across avatars.
         self._blink_delta = torch.tensor(
             [
-                -0.0003907, 0.0003383, 0.0000002, 0.0004025, -0.0010335,
-                -0.0000001, 0.0000010, 0.0000149, -0.0000001, 0.0000881,
-                0.0015947, 0.0000001, -0.0000013, 0.0000034, -0.0000003,
-                0.0000437, -0.0003065, 0.0000007, 0.0002290, -0.0003054,
-                -0.0000003, -0.0003528, 0.0015133, -0.0000020, -0.0000644,
-                -0.0001649, -0.0000018, -0.0001104, -0.0000211, 0.0000524,
-                -0.0000025, 0.0000008, 0.0000031, 0.0003559, -0.0010606,
-                -0.0003704, -0.0000067, -0.0005968, 0.0001876,
+                -0.0003907,
+                0.0003383,
+                0.0000002,
+                0.0004025,
+                -0.0010335,
+                -0.0000001,
+                0.0000010,
+                0.0000149,
+                -0.0000001,
+                0.0000881,
+                0.0015947,
+                0.0000001,
+                -0.0000013,
+                0.0000034,
+                -0.0000003,
+                0.0000437,
+                -0.0003065,
+                0.0000007,
+                0.0002290,
+                -0.0003054,
+                -0.0000003,
+                -0.0003528,
+                0.0015133,
+                -0.0000020,
+                -0.0000644,
+                -0.0001649,
+                -0.0000018,
+                -0.0001104,
+                -0.0000211,
+                0.0000524,
+                -0.0000025,
+                0.0000008,
+                0.0000031,
+                0.0003559,
+                -0.0010606,
+                -0.0003704,
+                -0.0000067,
+                -0.0005968,
+                0.0001876,
             ],
             dtype=torch.float32,
             device="cuda",
         )
-        self._blink_curve = torch.sin(
-            torch.linspace(0.0, torch.pi, chunk_size, device="cuda")
-        ).square().unsqueeze(1)
+        self._blink_curve = (
+            torch.sin(torch.linspace(0.0, torch.pi, chunk_size, device="cuda"))
+            .square()
+            .unsqueeze(1)
+        )
         # HuBERT chunksize convention: (past, current, future) motion frames.
         self._hubert_chunksize: tuple[int, int, int] = (
             self.HUBERT_PAST_FRAMES,
@@ -354,7 +385,6 @@ class AVTR1MotionGenerator:
         # past portion -- those features were already collected on a prior
         # call and live in ``State.audio_features``.
         self._hubert_n_motion = chunk_size + future_size
-
 
     # -- State ---------------------------------------------------------------
 
@@ -433,7 +463,9 @@ class AVTR1MotionGenerator:
 
         # ---- Build full audio_cond by prepending the 75-frame history ---
         history = state.audio_features  # already on CUDA
-        audio_cond = torch.cat([history, new_audio_feats], dim=1)  # (1, past+chunk+fut, 2*AUDIO_DIM)
+        audio_cond = torch.cat(
+            [history, new_audio_feats], dim=1
+        )  # (1, past+chunk+fut, 2*AUDIO_DIM)
 
         # ---- kp_cond ----------------------------------------------------
         kp_cond = self._build_kp_cond(avatar)
@@ -488,9 +520,7 @@ class AVTR1MotionGenerator:
         w_other = torch.full(
             (self.latent_dim,), options.cfg_other_audio, device=device, dtype=torch.float32
         )
-        w_kp = torch.full(
-            (self.latent_dim,), options.cfg_kp, device=device, dtype=torch.float32
-        )
+        w_kp = torch.full((self.latent_dim,), options.cfg_kp, device=device, dtype=torch.float32)
         # Pre-build the full ``t`` schedule on GPU as one contiguous
         # tensor (n_ode_steps, 1, 1); slice ``times[i]`` per step to get
         # a (1, 1) view -- no D2H. Linspace is uniform so ``dt`` is a
@@ -498,9 +528,9 @@ class AVTR1MotionGenerator:
         # did ``t_buf.fill_(float(time[i]))`` and
         # ``(time[i + 1] - time[i]).item()`` -- both CUDA->host syncs
         # inside the hot loop, ~9 syncs per chunk at n_ode_steps=10.
-        times = torch.linspace(
-            0.0, 1.0, self.n_ode_steps, device=device, dtype=torch.float32
-        ).view(-1, 1, 1)
+        times = torch.linspace(0.0, 1.0, self.n_ode_steps, device=device, dtype=torch.float32).view(
+            -1, 1, 1
+        )
         dt = 1.0 / (self.n_ode_steps - 1)
         for i in range(self.n_ode_steps - 1):
             self._decode(
@@ -522,16 +552,30 @@ class AVTR1MotionGenerator:
         # ``x`` is the normalised motion prediction for this chunk.
         motions = self._motion_to_frames(x)
         if options.blink_strength > 0.0:
+            if options.blink_weights:
+                blink_curve = torch.tensor(
+                    options.blink_weights, dtype=torch.float32, device=device
+                ).unsqueeze(1)
+            else:
+                blink_curve = self._blink_curve
             motions = MotionFrame(
                 R=motions.R,
                 # The extraction clip and arbitrary target portraits have
                 # different eye-opening baselines; a calibrated 4x retarget
                 # gain produces a complete but still natural closure.
                 exp=motions.exp
-                + self._blink_delta.unsqueeze(0)
-                * self._blink_curve
-                * options.blink_strength
-                * 4.0,
+                + self._blink_delta.unsqueeze(0) * blink_curve * options.blink_strength * 4.0,
+            )
+        if options.micro_pose_degrees > 0.0 and options.micro_pose_weights:
+            pose = torch.tensor(
+                options.micro_pose_weights, dtype=torch.float32, device=device
+            ) * math.radians(options.micro_pose_degrees)
+            # A breath is primarily a minute pitch change. Small coupled yaw
+            # and roll components keep it from looking like a motorized nod.
+            rotvec = torch.stack((pose, pose * 0.18, pose * -0.10), dim=1)
+            motions = MotionFrame(
+                R=motions.R @ roma.rotvec_to_rotmat(rotvec),
+                exp=motions.exp,
             )
 
         # ---- next state -------------------------------------------------
@@ -567,9 +611,9 @@ class AVTR1MotionGenerator:
         exp_n = (exp_in_R - self._normalizer.offset_exp) / self._normalizer.scale_exp
         exp_n = exp_n.clamp(-Z_SCORE_CLIP_VALUE, Z_SCORE_CLIP_VALUE)
 
-        return torch.cat(
-            [so3_n, kp_n.view(1, -1), exp_n.view(1, -1)], dim=-1
-        )[:, None]  # (1, 1, 129)
+        return torch.cat([so3_n, kp_n.view(1, -1), exp_n.view(1, -1)], dim=-1)[
+            :, None
+        ]  # (1, 1, 129)
 
     def _motion_to_frames(self, x: torch.Tensor) -> MotionFrame:
         """De-normalise the ODE result into a stacked ``MotionFrame``.
@@ -582,8 +626,7 @@ class AVTR1MotionGenerator:
 
         so3 = so3_n * self._normalizer.scale_so3 + self._normalizer.offset_so3  # (T, 3)
         exp_lipsync = (
-            exp_lipsync_n * self._normalizer.exp_lipsync_scale
-            + self._normalizer.exp_lipsync_offset
+            exp_lipsync_n * self._normalizer.exp_lipsync_scale + self._normalizer.exp_lipsync_offset
         )  # (T, N_LIPSYNC)
         R = roma.rotvec_to_rotmat(so3)  # (T, 3, 3)
         return MotionFrame(R=R, exp=exp_lipsync)
