@@ -28,14 +28,14 @@ CFG_OTHER_AUDIO = float(os.environ.get("AVTR1_CFG_OTHER_AUDIO", "2.0"))
 CFG_KP = float(os.environ.get("AVTR1_CFG_KP", "3.0"))
 NOISE_ALPHA = float(os.environ.get("AVTR1_NOISE_ALPHA", "1.5"))
 NOISE_TRUNC_Z = float(os.environ.get("AVTR1_NOISE_TRUNC_Z", "1.0"))
-IDLE_NOISE_ALPHA = float(os.environ.get("AVTR1_IDLE_NOISE_ALPHA", "6.0"))
-IDLE_NOISE_TRUNC_Z = float(os.environ.get("AVTR1_IDLE_NOISE_TRUNC_Z", "0.45"))
+IDLE_NOISE_ALPHA = float(os.environ.get("AVTR1_IDLE_NOISE_ALPHA", "8.0"))
+IDLE_NOISE_TRUNC_Z = float(os.environ.get("AVTR1_IDLE_NOISE_TRUNC_Z", "0.65"))
 MOTION_AUDIO_RMS = max(1.0, float(os.environ.get("AVTR1_MOTION_AUDIO_RMS", "80")))
 MOTION_LISTEN_RMS = max(
     MOTION_AUDIO_RMS, float(os.environ.get("AVTR1_MOTION_LISTEN_RMS", "450"))
 )
 MOTION_ACTIVE_HOLD_SECONDS = max(
-    0.0, float(os.environ.get("AVTR1_MOTION_ACTIVE_HOLD_SECONDS", "0.8"))
+    0.0, float(os.environ.get("AVTR1_MOTION_ACTIVE_HOLD_SECONDS", "1.0"))
 )
 BLINK_ENABLED = os.environ.get(
     "AVTR1_BLINK_ENABLED", os.environ.get("AVTR1_IDLE_BLINK_ENABLED", "1")
@@ -45,7 +45,7 @@ BLINK_MIN_SECONDS = max(
     float(
         os.environ.get(
             "AVTR1_BLINK_MIN_SECONDS",
-            os.environ.get("AVTR1_IDLE_BLINK_MIN_SECONDS", "2.6"),
+            os.environ.get("AVTR1_IDLE_BLINK_MIN_SECONDS", "2.4"),
         )
     ),
 )
@@ -54,7 +54,7 @@ BLINK_MAX_SECONDS = max(
     float(
         os.environ.get(
             "AVTR1_BLINK_MAX_SECONDS",
-            os.environ.get("AVTR1_IDLE_BLINK_MAX_SECONDS", "7.2"),
+            os.environ.get("AVTR1_IDLE_BLINK_MAX_SECONDS", "6.8"),
         )
     ),
 )
@@ -65,19 +65,19 @@ BLINK_STRENGTH = min(
         float(
             os.environ.get(
                 "AVTR1_BLINK_STRENGTH",
-                os.environ.get("AVTR1_IDLE_BLINK_STRENGTH", "1.45"),
+                os.environ.get("AVTR1_IDLE_BLINK_STRENGTH", "1.08"),
             )
         ),
     ),
 )
 BLINK_SPEECH_INTERVAL_SCALE = min(
-    1.2, max(0.35, float(os.environ.get("AVTR1_BLINK_SPEECH_INTERVAL_SCALE", "0.72")))
+    1.2, max(0.35, float(os.environ.get("AVTR1_BLINK_SPEECH_INTERVAL_SCALE", "0.82")))
 )
 BLINK_DOUBLE_PROBABILITY = min(
-    0.35, max(0.0, float(os.environ.get("AVTR1_BLINK_DOUBLE_PROBABILITY", "0.10")))
+    0.35, max(0.0, float(os.environ.get("AVTR1_BLINK_DOUBLE_PROBABILITY", "0.08")))
 )
 BLINK_PARTIAL_PROBABILITY = min(
-    0.4, max(0.0, float(os.environ.get("AVTR1_BLINK_PARTIAL_PROBABILITY", "0.16")))
+    0.4, max(0.0, float(os.environ.get("AVTR1_BLINK_PARTIAL_PROBABILITY", "0.28")))
 )
 IDLE_BREATH_ENABLED = os.environ.get("AVTR1_IDLE_BREATH_ENABLED", "1").lower() not in {
     "0",
@@ -86,7 +86,22 @@ IDLE_BREATH_ENABLED = os.environ.get("AVTR1_IDLE_BREATH_ENABLED", "1").lower() n
     "no",
 }
 IDLE_BREATH_POSE_DEGREES = min(
-    0.35, max(0.0, float(os.environ.get("AVTR1_IDLE_BREATH_POSE_DEGREES", "0.14")))
+    0.35, max(0.0, float(os.environ.get("AVTR1_IDLE_BREATH_POSE_DEGREES", "0.26")))
+)
+IDLE_BREATH_PRIMARY_SECONDS = min(
+    12.0, max(2.5, float(os.environ.get("AVTR1_IDLE_BREATH_PRIMARY_SECONDS", "4.4")))
+)
+IDLE_BREATH_DRIFT_SECONDS = min(
+    16.0, max(4.0, float(os.environ.get("AVTR1_IDLE_BREATH_DRIFT_SECONDS", "9.1")))
+)
+IDLE_BREATH_DRIFT_MIX = min(
+    0.5, max(0.0, float(os.environ.get("AVTR1_IDLE_BREATH_DRIFT_MIX", "0.30")))
+)
+IDLE_BREATH_FADE_IN_STEP = min(
+    1.0, max(0.01, float(os.environ.get("AVTR1_IDLE_BREATH_FADE_IN_STEP", "0.08")))
+)
+IDLE_BREATH_FADE_OUT_STEP = min(
+    1.0, max(0.01, float(os.environ.get("AVTR1_IDLE_BREATH_FADE_OUT_STEP", "0.18")))
 )
 BACKGROUND_MUSIC_ENABLED = os.environ.get(
     "BACKGROUND_MUSIC_ENABLED", "1"
@@ -590,9 +605,10 @@ def _breath_weights(now: float, *, enabled: bool) -> list[float]:
     # Keep float64 here: monotonic clocks can already be millions of seconds
     # since boot, where float32 would quantize away the 40ms frame steps.
     times = now + np.arange(CHUNK_SIZE, dtype=np.float64) / 25.0
-    slow = np.sin((2.0 * np.pi / 4.8) * times)
-    drift = np.sin((2.0 * np.pi / 7.3) * times + 1.1)
-    return ((slow * 0.78 + drift * 0.22) * breath_mix).tolist()
+    slow = np.sin((2.0 * np.pi / IDLE_BREATH_PRIMARY_SECONDS) * times)
+    drift = np.sin((2.0 * np.pi / IDLE_BREATH_DRIFT_SECONDS) * times + 1.1)
+    slow_mix = 1.0 - IDLE_BREATH_DRIFT_MIX
+    return ((slow * slow_mix + drift * IDLE_BREATH_DRIFT_MIX) * breath_mix).tolist()
 
 
 async def render_loop() -> None:
@@ -626,9 +642,9 @@ async def render_loop() -> None:
             # Ease breathing out during speech and back in during quiet instead
             # of snapping the head pose at an audio boundary.
             breath_mix = (
-                max(0.0, breath_mix - 0.25)
+                max(0.0, breath_mix - IDLE_BREATH_FADE_OUT_STEP)
                 if motion_active
-                else min(1.0, breath_mix + 0.12)
+                else min(1.0, breath_mix + IDLE_BREATH_FADE_IN_STEP)
             )
             micro_pose_weights = _breath_weights(now, enabled=IDLE_BREATH_ENABLED)
 
@@ -873,6 +889,11 @@ async def handle_status(_request):
                 "next_blink_ms": max(0, int((next_blink_at - time.monotonic()) * 1000)),
                 "idle_breath_enabled": IDLE_BREATH_ENABLED,
                 "idle_breath_pose_degrees": IDLE_BREATH_POSE_DEGREES,
+                "idle_breath_primary_seconds": IDLE_BREATH_PRIMARY_SECONDS,
+                "idle_breath_drift_seconds": IDLE_BREATH_DRIFT_SECONDS,
+                "idle_breath_drift_mix": IDLE_BREATH_DRIFT_MIX,
+                "idle_breath_fade_in_step": IDLE_BREATH_FADE_IN_STEP,
+                "idle_breath_fade_out_step": IDLE_BREATH_FADE_OUT_STEP,
                 "idle_breath_mix": round(breath_mix, 3),
             },
         }

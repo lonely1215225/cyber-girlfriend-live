@@ -217,20 +217,25 @@ sudo -E ./install.sh
 | `AVTR1_CFG_KP` | `3.0` | 原始人物关键点与身份姿态约束；过高可能显得僵硬 |
 | `AVTR1_NOISE_ALPHA` | `1.5` | 说话时随机运动的时间相关性，越高变化越连续 |
 | `AVTR1_NOISE_TRUNC_Z` | `1.0` | 说话时随机运动幅度上限 |
-| `AVTR1_IDLE_NOISE_ALPHA` | `6.0` | 静音动作时间相关性；兼顾连续性和轻微待机动作 |
-| `AVTR1_IDLE_NOISE_TRUNC_Z` | `0.45` | 静音随机运动幅度上限；过低会让部分形象近似静帧 |
+| `AVTR1_IDLE_NOISE_ALPHA` | `8.0` | 静音动作时间相关性；提高后动作变化更连续，减少随机抖动 |
+| `AVTR1_IDLE_NOISE_TRUNC_Z` | `0.65` | 静音随机运动幅度上限；兼顾可见微动与稳定性 |
 | `AVTR1_MOTION_AUDIO_RMS` | `80` | 进入说话动作模式的 PCM 音量阈值 |
 | `AVTR1_MOTION_LISTEN_RMS` | `450` | 连线者触发倾听动作的 PCM 阈值，过滤静音底噪 |
-| `AVTR1_MOTION_ACTIVE_HOLD_SECONDS` | `0.8` | 音频结束后保留说话动作参数的过渡时间 |
+| `AVTR1_MOTION_ACTIVE_HOLD_SECONDS` | `1.0` | 音频结束后保留说话动作参数的过渡时间 |
 | `AVTR1_BLINK_ENABLED` | `1` | 待机、倾听和说话时均启用自然眨眼 |
-| `AVTR1_BLINK_MIN_SECONDS` | `2.6` | 两次眨眼间隔的下限 |
-| `AVTR1_BLINK_MAX_SECONDS` | `7.2` | 两次眨眼间隔的上限；实际采用非均匀分布，避免节拍器感 |
-| `AVTR1_BLINK_STRENGTH` | `1.45` | 眨眼闭合幅度，建议保持在 `1.0–1.5` |
-| `AVTR1_BLINK_SPEECH_INTERVAL_SCALE` | `0.72` | 说话时的眨眼间隔倍率；低于 `1` 表示比待机更频繁 |
-| `AVTR1_BLINK_DOUBLE_PROBABILITY` | `0.10` | 偶发连续眨眼概率 |
-| `AVTR1_BLINK_PARTIAL_PROBABILITY` | `0.16` | 不完全闭眼的轻眨概率 |
+| `AVTR1_BLINK_MIN_SECONDS` | `2.4` | 两次眨眼间隔的下限 |
+| `AVTR1_BLINK_MAX_SECONDS` | `6.8` | 两次眨眼间隔的上限；实际采用非均匀分布，避免节拍器感 |
+| `AVTR1_BLINK_STRENGTH` | `1.08` | 眨眼闭合幅度；降低强度可减少机械式重眨 |
+| `AVTR1_BLINK_SPEECH_INTERVAL_SCALE` | `0.82` | 说话时的眨眼间隔倍率；低于 `1` 表示比待机更频繁 |
+| `AVTR1_BLINK_DOUBLE_PROBABILITY` | `0.08` | 偶发连续眨眼概率 |
+| `AVTR1_BLINK_PARTIAL_PROBABILITY` | `0.28` | 不完全闭眼的轻眨概率 |
 | `AVTR1_IDLE_BREATH_ENABLED` | `1` | 待机时启用低频呼吸/重心微动，说话时平滑淡出 |
-| `AVTR1_IDLE_BREATH_POSE_DEGREES` | `0.14` | 呼吸微动的姿态幅度；建议不超过 `0.25` |
+| `AVTR1_IDLE_BREATH_POSE_DEGREES` | `0.26` | 呼吸微动的姿态幅度；当前使用可见但克制的年轻化效果 |
+| `AVTR1_IDLE_BREATH_PRIMARY_SECONDS` | `4.4` | 一次主要呼吸起伏的周期 |
+| `AVTR1_IDLE_BREATH_DRIFT_SECONDS` | `9.1` | 慢速重心漂移周期，与呼吸周期错开以避免循环感 |
+| `AVTR1_IDLE_BREATH_DRIFT_MIX` | `0.30` | 慢速漂移在待机微动中的占比，范围 `0–0.5` |
+| `AVTR1_IDLE_BREATH_FADE_IN_STEP` | `0.08` | 静音后每个渲染块的呼吸淡入步长 |
+| `AVTR1_IDLE_BREATH_FADE_OUT_STEP` | `0.18` | 开始说话后每个渲染块的呼吸淡出步长 |
 | `BACKGROUND_MUSIC_ENABLED` | `1` | 循环播放背景纯音乐 |
 | `BACKGROUND_MUSIC_DIR` | `.` | MP3 播放列表目录；相对路径从项目根目录解析 |
 | `BACKGROUND_MUSIC_VOLUME` | `0.16` | 无人说话时的背景音乐音量 |
