@@ -15,6 +15,8 @@
     objectPosition: '78% 50%',
     maskFade: 0.42,
     showStatus: true,
+    overallBreath: true,
+    overallBreathSeconds: 5.2,
   };
 
   const CFG = Object.assign({}, DEFAULTS, window.AVATAR_CONFIG || {});
@@ -62,6 +64,22 @@
        object-fit:cover; object-position:${CFG.objectPosition};`
     : `top:calc(50% + var(--av-vertical)); right:var(--av-right); height:var(--av-height); width:auto;
        max-width:none; object-fit:cover; transform:translateY(-50%);`;
+  const overallBreathSeconds = Math.min(9, Math.max(3.5, Number(CFG.overallBreathSeconds) || 5.2));
+  const overallBreathCss = CFG.overallBreath === false ? '' : `
+    #av-idle, #av-live-video {
+      transform-origin:78% 72%;
+      animation:av-overall-breathe ${overallBreathSeconds}s cubic-bezier(.45,.05,.55,.95) infinite;
+      will-change:scale, translate;
+    }
+    @keyframes av-overall-breathe {
+      0%, 100% { scale:1.003 1.006; translate:0 .04%; }
+      44% { scale:1.006 1.012; translate:0 -.20%; }
+      58% { scale:1.005 1.010; translate:.03% -.14%; }
+    }
+    @media (prefers-reduced-motion:reduce) {
+      #av-idle, #av-live-video { animation:none; scale:1.004 1.008; translate:none; }
+    }
+  `;
 
   const style = document.createElement('style');
   style.textContent = `
@@ -107,6 +125,7 @@
       border-radius:999px; padding:4px 10px; pointer-events:none;
       backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
     }
+    ${overallBreathCss}
   `;
   (document.head || document.documentElement).appendChild(style);
 

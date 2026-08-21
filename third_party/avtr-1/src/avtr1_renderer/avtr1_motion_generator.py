@@ -572,7 +572,14 @@ class AVTR1MotionGenerator:
             ) * math.radians(options.micro_pose_degrees)
             # A breath is primarily a minute pitch change. Small coupled yaw
             # and roll components keep it from looking like a motorized nod.
-            rotvec = torch.stack((pose, pose * 0.18, pose * -0.10), dim=1)
+            rotvec = torch.stack(
+                (
+                    pose,
+                    pose * options.micro_pose_yaw_ratio,
+                    pose * options.micro_pose_roll_ratio,
+                ),
+                dim=1,
+            )
             motions = MotionFrame(
                 R=motions.R @ roma.rotvec_to_rotmat(rotvec),
                 exp=motions.exp,

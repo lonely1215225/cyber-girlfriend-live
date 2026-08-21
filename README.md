@@ -230,7 +230,9 @@ sudo -E ./install.sh
 | `AVTR1_BLINK_DOUBLE_PROBABILITY` | `0.08` | 偶发连续眨眼概率 |
 | `AVTR1_BLINK_PARTIAL_PROBABILITY` | `0.28` | 不完全闭眼的轻眨概率 |
 | `AVTR1_IDLE_BREATH_ENABLED` | `1` | 待机时启用低频呼吸/重心微动，说话时平滑淡出 |
-| `AVTR1_IDLE_BREATH_POSE_DEGREES` | `0.26` | 呼吸微动的姿态幅度；当前使用可见但克制的年轻化效果 |
+| `AVTR1_IDLE_BREATH_POSE_DEGREES` | `0.38` | 呼吸微动的头部俯仰幅度；约产生数像素的可见微动 |
+| `AVTR1_IDLE_BREATH_YAW_RATIO` | `0.32` | 呼吸时左右转头相对于俯仰动作的比例 |
+| `AVTR1_IDLE_BREATH_ROLL_RATIO` | `-0.14` | 呼吸时轻微侧倾相对于俯仰动作的比例 |
 | `AVTR1_IDLE_BREATH_PRIMARY_SECONDS` | `4.4` | 一次主要呼吸起伏的周期 |
 | `AVTR1_IDLE_BREATH_DRIFT_SECONDS` | `9.1` | 慢速重心漂移周期，与呼吸周期错开以避免循环感 |
 | `AVTR1_IDLE_BREATH_DRIFT_MIX` | `0.30` | 慢速漂移在待机微动中的占比，范围 `0–0.5` |
