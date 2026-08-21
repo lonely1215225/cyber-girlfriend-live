@@ -166,6 +166,7 @@ class RenderOptions:
     # breathing/sway. The value is multiplied by ``micro_pose_degrees``.
     micro_pose_degrees: float = 0.0
     micro_pose_weights: tuple[float, ...] = ()
+    micro_pose_pitch_ratio: float = 1.0
     micro_pose_yaw_ratio: float = 0.18
     micro_pose_roll_ratio: float = -0.10
 

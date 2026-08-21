@@ -217,8 +217,8 @@ sudo -E ./install.sh
 | `AVTR1_CFG_KP` | `3.0` | 原始人物关键点与身份姿态约束；过高可能显得僵硬 |
 | `AVTR1_NOISE_ALPHA` | `1.5` | 说话时随机运动的时间相关性，越高变化越连续 |
 | `AVTR1_NOISE_TRUNC_Z` | `1.0` | 说话时随机运动幅度上限 |
-| `AVTR1_IDLE_NOISE_ALPHA` | `8.0` | 静音动作时间相关性；提高后动作变化更连续，减少随机抖动 |
-| `AVTR1_IDLE_NOISE_TRUNC_Z` | `0.82` | 静音随机运动幅度上限；使用明显但连续的灵动档 |
+| `AVTR1_IDLE_NOISE_ALPHA` | `2.0` | 静音动作时间相关性；恢复 AVTR-1 原生待机动态参数 |
+| `AVTR1_IDLE_NOISE_TRUNC_Z` | `1.2` | 静音随机运动幅度上限；恢复 AVTR-1 原生待机动作幅度 |
 | `AVTR1_MOTION_AUDIO_RMS` | `80` | 进入说话动作模式的 PCM 音量阈值 |
 | `AVTR1_MOTION_LISTEN_RMS` | `450` | 连线者触发倾听动作的 PCM 阈值，过滤静音底噪 |
 | `AVTR1_MOTION_ACTIVE_HOLD_SECONDS` | `1.0` | 音频结束后保留说话动作参数的过渡时间 |
@@ -230,9 +230,10 @@ sudo -E ./install.sh
 | `AVTR1_BLINK_DOUBLE_PROBABILITY` | `0.08` | 偶发连续眨眼概率 |
 | `AVTR1_BLINK_PARTIAL_PROBABILITY` | `0.28` | 不完全闭眼的轻眨概率 |
 | `AVTR1_IDLE_BREATH_ENABLED` | `1` | 待机时启用低频呼吸/重心微动，说话时平滑淡出 |
-| `AVTR1_IDLE_BREATH_POSE_DEGREES` | `0.48` | 呼吸微动的头部俯仰幅度；使用接近渲染安全上限的可见动作 |
-| `AVTR1_IDLE_BREATH_YAW_RATIO` | `0.48` | 呼吸时左右转头相对于俯仰动作的比例 |
-| `AVTR1_IDLE_BREATH_ROLL_RATIO` | `-0.22` | 呼吸时轻微侧倾相对于俯仰动作的比例 |
+| `AVTR1_IDLE_BREATH_POSE_DEGREES` | `0.65` | 待机摆头基础幅度 |
+| `AVTR1_IDLE_BREATH_PITCH_RATIO` | `0.08` | 上下点头比例；保持极低，避免画面上下浮动 |
+| `AVTR1_IDLE_BREATH_YAW_RATIO` | `1.0` | 左右摆头比例；作为待机附加动作的主方向 |
+| `AVTR1_IDLE_BREATH_ROLL_RATIO` | `-0.12` | 轻微侧倾比例，避免摆头像机械水平旋转 |
 | `AVTR1_IDLE_BREATH_PRIMARY_SECONDS` | `4.0` | 一次主要呼吸起伏的周期 |
 | `AVTR1_IDLE_BREATH_DRIFT_SECONDS` | `9.1` | 慢速重心漂移周期，与呼吸周期错开以避免循环感 |
 | `AVTR1_IDLE_BREATH_DRIFT_MIX` | `0.30` | 慢速漂移在待机微动中的占比，范围 `0–0.5` |

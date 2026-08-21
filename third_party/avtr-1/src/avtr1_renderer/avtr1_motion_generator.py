@@ -574,7 +574,7 @@ class AVTR1MotionGenerator:
             # and roll components keep it from looking like a motorized nod.
             rotvec = torch.stack(
                 (
-                    pose,
+                    pose * options.micro_pose_pitch_ratio,
                     pose * options.micro_pose_yaw_ratio,
                     pose * options.micro_pose_roll_ratio,
                 ),

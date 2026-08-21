@@ -28,8 +28,8 @@ CFG_OTHER_AUDIO = float(os.environ.get("AVTR1_CFG_OTHER_AUDIO", "2.0"))
 CFG_KP = float(os.environ.get("AVTR1_CFG_KP", "3.0"))
 NOISE_ALPHA = float(os.environ.get("AVTR1_NOISE_ALPHA", "1.5"))
 NOISE_TRUNC_Z = float(os.environ.get("AVTR1_NOISE_TRUNC_Z", "1.0"))
-IDLE_NOISE_ALPHA = float(os.environ.get("AVTR1_IDLE_NOISE_ALPHA", "8.0"))
-IDLE_NOISE_TRUNC_Z = float(os.environ.get("AVTR1_IDLE_NOISE_TRUNC_Z", "0.82"))
+IDLE_NOISE_ALPHA = float(os.environ.get("AVTR1_IDLE_NOISE_ALPHA", "2.0"))
+IDLE_NOISE_TRUNC_Z = float(os.environ.get("AVTR1_IDLE_NOISE_TRUNC_Z", "1.2"))
 MOTION_AUDIO_RMS = max(1.0, float(os.environ.get("AVTR1_MOTION_AUDIO_RMS", "80")))
 MOTION_LISTEN_RMS = max(
     MOTION_AUDIO_RMS, float(os.environ.get("AVTR1_MOTION_LISTEN_RMS", "450"))
@@ -86,13 +86,16 @@ IDLE_BREATH_ENABLED = os.environ.get("AVTR1_IDLE_BREATH_ENABLED", "1").lower() n
     "no",
 }
 IDLE_BREATH_POSE_DEGREES = min(
-    0.5, max(0.0, float(os.environ.get("AVTR1_IDLE_BREATH_POSE_DEGREES", "0.48")))
+    0.8, max(0.0, float(os.environ.get("AVTR1_IDLE_BREATH_POSE_DEGREES", "0.65")))
+)
+IDLE_BREATH_PITCH_RATIO = min(
+    1.0, max(-1.0, float(os.environ.get("AVTR1_IDLE_BREATH_PITCH_RATIO", "0.08")))
 )
 IDLE_BREATH_YAW_RATIO = min(
-    1.0, max(-1.0, float(os.environ.get("AVTR1_IDLE_BREATH_YAW_RATIO", "0.48")))
+    1.0, max(-1.0, float(os.environ.get("AVTR1_IDLE_BREATH_YAW_RATIO", "1.0")))
 )
 IDLE_BREATH_ROLL_RATIO = min(
-    1.0, max(-1.0, float(os.environ.get("AVTR1_IDLE_BREATH_ROLL_RATIO", "-0.22")))
+    1.0, max(-1.0, float(os.environ.get("AVTR1_IDLE_BREATH_ROLL_RATIO", "-0.12")))
 )
 IDLE_BREATH_PRIMARY_SECONDS = min(
     12.0, max(2.5, float(os.environ.get("AVTR1_IDLE_BREATH_PRIMARY_SECONDS", "4.0")))
@@ -714,6 +717,7 @@ async def render_loop() -> None:
                 "micro_pose_weights": ",".join(
                     f"{value:.4f}" for value in micro_pose_weights
                 ),
+                "micro_pose_pitch_ratio": str(IDLE_BREATH_PITCH_RATIO),
                 "micro_pose_yaw_ratio": str(IDLE_BREATH_YAW_RATIO),
                 "micro_pose_roll_ratio": str(IDLE_BREATH_ROLL_RATIO),
             }
@@ -897,6 +901,7 @@ async def handle_status(_request):
                 "next_blink_ms": max(0, int((next_blink_at - time.monotonic()) * 1000)),
                 "idle_breath_enabled": IDLE_BREATH_ENABLED,
                 "idle_breath_pose_degrees": IDLE_BREATH_POSE_DEGREES,
+                "idle_breath_pitch_ratio": IDLE_BREATH_PITCH_RATIO,
                 "idle_breath_yaw_ratio": IDLE_BREATH_YAW_RATIO,
                 "idle_breath_roll_ratio": IDLE_BREATH_ROLL_RATIO,
                 "idle_breath_primary_seconds": IDLE_BREATH_PRIMARY_SECONDS,
