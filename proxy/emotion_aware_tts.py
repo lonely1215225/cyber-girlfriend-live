@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 
 from sensevoice_stt import SenseVoiceMetadata, get_turn_context
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline.messages import LLMResponseChunk
 from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
@@ -103,6 +105,29 @@ _QUESTION_CUES = (
 )
 _PUNCTUATION = "，。！？!?；：……~～"
 _EMPATHY_PIVOTS = ("别怕", "没事", "放心", "别急", "听我说", "我陪你")
+_BAD_BREAK_END = "的地得把被在和与或及向从给对将很更最也都就才又还"
+_CLAUSE_STARTS = (
+    "简单说",
+    "说白了",
+    "换句话说",
+    "好比",
+    "比如",
+    "这意味着",
+    "与此同时",
+    "结果",
+    "不过",
+    "但是",
+    "所以",
+    "另外",
+    "对了",
+    "目前",
+    "现在",
+    "专家",
+    "大家觉得",
+    "你觉得",
+    "你们觉得",
+    "直播间的朋友",
+)
 
 
 def _clause_length(value: str, index: int) -> int:
@@ -147,6 +172,8 @@ def _restore_conversational_prosody(value: str, max_clause_chars: int) -> str:
         value = _insert_before(value, marker)
     for marker in _EMPATHY_PIVOTS:
         value = _insert_before(value, marker, minimum_before=3, minimum_after=3)
+    for marker in _CLAUSE_STARTS:
+        value = _insert_before(value, marker, minimum_before=7, minimum_after=4)
 
     value = re.sub(
         r"你呢(?=(?:是不是|有没有|想不想|要不要|怎么|为什么))",
@@ -189,9 +216,30 @@ def _restore_conversational_prosody(value: str, max_clause_chars: int) -> str:
                 if 8 <= match.end() - cursor <= max_clause_chars
                 and len(segment) - match.end() >= 6
             ]
-            if not candidates:
-                break
-            split_at = candidates[-1]
+            if candidates:
+                split_at = candidates[-1]
+            else:
+                # Some small local models occasionally return an entire
+                # paragraph without a single punctuation mark. A bounded
+                # breathing point is preferable to sending 50–100 Chinese
+                # characters to TTS as one intonation unit. Move the boundary
+                # away from ASCII words/numbers so names such as "NPR" and
+                # values such as "40万" stay intact.
+                split_at = min(len(segment) - 6, cursor + max_clause_chars)
+                while (
+                    split_at > cursor + 12
+                    and split_at < len(segment)
+                    and (
+                        segment[split_at - 1] in _BAD_BREAK_END
+                        or (
+                            segment[split_at - 1].isascii()
+                            and segment[split_at].isascii()
+                            and segment[split_at - 1].isalnum()
+                            and segment[split_at].isalnum()
+                        )
+                    )
+                ):
+                    split_at -= 1
             segment = segment[:split_at] + "，" + segment[split_at:]
             cursor = split_at + 1
         rebuilt.append(segment)
@@ -255,6 +303,25 @@ def prepare_tts_text(
         else:
             value += "！" if style == "cheerful" else "。"
     return value
+
+
+class EmotionAwareLMOutputProcessor(LMOutputProcessor):
+    """Give the public transcript and TTS the same punctuated reply text."""
+
+    def process(self, lm_output: Any) -> Iterator[Any]:
+        if isinstance(lm_output, LLMResponseChunk) and lm_output.text:
+            metadata = get_turn_context(lm_output.turn_id, lm_output.turn_revision)
+            style = choose_tts_style(lm_output.text, metadata)
+            visible_text = prepare_tts_text(
+                lm_output.text,
+                style,
+                prosody_enabled=os.environ.get("TTS_PROSODY_ENABLED", "1") != "0",
+                max_clause_chars=max(
+                    12, int(os.environ.get("TTS_PROSODY_MAX_CLAUSE_CHARS", "20"))
+                ),
+            )
+            lm_output = lm_output.model_copy(update={"text": visible_text})
+        yield from super().process(lm_output)
 
 
 class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
@@ -348,6 +415,8 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
 
 def install_emotion_aware_tts() -> None:
     import speech_to_speech.TTS.qwen3_tts_handler as handler_module
+    import speech_to_speech.LLM.lm_output_processor as lm_processor_module
 
     handler_module.Qwen3TTSHandler = EmotionAwareQwen3TTSHandler
-    LOG.info("Emotion-aware Qwen3-TTS adapter installed")
+    lm_processor_module.LMOutputProcessor = EmotionAwareLMOutputProcessor
+    LOG.info("Emotion-aware Qwen3-TTS and transcript prosody adapters installed")

@@ -3,14 +3,20 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from queue import Queue
 
 
 PROXY = Path(__file__).resolve().parents[1] / "proxy"
 if str(PROXY) not in sys.path:
     sys.path.insert(0, str(PROXY))
 
-from emotion_aware_tts import choose_tts_style, prepare_tts_text  # noqa: E402
+from emotion_aware_tts import (  # noqa: E402
+    EmotionAwareLMOutputProcessor,
+    choose_tts_style,
+    prepare_tts_text,
+)
 from sensevoice_stt import SenseVoiceMetadata  # noqa: E402
+from speech_to_speech.pipeline.messages import LLMResponseChunk  # noqa: E402
 
 
 class EmotionAwareTTSTests(unittest.TestCase):
@@ -65,6 +71,40 @@ class EmotionAwareTTSTests(unittest.TestCase):
             prepare_tts_text("你今天在做什么", "neutral"), "你今天在做什么？"
         )
         self.assertEqual(prepare_tts_text("嗯我在呢", "gentle"), "嗯，我在呢。")
+
+    def test_long_unpunctuated_reply_gets_visible_breathing_points(self) -> None:
+        restored = prepare_tts_text(
+            "国债就是国家借的钱美债就是美国国债简单说就像国家开个借条让大家存钱利息就比银行高点儿",
+            "neutral",
+        )
+        self.assertTrue(restored.endswith("。"))
+        self.assertGreaterEqual(restored.count("，"), 2)
+        self.assertIn("，简单说", restored)
+        self.assertNotIn("就，", restored)
+        self.assertLessEqual(
+            max(len(part) for part in restored.replace("。", "，").split("，") if part),
+            20,
+        )
+
+    def test_transcript_and_tts_share_the_same_restored_punctuation(self) -> None:
+        processor = EmotionAwareLMOutputProcessor.__new__(EmotionAwareLMOutputProcessor)
+        processor.text_output_queue = Queue()
+        processor.speculative_turns = None
+
+        tts_items = list(
+            processor.process(
+                LLMResponseChunk(
+                    text="最近有条新闻挺重要大家觉得会有什么影响",
+                    turn_id="turn-punctuation",
+                    turn_revision=1,
+                )
+            )
+        )
+        visible = processor.text_output_queue.get_nowait().text
+
+        self.assertEqual(tts_items[0].text, visible)
+        self.assertIn("，大家觉得", visible)
+        self.assertTrue(visible.endswith("？"))
 
 
 if __name__ == "__main__":
