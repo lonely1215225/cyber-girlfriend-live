@@ -11,8 +11,6 @@ from typing import Any
 import numpy as np
 
 from sensevoice_stt import SenseVoiceMetadata, get_turn_context
-from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
-from speech_to_speech.pipeline.messages import LLMResponseChunk
 from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
@@ -50,207 +48,16 @@ _SERIOUS_WORDS = (
     "局势",
     "发生",
 )
-_BREAK_WORDS = (
-    "但是",
-    "不过",
-    "可是",
-    "所以",
-    "而且",
-    "然后",
-    "其实",
-    "因为",
-    "如果",
-    "要不",
-    "只是",
-    "当然",
-    "另外",
-    "对了",
-    "你可以",
-    "我觉得",
-)
-_LEADING_FILLERS = (
-    "说真的",
-    "老实说",
-    "对了",
-    "哎呀",
-    "哎",
-    "诶",
-    "欸",
-    "嗯",
-    "唔",
-    "哦",
-    "噢",
-    "嘿",
-    "哇",
-    "哈哈",
-    "好啦",
-    "好呀",
-    "对呀",
-)
-_QUESTION_CUES = (
-    "为什么",
-    "怎么",
-    "什么",
-    "哪个",
-    "哪种",
-    "哪里",
-    "多少",
-    "谁",
-    "有没有",
-    "是不是",
-    "要不要",
-    "想不想",
-    "好不好",
-    "行不行",
-)
-_PUNCTUATION = "，。！？!?；：……~～"
-_EMPATHY_PIVOTS = ("别怕", "没事", "放心", "别急", "听我说", "我陪你")
-_BAD_BREAK_END = "的地得把被在和与或及向从给对将很更最也都就才又还"
-_CLAUSE_STARTS = (
-    "简单说",
-    "说白了",
-    "换句话说",
-    "好比",
-    "比如",
-    "这意味着",
-    "与此同时",
-    "结果",
-    "不过",
-    "但是",
-    "所以",
-    "另外",
-    "对了",
-    "目前",
-    "现在",
-    "专家",
-    "大家觉得",
-    "你觉得",
-    "你们觉得",
-    "直播间的朋友",
+_SPEECHABLE_WITH_CJK_PUNCTUATION = re.compile(
+    r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–，。！？；：、（）【】《》“”‘’￥]",
+    flags=re.UNICODE,
 )
 
 
-def _clause_length(value: str, index: int) -> int:
-    last = max((value.rfind(mark, 0, index) for mark in _PUNCTUATION), default=-1)
-    return len(re.sub(r"\s+", "", value[last + 1 : index]))
+def remove_unspeechable_preserving_cjk(text: str) -> str:
+    """Remove emoji/control glyphs without deleting the model's CJK punctuation."""
 
-
-def _insert_before(
-    value: str, marker: str, *, minimum_before: int = 6, minimum_after: int = 4
-) -> str:
-    """Insert a comma before semantic pivots without splitting word fragments."""
-
-    offset = 0
-    while True:
-        index = value.find(marker, offset)
-        if index < 0:
-            return value
-        if (
-            index > 0
-            and value[index - 1] not in _PUNCTUATION
-            and _clause_length(value, index) >= minimum_before
-            and len(re.sub(r"\s+", "", value[index + len(marker) :])) >= minimum_after
-            and not (marker == "所以" and value[index - 1] == "之")
-        ):
-            value = value[:index] + "，" + value[index:]
-            offset = index + len(marker) + 1
-        else:
-            offset = index + len(marker)
-
-
-def _restore_conversational_prosody(value: str, max_clause_chars: int) -> str:
-    """Recover conservative spoken boundaries from weak punctuation-free LLM text."""
-
-    for filler in _LEADING_FILLERS:
-        if value.startswith(filler) and len(value) >= len(filler) + 3:
-            tail = value[len(filler) :]
-            if tail and tail[0] not in _PUNCTUATION:
-                value = filler + "，" + tail
-            break
-
-    for marker in _BREAK_WORDS:
-        value = _insert_before(value, marker)
-    for marker in _EMPATHY_PIVOTS:
-        value = _insert_before(value, marker, minimum_before=3, minimum_after=3)
-    for marker in _CLAUSE_STARTS:
-        value = _insert_before(value, marker, minimum_before=7, minimum_after=4)
-
-    value = re.sub(
-        r"你呢(?=(?:是不是|有没有|想不想|要不要|怎么|为什么))",
-        "你呢，",
-        value,
-    )
-
-    # A follow-up question often begins immediately after an unpunctuated
-    # statement: “……魅力所在你最喜欢什么”. Give it its own intonation unit.
-    question_start = re.compile(
-        r"(?=(?:你|你们|大家)(?:呢，?)?(?:最|更|会|想|喜欢|觉得|有没有|是不是|要不要|想不想|怎么|为什么|在干嘛))"
-    )
-    offset = 1
-    while match := question_start.search(value, offset):
-        index = match.start()
-        if _clause_length(value, index) >= 8 and value[index - 1] not in _PUNCTUATION:
-            value = value[:index] + "。" + value[index:]
-            offset = index + 2
-        else:
-            offset = index + 1
-
-    # Long clauses get breathing points only at conversational particles or
-    # safe phrase boundaries. Avoid blind fixed-width splitting, which can
-    # separate a modifier from the word it describes.
-    safe_endings = re.compile(
-        r"(?:的话|的时候|一下|一会儿|没关系|不要紧|就好|就行|而已|[了呀吧嘛啦哦啊呢])"
-    )
-    parts = re.split(r"([，。！？!?；：])", value)
-    rebuilt: list[str] = []
-    for part in parts:
-        if not part or part in _PUNCTUATION:
-            rebuilt.append(part)
-            continue
-        segment = part
-        cursor = 0
-        while len(re.sub(r"\s+", "", segment[cursor:])) > max_clause_chars:
-            candidates = [
-                match.end()
-                for match in safe_endings.finditer(segment, cursor + 6)
-                if 8 <= match.end() - cursor <= max_clause_chars
-                and len(segment) - match.end() >= 6
-            ]
-            if candidates:
-                split_at = candidates[-1]
-            else:
-                # Some small local models occasionally return an entire
-                # paragraph without a single punctuation mark. A bounded
-                # breathing point is preferable to sending 50–100 Chinese
-                # characters to TTS as one intonation unit. Move the boundary
-                # away from ASCII words/numbers so names such as "NPR" and
-                # values such as "40万" stay intact.
-                split_at = min(len(segment) - 6, cursor + max_clause_chars)
-                while (
-                    split_at > cursor + 12
-                    and split_at < len(segment)
-                    and (
-                        segment[split_at - 1] in _BAD_BREAK_END
-                        or (
-                            segment[split_at - 1].isascii()
-                            and segment[split_at].isascii()
-                            and segment[split_at - 1].isalnum()
-                            and segment[split_at].isalnum()
-                        )
-                    )
-                ):
-                    split_at -= 1
-            segment = segment[:split_at] + "，" + segment[split_at:]
-            cursor = split_at + 1
-        rebuilt.append(segment)
-    return "".join(rebuilt)
-
-
-def _looks_like_question(value: str) -> bool:
-    tail = re.split(r"[。！!；]", value)[-1]
-    if any(cue in tail for cue in _QUESTION_CUES):
-        return True
-    return bool(re.search(r"(?:你|你们|大家).*(?:吗|么|嘛|呢)$", tail))
+    return _SPEECHABLE_WITH_CJK_PUNCTUATION.sub("", text)
 
 
 def choose_tts_style(text: str, metadata: SenseVoiceMetadata | None = None) -> str:
@@ -281,7 +88,7 @@ def prepare_tts_text(
     prosody_enabled: bool = True,
     max_clause_chars: int = 20,
 ) -> str:
-    """Improve spoken pauses without changing the browser-visible reply."""
+    """Normalize markup while preserving the model's words and punctuation."""
 
     value = text.strip()
     value = re.sub(r"\.{3,}", "……", value)
@@ -293,35 +100,7 @@ def prepare_tts_text(
         value,
     )
     value = re.sub(r"[ \t]+", " ", value).strip()
-
-    if prosody_enabled:
-        value = _restore_conversational_prosody(value, max(12, max_clause_chars))
-
-    if value and value[-1] not in "。！？!?……~～":
-        if _looks_like_question(value):
-            value += "？"
-        else:
-            value += "！" if style == "cheerful" else "。"
     return value
-
-
-class EmotionAwareLMOutputProcessor(LMOutputProcessor):
-    """Give the public transcript and TTS the same punctuated reply text."""
-
-    def process(self, lm_output: Any) -> Iterator[Any]:
-        if isinstance(lm_output, LLMResponseChunk) and lm_output.text:
-            metadata = get_turn_context(lm_output.turn_id, lm_output.turn_revision)
-            style = choose_tts_style(lm_output.text, metadata)
-            visible_text = prepare_tts_text(
-                lm_output.text,
-                style,
-                prosody_enabled=os.environ.get("TTS_PROSODY_ENABLED", "1") != "0",
-                max_clause_chars=max(
-                    12, int(os.environ.get("TTS_PROSODY_MAX_CLAUSE_CHARS", "20"))
-                ),
-            )
-            lm_output = lm_output.model_copy(update={"text": visible_text})
-        yield from super().process(lm_output)
 
 
 class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
@@ -414,9 +193,14 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
 
 
 def install_emotion_aware_tts() -> None:
+    import speech_to_speech.LLM.responses_api_language_model as responses_module
+    import speech_to_speech.LLM.utils as llm_utils_module
     import speech_to_speech.TTS.qwen3_tts_handler as handler_module
-    import speech_to_speech.LLM.lm_output_processor as lm_processor_module
 
     handler_module.Qwen3TTSHandler = EmotionAwareQwen3TTSHandler
-    lm_processor_module.LMOutputProcessor = EmotionAwareLMOutputProcessor
-    LOG.info("Emotion-aware Qwen3-TTS and transcript prosody adapters installed")
+    llm_utils_module.remove_unspeechable = remove_unspeechable_preserving_cjk
+    # responses_api_language_model imports the helper into its module scope,
+    # so patch that reference too. This fixes the actual punctuation loss
+    # without guessing or rewriting any model output.
+    responses_module.remove_unspeechable = remove_unspeechable_preserving_cjk
+    LOG.info("Emotion-aware Qwen3-TTS and CJK punctuation preservation installed")

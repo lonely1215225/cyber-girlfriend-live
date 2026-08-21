@@ -3,7 +3,6 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from queue import Queue
 
 
 PROXY = Path(__file__).resolve().parents[1] / "proxy"
@@ -11,12 +10,11 @@ if str(PROXY) not in sys.path:
     sys.path.insert(0, str(PROXY))
 
 from emotion_aware_tts import (  # noqa: E402
-    EmotionAwareLMOutputProcessor,
     choose_tts_style,
     prepare_tts_text,
+    remove_unspeechable_preserving_cjk,
 )
 from sensevoice_stt import SenseVoiceMetadata  # noqa: E402
-from speech_to_speech.pipeline.messages import LLMResponseChunk  # noqa: E402
 
 
 class EmotionAwareTTSTests(unittest.TestCase):
@@ -40,71 +38,26 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(choose_tts_style("目前这条新闻仍需确认。"), "serious")
         self.assertEqual(choose_tts_style("你今天在做什么？"), "neutral")
 
-    def test_spoken_text_adds_pauses_without_changing_words(self) -> None:
-        self.assertEqual(prepare_tts_text("嗯...我在呢", "gentle"), "嗯……我在呢。")
-        self.assertEqual(prepare_tts_text("欢迎回来", "cheerful"), "欢迎回来！")
-        self.assertEqual(prepare_tts_text("这是正常回答", "neutral"), "这是正常回答。")
-
-    def test_restores_semantic_pauses_for_weak_llm_output(self) -> None:
+    def test_spoken_text_preserves_model_punctuation(self) -> None:
+        self.assertEqual(prepare_tts_text("嗯...我在呢", "gentle"), "嗯……我在呢")
+        self.assertEqual(prepare_tts_text("欢迎回来！", "cheerful"), "欢迎回来！")
         self.assertEqual(
-            prepare_tts_text(
-                "确实挺刺激的不过这正是冒险的魅力所在你最喜欢看哪种惊险的环节呀",
-                "neutral",
-            ),
-            "确实挺刺激的，不过这正是冒险的魅力所在。你最喜欢看哪种惊险的环节呀？",
+            prepare_tts_text("航班 CA1234 于 2026 年 8 月 21 日延误 30 分钟。", "neutral"),
+            "航班 CA1234 于 2026 年 8 月 21 日延误 30 分钟。",
         )
+
+    def test_does_not_invent_punctuation_for_unpunctuated_output(self) -> None:
         self.assertEqual(
-            prepare_tts_text(
-                "刚下播在整理大家的弹幕你呢是不是也刚刷完剧来逛逛", "neutral"
-            ),
-            "刚下播在整理大家的弹幕。你呢，是不是也刚刷完剧来逛逛？",
+            prepare_tts_text("飞机编号B12345前后保持连续", "neutral"),
+            "飞机编号B12345前后保持连续",
         )
 
-    def test_empathy_pivots_get_a_soft_breath(self) -> None:
+    def test_cjk_punctuation_survives_speechable_filter(self) -> None:
+        original = "航班CA1234，于2026年8月21日延误30分钟；请留意！价格是￥1,280.50。"
         self.assertEqual(
-            prepare_tts_text("嗯我在呢别怕我会一直陪着你的", "gentle"),
-            "嗯，我在呢，别怕我会一直陪着你的。",
+            remove_unspeechable_preserving_cjk(original + "🙂"),
+            original,
         )
-
-    def test_question_intonation_is_inferred(self) -> None:
-        self.assertEqual(
-            prepare_tts_text("你今天在做什么", "neutral"), "你今天在做什么？"
-        )
-        self.assertEqual(prepare_tts_text("嗯我在呢", "gentle"), "嗯，我在呢。")
-
-    def test_long_unpunctuated_reply_gets_visible_breathing_points(self) -> None:
-        restored = prepare_tts_text(
-            "国债就是国家借的钱美债就是美国国债简单说就像国家开个借条让大家存钱利息就比银行高点儿",
-            "neutral",
-        )
-        self.assertTrue(restored.endswith("。"))
-        self.assertGreaterEqual(restored.count("，"), 2)
-        self.assertIn("，简单说", restored)
-        self.assertNotIn("就，", restored)
-        self.assertLessEqual(
-            max(len(part) for part in restored.replace("。", "，").split("，") if part),
-            20,
-        )
-
-    def test_transcript_and_tts_share_the_same_restored_punctuation(self) -> None:
-        processor = EmotionAwareLMOutputProcessor.__new__(EmotionAwareLMOutputProcessor)
-        processor.text_output_queue = Queue()
-        processor.speculative_turns = None
-
-        tts_items = list(
-            processor.process(
-                LLMResponseChunk(
-                    text="最近有条新闻挺重要大家觉得会有什么影响",
-                    turn_id="turn-punctuation",
-                    turn_revision=1,
-                )
-            )
-        )
-        visible = processor.text_output_queue.get_nowait().text
-
-        self.assertEqual(tts_items[0].text, visible)
-        self.assertIn("，大家觉得", visible)
-        self.assertTrue(visible.endswith("？"))
 
 
 if __name__ == "__main__":
