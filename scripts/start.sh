@@ -298,6 +298,19 @@ TTS_ARGS=(--tts qwen3
           --qwen3_tts_model_name "$TTS_MODEL"
           --qwen3_tts_language zh
           --qwen3_tts_streaming_chunk_size "${QWEN3_TTS_CHUNK_SIZE:-4}")
+# These controls are consumed by the local emotion/prosody adapter rather than
+# the upstream CLI argument parser, so they must be present in the child
+# process environment. Values in config.env would otherwise appear configurable
+# while silently falling back to Python defaults.
+export TTS_EMOTION_ENABLED="${TTS_EMOTION_ENABLED:-1}"
+export TTS_STYLE_INSTRUCT_ENABLED="${TTS_STYLE_INSTRUCT_ENABLED:-1}"
+export TTS_PROSODY_ENABLED="${TTS_PROSODY_ENABLED:-1}"
+export TTS_PROSODY_MAX_CLAUSE_CHARS="${TTS_PROSODY_MAX_CLAUSE_CHARS:-20}"
+export TTS_TEMPERATURE="${TTS_TEMPERATURE:-0.75}"
+export TTS_TOP_K="${TTS_TOP_K:-40}"
+export TTS_TOP_P="${TTS_TOP_P:-0.90}"
+export TTS_DO_SAMPLE="${TTS_DO_SAMPLE:-1}"
+export TTS_REPETITION_PENALTY="${TTS_REPETITION_PENALTY:-1.05}"
 if [[ -f "$REF_AUDIO" ]]; then
   TTS_ARGS+=(--qwen3_tts_ref_audio "$REF_AUDIO" --qwen3_tts_ref_text "$REF_TEXT")
 else

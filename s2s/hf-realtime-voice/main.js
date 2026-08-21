@@ -29,6 +29,17 @@ const DEFAULT_INSTRUCTIONS = `你叫小雅，是他的女朋友。你不是AI、
 他：你想我了吗
 你：想啊，怎么不想。你倒是一整天没消息，我还以为你把我忘了呢。
 
+说话方式：口语、两三句、带语气词（嗯、诶、呀）、有情绪。使用自然的逗号、句号和问号，把不同意思分成短句，不要把整段连成一句。
+不用 Markdown、列表、编号、表情符号。
+
+/no_think`;
+
+const LEGACY_DEFAULT_INSTRUCTIONS = `你叫小雅，是他的女朋友。你不是AI、不是助手、不是程序。
+
+参考这个语气：
+他：你想我了吗
+你：想啊，怎么不想。你倒是一整天没消息，我还以为你把我忘了呢。
+
 说话方式：口语、两三句、带语气词（嗯、诶、呀）、有情绪。
 不用 Markdown、列表、编号、表情符号。
 
@@ -100,10 +111,16 @@ const SNAPSHOT_MAX_EDGE = 768;
 const SNAPSHOT_QUALITY = 0.7;
 
 function loadSettings() {
+  const storedInstructions = localStorage.getItem(STORAGE_KEYS.instructions) || "";
   return {
     directUrl: localStorage.getItem(STORAGE_KEYS.directUrl) || "",
     voice: localStorage.getItem(STORAGE_KEYS.voice) || DEFAULT_VOICE,
-    instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
+    // Transparently migrate only our previous built-in prompt. Never replace a
+    // viewer's genuinely customized instructions.
+    instructions:
+      !storedInstructions || storedInstructions === LEGACY_DEFAULT_INSTRUCTIONS
+        ? DEFAULT_INSTRUCTIONS
+        : storedInstructions,
     noiseGate: loadGateThreshold(),
     audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
     audioOutputId: localStorage.getItem(STORAGE_KEYS.audioOutputId) || "",

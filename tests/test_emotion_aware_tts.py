@@ -39,6 +39,33 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(prepare_tts_text("欢迎回来", "cheerful"), "欢迎回来！")
         self.assertEqual(prepare_tts_text("这是正常回答", "neutral"), "这是正常回答。")
 
+    def test_restores_semantic_pauses_for_weak_llm_output(self) -> None:
+        self.assertEqual(
+            prepare_tts_text(
+                "确实挺刺激的不过这正是冒险的魅力所在你最喜欢看哪种惊险的环节呀",
+                "neutral",
+            ),
+            "确实挺刺激的，不过这正是冒险的魅力所在。你最喜欢看哪种惊险的环节呀？",
+        )
+        self.assertEqual(
+            prepare_tts_text(
+                "刚下播在整理大家的弹幕你呢是不是也刚刷完剧来逛逛", "neutral"
+            ),
+            "刚下播在整理大家的弹幕。你呢，是不是也刚刷完剧来逛逛？",
+        )
+
+    def test_empathy_pivots_get_a_soft_breath(self) -> None:
+        self.assertEqual(
+            prepare_tts_text("嗯我在呢别怕我会一直陪着你的", "gentle"),
+            "嗯，我在呢，别怕我会一直陪着你的。",
+        )
+
+    def test_question_intonation_is_inferred(self) -> None:
+        self.assertEqual(
+            prepare_tts_text("你今天在做什么", "neutral"), "你今天在做什么？"
+        )
+        self.assertEqual(prepare_tts_text("嗯我在呢", "gentle"), "嗯，我在呢。")
+
 
 if __name__ == "__main__":
     unittest.main()
