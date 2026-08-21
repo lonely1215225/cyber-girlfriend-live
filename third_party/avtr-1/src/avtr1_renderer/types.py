@@ -156,6 +156,11 @@ class RenderOptions:
     noise_alpha: float = 2.0
     noise_trunc_z: float = 1.2
 
+    # Optional deterministic eye-expression offset. The gateway uses this for
+    # short idle blinks because AVTR-1's random idle micro-motion does not
+    # guarantee that every source portrait will blink.
+    blink_strength: float = 0.0
+
     stream_frames: bool = True
 
 

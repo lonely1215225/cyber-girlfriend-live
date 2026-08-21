@@ -206,6 +206,7 @@ async def process_audio_v3(
     cfg_kp: float = 4.0,
     noise_alpha: float = 2.0,
     noise_trunc_z: float = 1.2,
+    blink_strength: float = 0.0,
 ) -> StreamingResponse:
     pipeline: Pipeline = request.app.state.pipeline
     registry: dict = request.app.state.registry
@@ -249,6 +250,7 @@ async def process_audio_v3(
         cfg_kp=cfg_kp,
         noise_alpha=noise_alpha,
         noise_trunc_z=noise_trunc_z,
+        blink_strength=max(0.0, min(1.5, blink_strength)),
     )
 
     loop = asyncio.get_running_loop()

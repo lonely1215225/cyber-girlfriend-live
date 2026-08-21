@@ -323,6 +323,27 @@ class AVTR1MotionGenerator:
         self._past_times = torch.ones(
             (1, n_past_chunks, 1), dtype=torch.float32, device="cuda"
         )
+        # Relative closed-eye expression extracted from the bundled idle clip
+        # (three closed frames minus neighbouring open frames), restricted to
+        # AVTR-1's 39 predicted expression coordinates. Keeping the offset in
+        # implicit-keypoint space lets the same blink retarget across avatars.
+        self._blink_delta = torch.tensor(
+            [
+                -0.0003907, 0.0003383, 0.0000002, 0.0004025, -0.0010335,
+                -0.0000001, 0.0000010, 0.0000149, -0.0000001, 0.0000881,
+                0.0015947, 0.0000001, -0.0000013, 0.0000034, -0.0000003,
+                0.0000437, -0.0003065, 0.0000007, 0.0002290, -0.0003054,
+                -0.0000003, -0.0003528, 0.0015133, -0.0000020, -0.0000644,
+                -0.0001649, -0.0000018, -0.0001104, -0.0000211, 0.0000524,
+                -0.0000025, 0.0000008, 0.0000031, 0.0003559, -0.0010606,
+                -0.0003704, -0.0000067, -0.0005968, 0.0001876,
+            ],
+            dtype=torch.float32,
+            device="cuda",
+        )
+        self._blink_curve = torch.sin(
+            torch.linspace(0.0, torch.pi, chunk_size, device="cuda")
+        ).square().unsqueeze(1)
         # HuBERT chunksize convention: (past, current, future) motion frames.
         self._hubert_chunksize: tuple[int, int, int] = (
             self.HUBERT_PAST_FRAMES,
@@ -500,6 +521,18 @@ class AVTR1MotionGenerator:
             x.add_(v_buf, alpha=dt)
         # ``x`` is the normalised motion prediction for this chunk.
         motions = self._motion_to_frames(x)
+        if options.blink_strength > 0.0:
+            motions = MotionFrame(
+                R=motions.R,
+                # The extraction clip and arbitrary target portraits have
+                # different eye-opening baselines; a calibrated 4x retarget
+                # gain produces a complete but still natural closure.
+                exp=motions.exp
+                + self._blink_delta.unsqueeze(0)
+                * self._blink_curve
+                * options.blink_strength
+                * 4.0,
+            )
 
         # ---- next state -------------------------------------------------
         # past_cond: append this chunk's normalised motion, drop oldest.

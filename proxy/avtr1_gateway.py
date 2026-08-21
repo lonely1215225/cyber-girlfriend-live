@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import random
 import time
 import wave
 from fractions import Fraction
@@ -25,14 +26,27 @@ CFG_OTHER_AUDIO = float(os.environ.get("AVTR1_CFG_OTHER_AUDIO", "2.0"))
 CFG_KP = float(os.environ.get("AVTR1_CFG_KP", "3.0"))
 NOISE_ALPHA = float(os.environ.get("AVTR1_NOISE_ALPHA", "1.5"))
 NOISE_TRUNC_Z = float(os.environ.get("AVTR1_NOISE_TRUNC_Z", "1.0"))
-IDLE_NOISE_ALPHA = float(os.environ.get("AVTR1_IDLE_NOISE_ALPHA", "10.0"))
-IDLE_NOISE_TRUNC_Z = float(os.environ.get("AVTR1_IDLE_NOISE_TRUNC_Z", "0.25"))
+IDLE_NOISE_ALPHA = float(os.environ.get("AVTR1_IDLE_NOISE_ALPHA", "6.0"))
+IDLE_NOISE_TRUNC_Z = float(os.environ.get("AVTR1_IDLE_NOISE_TRUNC_Z", "0.45"))
 MOTION_AUDIO_RMS = max(1.0, float(os.environ.get("AVTR1_MOTION_AUDIO_RMS", "80")))
 MOTION_LISTEN_RMS = max(
     MOTION_AUDIO_RMS, float(os.environ.get("AVTR1_MOTION_LISTEN_RMS", "450"))
 )
 MOTION_ACTIVE_HOLD_SECONDS = max(
     0.0, float(os.environ.get("AVTR1_MOTION_ACTIVE_HOLD_SECONDS", "0.8"))
+)
+IDLE_BLINK_ENABLED = os.environ.get("AVTR1_IDLE_BLINK_ENABLED", "1").lower() not in {
+    "0", "false", "off", "no"
+}
+IDLE_BLINK_MIN_SECONDS = max(
+    1.5, float(os.environ.get("AVTR1_IDLE_BLINK_MIN_SECONDS", "3.0"))
+)
+IDLE_BLINK_MAX_SECONDS = max(
+    IDLE_BLINK_MIN_SECONDS,
+    float(os.environ.get("AVTR1_IDLE_BLINK_MAX_SECONDS", "7.0")),
+)
+IDLE_BLINK_STRENGTH = min(
+    1.5, max(0.0, float(os.environ.get("AVTR1_IDLE_BLINK_STRENGTH", "1.5")))
 )
 BACKGROUND_MUSIC_ENABLED = os.environ.get("BACKGROUND_MUSIC_ENABLED", "1").lower() not in {
     "0", "false", "off", "no"
@@ -63,6 +77,10 @@ last_frame_at = 0.0
 last_speech_input_at = 0.0
 last_user_voice_at = 0.0
 last_motion_audio_at = 0.0
+last_idle_blink_at = 0.0
+next_idle_blink_at = time.monotonic() + random.uniform(
+    IDLE_BLINK_MIN_SECONDS, IDLE_BLINK_MAX_SECONDS
+)
 connected = False
 state_blob: bytes | None = None
 state_avatar_id: str | None = None
@@ -472,6 +490,7 @@ def _pcm_rms(*chunks: bytes) -> float:
 async def render_loop() -> None:
     global last_frame_at, connected, state_blob, state_avatar_id, h264_encoder, h264_bytes, renderer_session
     global last_motion_audio_at
+    global last_idle_blink_at, next_idle_blink_at
     loop = asyncio.get_running_loop()
     while True:
         t0 = loop.time()
@@ -489,6 +508,19 @@ async def render_loop() -> None:
             motion_active = now - last_motion_audio_at <= MOTION_ACTIVE_HOLD_SECONDS
             noise_alpha = NOISE_ALPHA if motion_active else IDLE_NOISE_ALPHA
             noise_trunc_z = NOISE_TRUNC_Z if motion_active else IDLE_NOISE_TRUNC_Z
+            blink_strength = 0.0
+            if motion_active:
+                # Require a genuinely quiet interval before the next blink so
+                # deterministic idle motion never fights speech lip-sync.
+                next_idle_blink_at = max(
+                    next_idle_blink_at, now + IDLE_BLINK_MIN_SECONDS
+                )
+            elif IDLE_BLINK_ENABLED and now >= next_idle_blink_at:
+                blink_strength = IDLE_BLINK_STRENGTH
+                last_idle_blink_at = now
+                next_idle_blink_at = now + random.uniform(
+                    IDLE_BLINK_MIN_SECONDS, IDLE_BLINK_MAX_SECONDS
+                )
             form = aiohttp.FormData()
             form.add_field("current_chunk", cur, filename="cur.raw", content_type="application/octet-stream")
             form.add_field("future_chunk", fut, filename="fut.raw", content_type="application/octet-stream")
@@ -515,6 +547,7 @@ async def render_loop() -> None:
                 "cfg_kp": str(CFG_KP),
                 "noise_alpha": str(noise_alpha),
                 "noise_trunc_z": str(noise_trunc_z),
+                "blink_strength": str(blink_strength),
             }
             if renderer_session is None:
                 raise RuntimeError("renderer HTTP session is not initialized")
@@ -666,6 +699,18 @@ async def handle_status(_request):
                 "audio_rms_threshold": MOTION_AUDIO_RMS,
                 "listen_rms_threshold": MOTION_LISTEN_RMS,
                 "active_hold_seconds": MOTION_ACTIVE_HOLD_SECONDS,
+                "idle_blink_enabled": IDLE_BLINK_ENABLED,
+                "idle_blink_strength": IDLE_BLINK_STRENGTH,
+                "idle_blink_min_seconds": IDLE_BLINK_MIN_SECONDS,
+                "idle_blink_max_seconds": IDLE_BLINK_MAX_SECONDS,
+                "last_idle_blink_age_ms": (
+                    int((time.monotonic() - last_idle_blink_at) * 1000)
+                    if last_idle_blink_at
+                    else None
+                ),
+                "next_idle_blink_ms": max(
+                    0, int((next_idle_blink_at - time.monotonic()) * 1000)
+                ),
             },
         }
     )
@@ -690,7 +735,7 @@ async def handle_avatars(_request):
 
 
 async def handle_set_avatar(request):
-    global AVATAR_ID, state_blob, state_avatar_id, h264_encoder
+    global AVATAR_ID, state_blob, state_avatar_id, h264_encoder, next_idle_blink_at
     body = await request.json()
     avatar_id = str(body.get("avatar_id") or "").strip()
     if not avatar_id or "/" in avatar_id or ".." in avatar_id:
@@ -705,6 +750,9 @@ async def handle_set_avatar(request):
         state_blob = None
         state_avatar_id = None
         h264_encoder = None
+        # Show the newly selected portrait is alive soon after switching,
+        # without blinking immediately on the first generated frame.
+        next_idle_blink_at = time.monotonic() + random.uniform(1.2, 2.4)
     for q in (video_pace_queue, audio_pace_queue):
         while not q.empty():
             try:

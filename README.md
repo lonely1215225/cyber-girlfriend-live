@@ -215,11 +215,15 @@ sudo -E ./install.sh
 | `AVTR1_CFG_KP` | `3.0` | 原始人物关键点与身份姿态约束；过高可能显得僵硬 |
 | `AVTR1_NOISE_ALPHA` | `1.5` | 说话时随机运动的时间相关性，越高变化越连续 |
 | `AVTR1_NOISE_TRUNC_Z` | `1.0` | 说话时随机运动幅度上限 |
-| `AVTR1_IDLE_NOISE_ALPHA` | `10.0` | 静音动作时间相关性；默认采用更平滑的运动轨迹 |
-| `AVTR1_IDLE_NOISE_TRUNC_Z` | `0.25` | 静音随机运动幅度上限，降低可抑制头部抖动 |
+| `AVTR1_IDLE_NOISE_ALPHA` | `6.0` | 静音动作时间相关性；兼顾连续性和轻微待机动作 |
+| `AVTR1_IDLE_NOISE_TRUNC_Z` | `0.45` | 静音随机运动幅度上限；过低会让部分形象近似静帧 |
 | `AVTR1_MOTION_AUDIO_RMS` | `80` | 进入说话动作模式的 PCM 音量阈值 |
 | `AVTR1_MOTION_LISTEN_RMS` | `450` | 连线者触发倾听动作的 PCM 阈值，过滤静音底噪 |
 | `AVTR1_MOTION_ACTIVE_HOLD_SECONDS` | `0.8` | 音频结束后保留说话动作参数的过渡时间 |
+| `AVTR1_IDLE_BLINK_ENABLED` | `1` | 静音时启用确定性自然眨眼；说话时自动暂停 |
+| `AVTR1_IDLE_BLINK_MIN_SECONDS` | `3.0` | 两次待机眨眼的最短随机间隔 |
+| `AVTR1_IDLE_BLINK_MAX_SECONDS` | `7.0` | 两次待机眨眼的最长随机间隔 |
+| `AVTR1_IDLE_BLINK_STRENGTH` | `1.5` | 眨眼闭合幅度，建议保持在 `1.0–1.5` |
 | `BACKGROUND_MUSIC_ENABLED` | `1` | 循环播放背景纯音乐 |
 | `BACKGROUND_MUSIC_DIR` | `.` | MP3 播放列表目录；相对路径从项目根目录解析 |
 | `BACKGROUND_MUSIC_VOLUME` | `0.16` | 无人说话时的背景音乐音量 |
@@ -346,7 +350,7 @@ s2s/.venv/bin/python -m unittest discover -s tests -v
 <details>
 <summary><strong>数字人偶尔张嘴幅度小怎么办？</strong></summary>
 
-可小幅调整 `AVTR1_CFG_SELF_AUDIO` 与 `AVTR1_CFG_KP`。数值过高可能导致动作夸张或不稳定，建议每次只调整 10% 左右并观察完整句子的表现。网关会根据实时 PCM RMS 在说话与静音两套噪声参数间自动切换；静音稳定性主要由 `AVTR1_IDLE_NOISE_ALPHA` 和 `AVTR1_IDLE_NOISE_TRUNC_Z` 控制。`assets/looks/pasteback_mask_soft.png` 会作为每个内置形象的回贴蒙版，扩大头顶羽化区，减轻生成头部和原始图片之间的接缝。
+可小幅调整 `AVTR1_CFG_SELF_AUDIO` 与 `AVTR1_CFG_KP`。数值过高可能导致动作夸张或不稳定，建议每次只调整 10% 左右并观察完整句子的表现。网关会根据实时 PCM RMS 在说话与静音两套噪声参数间自动切换；静音稳定性主要由 `AVTR1_IDLE_NOISE_ALPHA` 和 `AVTR1_IDLE_NOISE_TRUNC_Z` 控制。AVTR-1 官方的无音频模式只承诺随机微动作，并不保证每个参考形象都会眨眼，因此本项目额外从内置 idle 素材提取了可跨形象重定向的闭眼表达，并在静音时以随机间隔播放一个 200ms 眨眼；它不会在说话或倾听动作期间触发。`assets/looks/pasteback_mask_soft.png` 会作为每个内置形象的回贴蒙版，扩大头顶羽化区，减轻生成头部和原始图片之间的接缝。
 
 </details>
 
