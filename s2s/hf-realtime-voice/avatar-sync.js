@@ -23,6 +23,7 @@
   const VIEW_DEFAULTS = {
     size: 100,
     position: Math.round(-parseFloat(CFG.rightOffset || '-4')),
+    vertical: 0,
     fade: Math.round(Number(CFG.maskFade || 0) * 100),
   };
 
@@ -37,6 +38,7 @@
       return {
         size: clamp(saved.size, 70, 135, VIEW_DEFAULTS.size),
         position: clamp(saved.position, -20, 20, VIEW_DEFAULTS.position),
+        vertical: clamp(saved.vertical, -20, 20, VIEW_DEFAULTS.vertical),
         fade: clamp(saved.fade, 0, 70, VIEW_DEFAULTS.fade),
       };
     } catch (_) {
@@ -58,7 +60,7 @@
   const fitCss = CFG.fit === 'cover'
     ? `inset:0; width:100%; height:100%;
        object-fit:cover; object-position:${CFG.objectPosition};`
-    : `top:50%; right:var(--av-right); height:var(--av-height); width:auto;
+    : `top:calc(50% + var(--av-vertical)); right:var(--av-right); height:var(--av-height); width:auto;
        max-width:none; object-fit:cover; transform:translateY(-50%);`;
 
   const style = document.createElement('style');
@@ -67,7 +69,7 @@
     #av-layer {
       position:fixed; inset:0; z-index:0;
       background:#000; overflow:hidden; pointer-events:none;
-      --av-height:100%; --av-right:${CFG.rightOffset};
+      --av-height:100%; --av-right:${CFG.rightOffset}; --av-vertical:0%;
       --av-fade-soft:18.9%; --av-fade-mid:32.8%; --av-fade-end:42%;
     }
     #av-idle, #av-live-video {
@@ -153,11 +155,17 @@
     return `${Math.abs(value)}% 向${value > 0 ? '右' : '左'}`;
   }
 
+  function verticalLabel(value) {
+    if (!value) return '居中';
+    return `${Math.abs(value)}% 向${value > 0 ? '下' : '上'}`;
+  }
+
   function applyAvatarView(persist = false) {
     if (!layer) return;
     const fade = avatarView.fade;
     layer.style.setProperty('--av-height', `${avatarView.size}%`);
     layer.style.setProperty('--av-right', `${-avatarView.position}%`);
+    layer.style.setProperty('--av-vertical', `${avatarView.vertical}%`);
     layer.style.setProperty('--av-fade-soft', `${(fade * 0.45).toFixed(1)}%`);
     layer.style.setProperty('--av-fade-mid', `${(fade * 0.78).toFixed(1)}%`);
     layer.style.setProperty('--av-fade-end', `${fade}%`);
@@ -166,36 +174,43 @@
 
     const sizeValue = document.getElementById('avatar-size-value');
     const positionValue = document.getElementById('avatar-position-value');
+    const verticalValue = document.getElementById('avatar-vertical-value');
     const fadeValue = document.getElementById('avatar-fade-value');
     if (sizeValue) sizeValue.textContent = `${avatarView.size}%`;
     if (positionValue) positionValue.textContent = positionLabel(avatarView.position);
+    if (verticalValue) verticalValue.textContent = verticalLabel(avatarView.vertical);
     if (fadeValue) fadeValue.textContent = fade ? `${fade}%` : '关闭';
   }
 
   function bindAvatarControls() {
     const size = document.getElementById('avatar-size');
     const position = document.getElementById('avatar-position');
+    const vertical = document.getElementById('avatar-vertical');
     const fade = document.getElementById('avatar-fade');
     const reset = document.getElementById('avatar-view-reset');
-    if (!size || !position || !fade) return;
+    if (!size || !position || !vertical || !fade) return;
     size.value = String(avatarView.size);
     position.value = String(avatarView.position);
+    vertical.value = String(avatarView.vertical);
     fade.value = String(avatarView.fade);
     const update = () => {
       avatarView = {
         size: clamp(size.value, 70, 135, VIEW_DEFAULTS.size),
         position: clamp(position.value, -20, 20, VIEW_DEFAULTS.position),
+        vertical: clamp(vertical.value, -20, 20, VIEW_DEFAULTS.vertical),
         fade: clamp(fade.value, 0, 70, VIEW_DEFAULTS.fade),
       };
       applyAvatarView(true);
     };
     size.addEventListener('input', update);
     position.addEventListener('input', update);
+    vertical.addEventListener('input', update);
     fade.addEventListener('input', update);
     reset?.addEventListener('click', () => {
       avatarView = { ...VIEW_DEFAULTS };
       size.value = String(avatarView.size);
       position.value = String(avatarView.position);
+      vertical.value = String(avatarView.vertical);
       fade.value = String(avatarView.fade);
       applyAvatarView(true);
     });

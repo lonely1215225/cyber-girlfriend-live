@@ -257,6 +257,10 @@
                 <input id="avatar-position" type="range" min="-20" max="20" step="1" value="4" />
               </label>
               <label class="avatar-slider">
+                <span>垂直位置 <output id="avatar-vertical-value">居中</output></span>
+                <input id="avatar-vertical" type="range" min="-20" max="20" step="1" value="0" />
+              </label>
+              <label class="avatar-slider">
                 <span>左侧阴影 <output id="avatar-fade-value">42%</output></span>
                 <input id="avatar-fade" type="range" min="0" max="70" step="1" value="42" />
               </label>
@@ -433,7 +437,7 @@
     </dialog>
 
     <script src="/vendor/mpegts.min.js"></script>
-    <script src="/avatar-sync.js?v=20260821a"></script>
+    <script src="/avatar-sync.js?v=20260821b"></script>
     <script type="module" src="room.js?v=20260820a"></script>
     <script type="module" src="main.js?v=20260821b"></script>
   </body>
