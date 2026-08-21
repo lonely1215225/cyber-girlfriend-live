@@ -387,12 +387,16 @@
       { id: 'xiaoya_beach', label: '海边' },
       { id: 'xiaoya_locket', label: '白背心' },
     ];
+    let selected = currentAvatarId();
     try {
       const response = await fetch(gw() + '/avatars', { cache: 'no-store' });
       const data = await response.json();
       if (Array.isArray(data.avatars) && data.avatars.length) avatars = data.avatars;
+      if (avatars.some((item) => item.id === data.avatar_id)) selected = data.avatar_id;
     } catch (_) { /* keep defaults */ }
-    const selected = currentAvatarId();
+    // The gateway owns this room-wide setting. Local storage is only a cache
+    // for the fallback still shown before the public status request finishes.
+    try { localStorage.setItem(AVATAR_STORAGE_KEY, selected); } catch (_) { /* ignore */ }
     const strip = document.createElement('div');
     strip.id = 'av-looks';
     for (const item of avatars) {

@@ -589,8 +589,6 @@ async function refreshAvatarPicker() {
   } catch (err) {
     console.warn("[main] avatar list failed:", err);
   }
-  const saved = localStorage.getItem(STORAGE_KEYS.avatarId);
-  const selected = avatars.some((item) => item.id === saved) ? saved : activeAvatar;
   root.replaceChildren();
   for (const item of avatars) {
     const button = document.createElement("button");
@@ -599,7 +597,9 @@ async function refreshAvatarPicker() {
     button.type = "button";
     button.className = "avatar-pick";
     button.dataset.id = item.id;
-    button.setAttribute("aria-pressed", item.id === selected ? "true" : "false");
+    // The selected avatar is shared by the whole live room. Always render the
+    // gateway's current value instead of a viewer's stale local preference.
+    button.setAttribute("aria-pressed", item.id === activeAvatar ? "true" : "false");
     image.src = item.preview || `/avatar/avatars/${encodeURIComponent(item.id)}.jpg`;
     image.alt = item.label;
     label.textContent = item.label;
@@ -1862,18 +1862,10 @@ setState("idle");
 chat.renderEmptyState();
 initGateArc();
 void fetchConfig();
-void (async () => {
-  await refreshAvatarPicker();
-  const savedAvatar = localStorage.getItem(STORAGE_KEYS.avatarId);
-  if (!savedAvatar) return;
-  try {
-    const response = await fetch("/av/avatars", { cache: "no-store" });
-    const data = await response.json();
-    if (data.avatar_id !== savedAvatar) await selectAvatar(savedAvatar);
-  } catch (err) {
-    console.warn("[main] restore avatar failed:", err);
-  }
-})();
+// Avatar selection is a password-protected, room-wide setting. Do not restore
+// a per-browser choice on page load: doing so both lets one viewer overwrite
+// the shared room and causes an expected 401 alert whenever the admin session
+// is locked. The picker fetches the current avatar only when Settings opens.
 // Camera is opt-in only. `enableCamera()` is called exclusively by the camera
 // toggle; landing on the page never requests or resumes webcam access.
 void watchCameraPermission();
