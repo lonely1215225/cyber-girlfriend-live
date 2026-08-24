@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>小雅直播间</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%2378d99a'/><circle cx='11' cy='14' r='2' fill='%230b0d12'/><circle cx='21' cy='14' r='2' fill='%230b0d12'/><path d='M10 21c4 3 8 3 12 0' fill='none' stroke='%230b0d12' stroke-width='2' stroke-linecap='round'/></svg>" />
-    <link rel="stylesheet" href="style.css?v=20260820b" />
+    <link rel="stylesheet" href="style.css?v=20260824c" />
   </head>
   <!--
     `booting` disables transitions/animations until the first paint commits.
@@ -241,12 +241,21 @@
           </button>
         </header>
 
+        <div class="settings-tabs" role="tablist" aria-label="设置分类">
+          <button type="button" class="settings-tab active" role="tab" aria-selected="true" aria-controls="settings-basic-panel" data-settings-tab="basic">基础设置</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-motion-panel" data-settings-tab="motion">动作设置</button>
+        </div>
+
         <div class="tab-panels">
-          <section class="tab-panel active" role="tabpanel">
+          <section id="settings-basic-panel" class="tab-panel active" role="tabpanel" data-settings-panel="basic">
             <div class="field avatar-tune">
               <span>数字人形象</span>
               <div id="avatar-picker" class="avatar-picker" aria-label="可切换的数字人形象"></div>
-              <small>选择后立即切换所有观众看到的共享形象；“暖光正脸”取自 idle 视频。</small>
+              <div class="profile-actions">
+                <button id="avatar-profile-activate" type="button" class="btn primary">重新应用当前角色</button>
+                <span id="avatar-profile-status" class="profile-status" aria-live="polite"></span>
+              </div>
+              <small>点击形象卡片会切换整套角色配置；画面、动作与音色调整都会自动保存。对话中切换会在本轮完整播放后生效。</small>
               <span>数字人画面</span>
               <label class="avatar-slider">
                 <span>人像大小 <output id="avatar-size-value">100%</output></span>
@@ -265,7 +274,7 @@
                 <input id="avatar-fade" type="range" min="0" max="70" step="1" value="42" />
               </label>
               <button id="avatar-view-reset" type="button" class="btn avatar-view-reset">恢复默认画面</button>
-              <small>画面调整只保存在当前浏览器中。</small>
+              <small>拖动时即时预览，停止调整后自动保存并同步给所有观众。</small>
             </div>
 
             <label class="field" id="conn-field">
@@ -277,21 +286,17 @@
               </small>
             </label>
 
-            <div class="field-row">
-              <label class="field">
-                <span>Voice</span>
-                <select id="voice">
-                  <option value="Aiden" selected>Aiden</option>
-                  <option value="Ryan">Ryan</option>
-                  <option value="Dylan">Dylan</option>
-                  <option value="Eric">Eric</option>
-                  <option value="Ono_Anna">Ono_Anna</option>
-                  <option value="Serena">Serena</option>
-                  <option value="Sohee">Sohee</option>
-                  <option value="Uncle_Fu">Uncle_Fu</option>
-                  <option value="Vivian">Vivian</option>
-                </select>
-              </label>
+            <div class="field voice-profile-card">
+              <span>角色音色</span>
+              <input id="voice" type="hidden" value="active_profile" />
+              <div class="voice-profile-summary">
+                <div><strong id="profile-voice-name">正在读取…</strong><small id="profile-voice-meta">参考音频克隆</small></div>
+                <div class="voice-inline-actions">
+                  <button id="profile-voice-play" type="button" class="btn">播放原音</button>
+                  <button id="voice-manager-open" type="button" class="btn">音色管理</button>
+                </div>
+              </div>
+              <small id="voice-hint">Qwen3-TTS 使用当前角色绑定的参考音频和准确文本克隆音色。</small>
             </div>
 
             <label class="field">
@@ -353,8 +358,9 @@
             </div>
 
             <label class="field">
-              <span>Instructions</span>
-              <textarea id="instructions" rows="5" placeholder="You are a friendly voice assistant..."></textarea>
+              <span>角色个性提示词</span>
+              <textarea id="instructions" rows="7" maxlength="12000" placeholder="填写这个形象的身份、性格、语气和互动方式…"></textarea>
+              <small>与当前形象独立绑定并自动保存。语音连线、公屏回复和主动播报都会使用这套人设；系统不会主动自称数字人或 AI。</small>
             </label>
 
             <div class="field">
@@ -364,12 +370,83 @@
               <small id="restart-hint">Connect first, then come back here to apply live changes.</small>
             </div>
           </section>
+
+          <section id="settings-motion-panel" class="tab-panel motion-panel" role="tabpanel" data-settings-panel="motion" hidden>
+            <p class="motion-intro">只提供 AVTR-1 当前真正生效的参数；调整后自动保存并对整个直播间生效。幅度显示的是模型实际接受的范围，不会再被后台静默截断。</p>
+            <div class="motion-section">
+              <div class="motion-section-head">
+                <div><h3>氛围待机状态</h3><p>无人说话时的自然眨眼和左右摆头。上下点头默认很低，设为 0 可完全关闭。</p></div>
+                <label class="switch"><input type="checkbox" data-motion="idle_motion_enabled" aria-label="启用待机摆头" /><span class="switch-track" aria-hidden="true"></span></label>
+              </div>
+              <div class="motion-grid">
+                <label class="motion-control"><span>摆头总幅度 <output data-motion-output="idle_head_amplitude_degrees"></output></span><input type="range" min="0" max="0.8" step="0.05" data-motion="idle_head_amplitude_degrees" /><small>真实上限 0.8°；主要由左右比例分配。</small></label>
+                <label class="motion-control"><span>摆头周期 <output data-motion-output="idle_head_cycle_seconds"></output></span><input type="range" min="2.5" max="12" step="0.1" data-motion="idle_head_cycle_seconds" /><small>越小越灵动，越大越舒缓。</small></label>
+                <label class="motion-control"><span>左右摆头比例 <output data-motion-output="idle_yaw_ratio"></output></span><input type="range" min="-1" max="1" step="0.05" data-motion="idle_yaw_ratio" /><small>绝对值越大左右摆动越明显。</small></label>
+                <label class="motion-control"><span>上下点头比例 <output data-motion-output="idle_pitch_ratio"></output></span><input type="range" min="-1" max="1" step="0.02" data-motion="idle_pitch_ratio" /><small>建议 0～0.15；0 表示不做上下浮动。</small></label>
+                <label class="motion-control"><span>轻微侧倾比例 <output data-motion-output="idle_roll_ratio"></output></span><input type="range" min="-1" max="1" step="0.02" data-motion="idle_roll_ratio" /><small>少量可减弱机械感，过大会显得摇晃。</small></label>
+                <label class="motion-control"><span>随机微动强度 <output data-motion-output="idle_noise_alpha"></output></span><input type="range" min="0" max="4" step="0.1" data-motion="idle_noise_alpha" /><small>模型内部随机动作强度，不是位移。</small></label>
+              </div>
+              <div class="motion-subhead"><span>自然眨眼</span><label class="switch"><input type="checkbox" data-motion="blink_enabled" aria-label="启用自然眨眼" /><span class="switch-track" aria-hidden="true"></span></label></div>
+              <div class="motion-grid">
+                <label class="motion-control"><span>最短间隔 <output data-motion-output="idle_blink_min_seconds"></output></span><input type="range" min="1.5" max="12" step="0.1" data-motion="idle_blink_min_seconds" /></label>
+                <label class="motion-control"><span>最长间隔 <output data-motion-output="idle_blink_max_seconds"></output></span><input type="range" min="1.5" max="15" step="0.1" data-motion="idle_blink_max_seconds" /></label>
+                <label class="motion-control"><span>闭眼力度 <output data-motion-output="idle_blink_strength"></output></span><input type="range" min="0" max="1.5" step="0.02" data-motion="idle_blink_strength" /></label>
+                <label class="motion-control"><span>半眨眼概率 <output data-motion-output="idle_blink_partial_probability"></output></span><input type="range" min="0" max="0.4" step="0.01" data-motion="idle_blink_partial_probability" /></label>
+                <label class="motion-control"><span>连续眨眼概率 <output data-motion-output="idle_blink_double_probability"></output></span><input type="range" min="0" max="0.35" step="0.01" data-motion="idle_blink_double_probability" /></label>
+              </div>
+              <details class="motion-advanced">
+                <summary>待机高级参数</summary>
+                <div class="motion-grid">
+                  <label class="motion-control"><span>慢漂移周期 <output data-motion-output="idle_drift_cycle_seconds"></output></span><input type="range" min="4" max="16" step="0.1" data-motion="idle_drift_cycle_seconds" /></label>
+                  <label class="motion-control"><span>慢漂移混合 <output data-motion-output="idle_drift_mix"></output></span><input type="range" min="0" max="0.5" step="0.01" data-motion="idle_drift_mix" /></label>
+                  <label class="motion-control"><span>随机动作范围 <output data-motion-output="idle_noise_trunc_z"></output></span><input type="range" min="0" max="2" step="0.05" data-motion="idle_noise_trunc_z" /></label>
+                </div>
+              </details>
+            </div>
+
+            <div class="motion-section">
+              <div class="motion-section-head"><div><h3>说话与聆听状态</h3><p>控制语音驱动的嘴部/头部响应、说话时眨眼，以及停顿后的动作保持。</p></div></div>
+              <div class="motion-grid">
+                <label class="motion-control"><span>说话动作响应 <output data-motion-output="speaking_motion_strength"></output></span><input type="range" min="0" max="5" step="0.1" data-motion="speaking_motion_strength" /><small>声音驱动自身动作的 CFG 强度。</small></label>
+                <label class="motion-control"><span>聆听动作响应 <output data-motion-output="listening_motion_strength"></output></span><input type="range" min="0" max="5" step="0.1" data-motion="listening_motion_strength" /><small>连线用户讲话时的反应强度。</small></label>
+                <label class="motion-control"><span>说话眨眼频率 <output data-motion-output="speaking_blink_interval_scale"></output></span><input type="range" min="0.35" max="1.2" step="0.01" data-motion="speaking_blink_interval_scale" /><small>是待机间隔的倍率；越小眨得越频繁。</small></label>
+                <label class="motion-control"><span>说话眨眼力度 <output data-motion-output="speaking_blink_strength"></output></span><input type="range" min="0" max="1.5" step="0.02" data-motion="speaking_blink_strength" /></label>
+                <label class="motion-control"><span>动作保持时间 <output data-motion-output="speaking_motion_hold_seconds"></output></span><input type="range" min="0" max="3" step="0.1" data-motion="speaking_motion_hold_seconds" /><small>短暂停顿时不立即切回待机，减少跳变。</small></label>
+              </div>
+              <details class="motion-advanced">
+                <summary>说话高级参数</summary>
+                <div class="motion-grid">
+                  <label class="motion-control"><span>随机动作强度 <output data-motion-output="speaking_noise_alpha"></output></span><input type="range" min="0" max="4" step="0.1" data-motion="speaking_noise_alpha" /></label>
+                  <label class="motion-control"><span>随机动作范围 <output data-motion-output="speaking_noise_trunc_z"></output></span><input type="range" min="0" max="2" step="0.05" data-motion="speaking_noise_trunc_z" /></label>
+                </div>
+              </details>
+            </div>
+            <p id="motion-save-status" class="motion-save-status" aria-live="polite"></p>
+          </section>
         </div>
 
         <footer class="modal-footer">
-          <button id="settings-save" type="submit" class="btn primary" value="save">Save</button>
+          <span id="settings-auto-save-status" class="settings-auto-save-status" aria-live="polite">调整后自动保存</span>
+          <button id="settings-done" type="button" class="btn primary">完成</button>
         </footer>
       </form>
+    </dialog>
+
+    <dialog id="voice-manager-modal" class="modal voice-manager-modal">
+      <div class="modal-content voice-manager-card">
+        <header class="modal-header"><div><h2>音色管理</h2><p>上传或录制同一个人的清晰语音，并填写音频中逐字一致的参考文本。</p></div><button id="voice-manager-close" class="icon-btn" type="button" aria-label="关闭">×</button></header>
+        <div class="voice-create-grid">
+          <label class="field"><span>音色名称</span><input id="voice-upload-name" maxlength="48" placeholder="例如：小雅温柔音色" /></label>
+          <label class="field"><span>准确参考文本</span><textarea id="voice-upload-text" rows="3" maxlength="1000" placeholder="请逐字填写录音里说出的内容，确认后音色才能绑定"></textarea></label>
+          <label class="voice-file-pick btn"><input id="voice-upload-file" type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/webm,audio/ogg" hidden />选择音频</label>
+          <button id="voice-record" type="button" class="btn"><span>开始录音</span><output id="voice-record-time">00:00</output></button>
+          <meter id="voice-record-level" min="0" max="1" value="0" aria-label="录音音量"></meter>
+          <button id="voice-upload-submit" type="button" class="btn primary">保存新音色</button>
+          <p id="voice-upload-status" class="profile-status" aria-live="polite"></p>
+        </div>
+        <div class="voice-preview-row"><input id="voice-preview-text" maxlength="120" value="你好呀，很高兴在直播间见到你，今天想聊些什么呢？" /><small>合成试听仅管理员可听，直播交互会优先占用模型。</small></div>
+        <div id="voice-library" class="voice-library"></div>
+      </div>
     </dialog>
 
     <dialog id="tools-modal" class="modal">
@@ -437,8 +514,8 @@
     </dialog>
 
     <script src="/vendor/mpegts.min.js"></script>
-    <script src="/avatar-sync.js?v=20260821e"></script>
+    <script src="/avatar-sync.js?v=20260824d"></script>
     <script type="module" src="room.js?v=20260820a"></script>
-    <script type="module" src="main.js?v=20260821b"></script>
+    <script type="module" src="main.js?v=20260824f"></script>
   </body>
 </html>

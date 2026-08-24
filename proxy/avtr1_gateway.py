@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import random
 import time
@@ -20,7 +21,7 @@ from aiohttp import web
 RENDERER = os.environ.get("AVTR1_URL", "http://127.0.0.1:18012").rstrip("/")
 HOST = os.environ.get("AVATAR_GW_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AVATAR_GW_PORT", "18011"))
-AVATAR_ID = os.environ.get("AVTR1_AVATAR_ID", "xiaoya")
+AVATAR_ID = os.environ.get("AVTR1_AVATAR_ID", "xiaoya_locket")
 BG_ID = os.environ.get("AVTR1_BG_ID", "plain_white")
 H264_BITRATE = int(os.environ.get("AVTR1_H264_BITRATE", "1800000"))
 CFG_SELF_AUDIO = float(os.environ.get("AVTR1_CFG_SELF_AUDIO", "2.3"))
@@ -70,6 +71,10 @@ BLINK_STRENGTH = min(
         ),
     ),
 )
+SPEECH_BLINK_STRENGTH = min(
+    1.5,
+    max(0.0, float(os.environ.get("AVTR1_BLINK_SPEECH_STRENGTH", str(BLINK_STRENGTH)))),
+)
 BLINK_SPEECH_INTERVAL_SCALE = min(
     1.2, max(0.35, float(os.environ.get("AVTR1_BLINK_SPEECH_INTERVAL_SCALE", "0.82")))
 )
@@ -112,6 +117,155 @@ IDLE_BREATH_FADE_IN_STEP = min(
 IDLE_BREATH_FADE_OUT_STEP = min(
     1.0, max(0.01, float(os.environ.get("AVTR1_IDLE_BREATH_FADE_OUT_STEP", "0.18")))
 )
+MOTION_CONFIG_PATH = os.path.realpath(
+    os.environ.get(
+        "AVTR1_MOTION_CONFIG_PATH",
+        os.path.join(os.path.dirname(__file__), "..", "data", "avtr_motion.json"),
+    )
+)
+
+# Controls actually consumed by the renderer. Bounds mirror its own clamps so
+# the UI never offers values that AVTR-1 would silently discard.
+MOTION_FIELDS = {
+    "blink_enabled": ("bool", None, None),
+    "idle_blink_min_seconds": ("float", 1.5, 12.0),
+    "idle_blink_max_seconds": ("float", 1.5, 15.0),
+    "idle_blink_strength": ("float", 0.0, 1.5),
+    "idle_blink_double_probability": ("float", 0.0, 0.35),
+    "idle_blink_partial_probability": ("float", 0.0, 0.4),
+    "idle_motion_enabled": ("bool", None, None),
+    "idle_head_amplitude_degrees": ("float", 0.0, 0.8),
+    "idle_head_cycle_seconds": ("float", 2.5, 12.0),
+    "idle_drift_cycle_seconds": ("float", 4.0, 16.0),
+    "idle_drift_mix": ("float", 0.0, 0.5),
+    "idle_pitch_ratio": ("float", -1.0, 1.0),
+    "idle_yaw_ratio": ("float", -1.0, 1.0),
+    "idle_roll_ratio": ("float", -1.0, 1.0),
+    "idle_noise_alpha": ("float", 0.0, 4.0),
+    "idle_noise_trunc_z": ("float", 0.0, 2.0),
+    "speaking_blink_interval_scale": ("float", 0.35, 1.2),
+    "speaking_blink_strength": ("float", 0.0, 1.5),
+    "speaking_motion_strength": ("float", 0.0, 5.0),
+    "listening_motion_strength": ("float", 0.0, 5.0),
+    "speaking_noise_alpha": ("float", 0.0, 4.0),
+    "speaking_noise_trunc_z": ("float", 0.0, 2.0),
+    "speaking_motion_hold_seconds": ("float", 0.0, 3.0),
+}
+
+
+def _motion_config() -> dict[str, bool | float]:
+    return {
+        "blink_enabled": BLINK_ENABLED,
+        "idle_blink_min_seconds": BLINK_MIN_SECONDS,
+        "idle_blink_max_seconds": BLINK_MAX_SECONDS,
+        "idle_blink_strength": BLINK_STRENGTH,
+        "idle_blink_double_probability": BLINK_DOUBLE_PROBABILITY,
+        "idle_blink_partial_probability": BLINK_PARTIAL_PROBABILITY,
+        "idle_motion_enabled": IDLE_BREATH_ENABLED,
+        "idle_head_amplitude_degrees": IDLE_BREATH_POSE_DEGREES,
+        "idle_head_cycle_seconds": IDLE_BREATH_PRIMARY_SECONDS,
+        "idle_drift_cycle_seconds": IDLE_BREATH_DRIFT_SECONDS,
+        "idle_drift_mix": IDLE_BREATH_DRIFT_MIX,
+        "idle_pitch_ratio": IDLE_BREATH_PITCH_RATIO,
+        "idle_yaw_ratio": IDLE_BREATH_YAW_RATIO,
+        "idle_roll_ratio": IDLE_BREATH_ROLL_RATIO,
+        "idle_noise_alpha": IDLE_NOISE_ALPHA,
+        "idle_noise_trunc_z": IDLE_NOISE_TRUNC_Z,
+        "speaking_blink_interval_scale": BLINK_SPEECH_INTERVAL_SCALE,
+        "speaking_blink_strength": SPEECH_BLINK_STRENGTH,
+        "speaking_motion_strength": CFG_SELF_AUDIO,
+        "listening_motion_strength": CFG_OTHER_AUDIO,
+        "speaking_noise_alpha": NOISE_ALPHA,
+        "speaking_noise_trunc_z": NOISE_TRUNC_Z,
+        "speaking_motion_hold_seconds": MOTION_ACTIVE_HOLD_SECONDS,
+    }
+
+
+def _validated_motion_config(payload: object) -> dict[str, bool | float]:
+    if not isinstance(payload, dict):
+        raise ValueError("motion config must be an object")
+    unknown = set(payload) - set(MOTION_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown motion fields: {', '.join(sorted(unknown))}")
+    values = _motion_config()
+    for key, raw in payload.items():
+        kind, minimum, maximum = MOTION_FIELDS[key]
+        if kind == "bool":
+            if not isinstance(raw, bool):
+                raise ValueError(f"{key} must be boolean")
+            values[key] = raw
+            continue
+        if isinstance(raw, bool):
+            raise ValueError(f"{key} must be numeric")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be numeric") from None
+        if not np.isfinite(value) or value < minimum or value > maximum:
+            raise ValueError(f"{key} must be between {minimum} and {maximum}")
+        values[key] = value
+    if values["idle_blink_max_seconds"] < values["idle_blink_min_seconds"]:
+        raise ValueError("idle blink maximum must not be less than minimum")
+    return values
+
+
+def _apply_motion_config(values: dict[str, bool | float]) -> None:
+    global BLINK_ENABLED, BLINK_MIN_SECONDS, BLINK_MAX_SECONDS, BLINK_STRENGTH
+    global BLINK_DOUBLE_PROBABILITY, BLINK_PARTIAL_PROBABILITY
+    global BLINK_SPEECH_INTERVAL_SCALE, SPEECH_BLINK_STRENGTH
+    global IDLE_BREATH_ENABLED, IDLE_BREATH_POSE_DEGREES
+    global IDLE_BREATH_PRIMARY_SECONDS, IDLE_BREATH_DRIFT_SECONDS
+    global IDLE_BREATH_DRIFT_MIX, IDLE_BREATH_PITCH_RATIO
+    global IDLE_BREATH_YAW_RATIO, IDLE_BREATH_ROLL_RATIO
+    global IDLE_NOISE_ALPHA, IDLE_NOISE_TRUNC_Z
+    global CFG_SELF_AUDIO, CFG_OTHER_AUDIO, NOISE_ALPHA, NOISE_TRUNC_Z
+    global MOTION_ACTIVE_HOLD_SECONDS, next_blink_at
+    BLINK_ENABLED = bool(values["blink_enabled"])
+    BLINK_MIN_SECONDS = float(values["idle_blink_min_seconds"])
+    BLINK_MAX_SECONDS = float(values["idle_blink_max_seconds"])
+    BLINK_STRENGTH = float(values["idle_blink_strength"])
+    BLINK_DOUBLE_PROBABILITY = float(values["idle_blink_double_probability"])
+    BLINK_PARTIAL_PROBABILITY = float(values["idle_blink_partial_probability"])
+    IDLE_BREATH_ENABLED = bool(values["idle_motion_enabled"])
+    IDLE_BREATH_POSE_DEGREES = float(values["idle_head_amplitude_degrees"])
+    IDLE_BREATH_PRIMARY_SECONDS = float(values["idle_head_cycle_seconds"])
+    IDLE_BREATH_DRIFT_SECONDS = float(values["idle_drift_cycle_seconds"])
+    IDLE_BREATH_DRIFT_MIX = float(values["idle_drift_mix"])
+    IDLE_BREATH_PITCH_RATIO = float(values["idle_pitch_ratio"])
+    IDLE_BREATH_YAW_RATIO = float(values["idle_yaw_ratio"])
+    IDLE_BREATH_ROLL_RATIO = float(values["idle_roll_ratio"])
+    IDLE_NOISE_ALPHA = float(values["idle_noise_alpha"])
+    IDLE_NOISE_TRUNC_Z = float(values["idle_noise_trunc_z"])
+    BLINK_SPEECH_INTERVAL_SCALE = float(values["speaking_blink_interval_scale"])
+    SPEECH_BLINK_STRENGTH = float(values["speaking_blink_strength"])
+    CFG_SELF_AUDIO = float(values["speaking_motion_strength"])
+    CFG_OTHER_AUDIO = float(values["listening_motion_strength"])
+    NOISE_ALPHA = float(values["speaking_noise_alpha"])
+    NOISE_TRUNC_Z = float(values["speaking_noise_trunc_z"])
+    MOTION_ACTIVE_HOLD_SECONDS = float(values["speaking_motion_hold_seconds"])
+    blink_frames.clear()
+    next_blink_at = time.monotonic() + random.uniform(BLINK_MIN_SECONDS, BLINK_MAX_SECONDS)
+
+
+def _save_motion_config(values: dict[str, bool | float]) -> None:
+    directory = os.path.dirname(MOTION_CONFIG_PATH)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    temporary = f"{MOTION_CONFIG_PATH}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(values, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, MOTION_CONFIG_PATH)
+
+
+def _load_saved_motion_config() -> None:
+    if not os.path.isfile(MOTION_CONFIG_PATH):
+        return
+    try:
+        with open(MOTION_CONFIG_PATH, encoding="utf-8") as handle:
+            _apply_motion_config(_validated_motion_config(json.load(handle)))
+    except Exception as exc:
+        print(f"[avtr1-gw] ignoring invalid motion config: {exc}", flush=True)
 BACKGROUND_MUSIC_ENABLED = os.environ.get(
     "BACKGROUND_MUSIC_ENABLED", "1"
 ).lower() not in {"0", "false", "off", "no"}
@@ -149,6 +303,7 @@ connected = False
 state_blob: bytes | None = None
 state_avatar_id: str | None = None
 speech_pcm = bytearray()
+speech_finished = False
 listen_pcm = bytearray()
 buf_lock = asyncio.Lock()
 # Queue -> whether this viewer requested the mixed background-music variant.
@@ -533,13 +688,30 @@ async def pace_av() -> None:
 
 
 def _window_from_speech(buf: bytearray) -> tuple[bytes, bytes, bytes]:
+    """Build an AVTR look-ahead window without discarding future speech.
+
+    The renderer needs about 405 ms while only 200 ms is played per call. The
+    old short-buffer branch cleared everything, so a 300–400 ms TTS burst lost
+    the tail that had only been used as look-ahead. Hold partial live input;
+    after /audio-finish, drain it in 200 ms steps with zero padding.
+    """
+    global speech_finished
     need = WINDOW_SAMPLES * 2
     if len(buf) >= need:
         window = bytes(buf[:need])
         del buf[: CURRENT_SAMPLES * 2]
+    elif not speech_finished:
+        silent_current = bytes(CURRENT_SAMPLES * 2)
+        return silent_current, bytes(FUTURE_SAMPLES * 2), silent_current
+    elif buf:
+        window = bytes(buf[:need]) + bytes(max(0, need - len(buf)))
+        consumed = min(len(buf), CURRENT_SAMPLES * 2)
+        del buf[:consumed]
+        if not buf:
+            speech_finished = False
     else:
-        window = bytes(buf) + bytes(need - len(buf))
-        buf.clear()
+        speech_finished = False
+        window = bytes(need)
     cur = window[: CURRENT_SAMPLES * 2]
     fut = window[CURRENT_SAMPLES * 2 :]
     return cur, fut, cur
@@ -669,7 +841,9 @@ async def render_loop() -> None:
                 blink_frames.popleft() if blink_frames else 0.0
                 for _ in range(CHUNK_SIZE)
             ]
-            blink_strength = BLINK_STRENGTH if any(blink_weights) else 0.0
+            blink_strength = (
+                SPEECH_BLINK_STRENGTH if motion_active else BLINK_STRENGTH
+            ) if any(blink_weights) else 0.0
             form = aiohttp.FormData()
             form.add_field(
                 "current_chunk",
@@ -788,10 +962,11 @@ async def render_loop() -> None:
 
 
 async def append_speech(pcm: bytes) -> None:
-    global last_speech_input_at
+    global last_speech_input_at, speech_finished
     if not pcm:
         return
     last_speech_input_at = time.monotonic()
+    speech_finished = False
     async with buf_lock:
         speech_pcm.extend(pcm)
         overflow = len(speech_pcm) - MAX_SPEECH_BYTES
@@ -821,6 +996,7 @@ AVATAR_LABELS = {
     "xiaoya_beach_close": "海边近景",
     "xiaoya_beach": "海边",
     "xiaoya_locket": "白背心",
+    "sauna_portrait": "桑拿正脸",
 }
 
 
@@ -843,11 +1019,12 @@ async def _list_avatar_ids() -> tuple[list[str], list[str]]:
     if not ids:
         ids = [AVATAR_ID]
     preferred = [
+        "xiaoya_locket",
         "xiaoya",
         "xiaoya_idle",
         "xiaoya_beach_close",
         "xiaoya_beach",
-        "xiaoya_locket",
+        "sauna_portrait",
     ]
     ordered = [item for item in preferred if item in ids]
     return ordered or [AVATAR_ID], loaded
@@ -887,6 +1064,7 @@ async def handle_status(_request):
                 "active_hold_seconds": MOTION_ACTIVE_HOLD_SECONDS,
                 "blink_enabled": BLINK_ENABLED,
                 "blink_strength": BLINK_STRENGTH,
+                "blink_speech_strength": SPEECH_BLINK_STRENGTH,
                 "blink_min_seconds": BLINK_MIN_SECONDS,
                 "blink_max_seconds": BLINK_MAX_SECONDS,
                 "blink_speech_interval_scale": BLINK_SPEECH_INTERVAL_SCALE,
@@ -934,7 +1112,7 @@ async def handle_avatars(_request):
 
 
 async def handle_set_avatar(request):
-    global AVATAR_ID, state_blob, state_avatar_id, h264_encoder, next_blink_at
+    global AVATAR_ID, state_blob, state_avatar_id, h264_encoder, next_blink_at, speech_finished
     body = await request.json()
     avatar_id = str(body.get("avatar_id") or "").strip()
     if not avatar_id or "/" in avatar_id or ".." in avatar_id:
@@ -947,6 +1125,7 @@ async def handle_set_avatar(request):
     async with buf_lock:
         AVATAR_ID = avatar_id
         speech_pcm.clear()
+        speech_finished = False
         listen_pcm.clear()
         state_blob = None
         state_avatar_id = None
@@ -965,6 +1144,21 @@ async def handle_set_avatar(request):
     return web.json_response(
         {"ok": True, "avatar_id": AVATAR_ID, "label": _avatar_label(AVATAR_ID)}
     )
+
+
+async def handle_motion_config(_request):
+    return web.json_response({"ok": True, "motion": _motion_config()})
+
+
+async def handle_set_motion_config(request):
+    try:
+        values = _validated_motion_config(await request.json())
+        _apply_motion_config(values)
+        _save_motion_config(values)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
+    print("[avtr1-gw] motion config updated", flush=True)
+    return web.json_response({"ok": True, "motion": values})
 
 
 async def handle_livestream(request):
@@ -1036,6 +1230,13 @@ async def handle_audio_chunk(request):
     return web.json_response({"ok": True, "bytes": len(raw)})
 
 
+async def handle_audio_finish(_request):
+    global speech_finished
+    async with buf_lock:
+        speech_finished = True
+    return web.json_response({"ok": True, "remaining_bytes": len(speech_pcm)})
+
+
 async def handle_listen_chunk(request):
     raw = await request.read()
     await append_listen(raw)
@@ -1051,9 +1252,10 @@ async def handle_listen_reset(_request):
 
 
 async def handle_interrupt(_request):
-    global state_blob, last_speech_input_at
+    global state_blob, last_speech_input_at, speech_finished
     async with buf_lock:
         speech_pcm.clear()
+        speech_finished = False
         state_blob = None
         last_speech_input_at = 0.0
     for q in (video_pace_queue, audio_pace_queue):
@@ -1086,13 +1288,17 @@ async def on_cleanup(app):
 
 
 def main():
+    _load_saved_motion_config()
     app = web.Application(client_max_size=80 * 1024 * 1024)
     app.router.add_get("/status", handle_status)
     app.router.add_get("/avatars", handle_avatars)
     app.router.add_post("/avatar", handle_set_avatar)
+    app.router.add_get("/motion-config", handle_motion_config)
+    app.router.add_put("/motion-config", handle_set_motion_config)
     app.router.add_get("/livestream.flv", handle_livestream)
     app.router.add_post("/audio", handle_audio)
     app.router.add_post("/audio-chunk", handle_audio_chunk)
+    app.router.add_post("/audio-finish", handle_audio_finish)
     app.router.add_post("/listen-chunk", handle_listen_chunk)
     app.router.add_post("/listen-reset", handle_listen_reset)
     app.router.add_post("/interrupt", handle_interrupt)

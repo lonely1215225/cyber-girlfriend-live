@@ -15,6 +15,7 @@ FRONTEND="$ROOT/s2s/hf-realtime-voice"
 # Allow relative paths in config.env
 [[ "${TTS_MODEL:-}" = /* ]] || TTS_MODEL="$ROOT/${TTS_MODEL:-models/qwen3tts/Qwen3-TTS-12Hz-1.7B-Base}"
 [[ "${REF_AUDIO:-}" = /* ]] || REF_AUDIO="$ROOT/${REF_AUDIO:-assets/ref16k.wav}"
+export REF_AUDIO REF_TEXT
 SENSEVOICE_MODEL="${SENSEVOICE_MODEL:-models/sensevoice/SenseVoiceSmall}"
 if [[ "$SENSEVOICE_MODEL" == models/* ]]; then
   SENSEVOICE_MODEL="$ROOT/$SENSEVOICE_MODEL"
@@ -26,7 +27,10 @@ die() { echo "✗ $*" >&2; exit 1; }
 alive() {
   local pidfile="$1"
   [[ -f "$pidfile" ]] || return 1
-  kill -0 "$(cat "$pidfile")" 2>/dev/null
+  local pid
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null
 }
 
 start_bg() {
@@ -36,6 +40,8 @@ start_bg() {
     say "$name already running (pid $(cat "$pidfile"))"
     return 0
   fi
+  # A stale pidfile must never make a subsequent one-click start look healthy.
+  rm -f "$pidfile"
   say "start $name"
   # Detach from the caller's session as well as its terminal. This keeps
   # services alive when start.sh is launched by SSH or another job runner.
@@ -91,6 +97,25 @@ if ! curl -sf "$OLLAMA_URL/api/tags" >/dev/null 2>&1; then
 fi
 curl -sf "$OLLAMA_URL/api/tags" >/dev/null 2>&1 || die "Ollama is not reachable at $OLLAMA_URL"
 
+# Load the configured model now instead of making the first viewer wait for
+# Ollama to allocate GPU memory. The stop script unloads this exact model while
+# deliberately leaving a possibly shared Ollama daemon running.
+if [[ "${LLM_PREWARM:-1}" != "0" ]]; then
+  [[ "$LLM_NAME" =~ ^[A-Za-z0-9._:/-]+$ ]] || die "LLM_NAME contains unsupported characters"
+  [[ "${LLM_NUM_CTX:-4096}" =~ ^[0-9]+$ ]] || die "LLM_NUM_CTX must be an integer"
+  [[ "${LLM_KEEP_ALIVE:--1}" =~ ^-?[0-9]+$ ]] || die "LLM_KEEP_ALIVE must be an integer"
+  say "prewarm Ollama model $LLM_NAME"
+  OLLAMA_PREWARM_PAYLOAD="$(printf \
+    '{"model":"%s","prompt":"","stream":false,"keep_alive":%s,"options":{"num_ctx":%s,"num_predict":1}}' \
+    "$LLM_NAME" "${LLM_KEEP_ALIVE:--1}" "${LLM_NUM_CTX:-4096}")"
+  curl -fsS --max-time 600 \
+    -H 'Content-Type: application/json' \
+    -d "$OLLAMA_PREWARM_PAYLOAD" \
+    "$OLLAMA_URL/api/generate" >/dev/null \
+    || die "failed to prewarm Ollama model $LLM_NAME"
+  say "Ollama model ready"
+fi
+
 S2S_NVIDIA_LIBS="$("$S2S_VENV/bin/python" - <<'PY' 2>/dev/null || true
 import os
 import pkgutil
@@ -130,6 +155,10 @@ export LIVE_ROOM_JOIN_TIMEOUT="${LIVE_ROOM_JOIN_TIMEOUT:-60}"
 export LIVE_ROOM_MAX_CALL_SECONDS="${LIVE_ROOM_MAX_CALL_SECONDS:-600}"
 export ADMIN_SETTINGS_PASSWORD="${ADMIN_SETTINGS_PASSWORD:-123456}"
 export ADMIN_SESSION_TTL_SECONDS="${ADMIN_SESSION_TTL_SECONDS:-1800}"
+ROOM_DB_PATH="${ROOM_DB_PATH:-data/live_room.sqlite3}"
+[[ "$ROOM_DB_PATH" = /* ]] || ROOM_DB_PATH="$ROOT/$ROOM_DB_PATH"
+export ROOM_DB_PATH
+export ROOM_IP_RETENTION_DAYS="${ROOM_IP_RETENTION_DAYS:-30}"
 export MENTION_REPLY_QUEUE_LIMIT="${MENTION_REPLY_QUEUE_LIMIT:-30}"
 export BACKGROUND_MUSIC_ENABLED="${BACKGROUND_MUSIC_ENABLED:-1}"
 BACKGROUND_MUSIC_DIR="${BACKGROUND_MUSIC_DIR:-.}"
@@ -152,18 +181,18 @@ export NEWS_GOOGLE_RSS_ENABLED="${NEWS_GOOGLE_RSS_ENABLED:-1}"
 export NEWS_RSS_TIMEOUT="${NEWS_RSS_TIMEOUT:-8}"
 export NEWS_RSS_CACHE_SECONDS="${NEWS_RSS_CACHE_SECONDS:-120}"
 export NEWS_RSS_MAX_ITEMS="${NEWS_RSS_MAX_ITEMS:-10}"
-export NEWS_RSS_MAX_AGE_HOURS="${NEWS_RSS_MAX_AGE_HOURS:-168}"
+export NEWS_RSS_MAX_AGE_HOURS="${NEWS_RSS_MAX_AGE_HOURS:-72}"
 export NEWS_RSS_FEEDS="${NEWS_RSS_FEEDS:-}"
 export NEWS_RSS_ALLOWED_HOSTS="${NEWS_RSS_ALLOWED_HOSTS:-}"
 export S2S_INTERNAL_WS_URL="ws://127.0.0.1:${S2S_PORT}/v1/realtime"
 export TTS_EMOTION_ENABLED="${TTS_EMOTION_ENABLED:-1}"
 export TTS_STYLE_INSTRUCT_ENABLED="${TTS_STYLE_INSTRUCT_ENABLED:-1}"
-export TTS_TEMPERATURE="${TTS_TEMPERATURE:-0.75}"
-export TTS_TOP_K="${TTS_TOP_K:-40}"
-export TTS_TOP_P="${TTS_TOP_P:-0.90}"
+export TTS_TEMPERATURE="${TTS_TEMPERATURE:-0.65}"
+export TTS_TOP_K="${TTS_TOP_K:-30}"
+export TTS_TOP_P="${TTS_TOP_P:-0.85}"
 export TTS_DO_SAMPLE="${TTS_DO_SAMPLE:-1}"
 export TTS_REPETITION_PENALTY="${TTS_REPETITION_PENALTY:-1.05}"
-export AVATAR_TEE_PREROLL_MS="${AVATAR_TEE_PREROLL_MS:-400}"
+export AVATAR_TEE_PREROLL_MS="${AVATAR_TEE_PREROLL_MS:-480}"
 export STARTUP_GREETING="${STARTUP_GREETING:-}"
 export IDLE_PROMPT="${IDLE_PROMPT:-}"
 export IDLE_PROMPT_MIN_SECONDS="${IDLE_PROMPT_MIN_SECONDS:-35}"
@@ -172,6 +201,7 @@ export PROACTIVE_NEWS_MIN_SECONDS="${PROACTIVE_NEWS_MIN_SECONDS:-90}"
 export PROACTIVE_NEWS_MAX_SECONDS="${PROACTIVE_NEWS_MAX_SECONDS:-150}"
 export OLLAMA_URL LLM_NAME THINKLESS_PORT LLM_NUM_CTX LLM_NUM_PREDICT LLM_KEEP_ALIVE LLM_PREWARM
 export LLM_CHAT_SIZE="${LLM_CHAT_SIZE:-12}"
+export LLM_STREAM_BATCH_SENTENCES="${LLM_STREAM_BATCH_SENTENCES:-1}"
 export LLM_COMPACTION_NUM_PREDICT="${LLM_COMPACTION_NUM_PREDICT:-256}"
 export LLM_COMPACTION_MODE="${LLM_COMPACTION_MODE:-local}"
 export LLM_COMPACTION_MAX_CHARS="${LLM_COMPACTION_MAX_CHARS:-900}"
@@ -214,8 +244,8 @@ for extra in "$AVTR1_ENV/lib" "$AVTR1_ENV/lib/python3.12/site-packages/tensorrt_
 done
 export LD_LIBRARY_PATH
 export AVTR1_LOCAL_STORAGE="$AVTR1_ROOT/artifacts"
-export AVTR1_AVATAR_IDS="${AVTR1_AVATAR_ID:-xiaoya}"
-export AVTR1_AVATAR_ID="${AVTR1_AVATAR_ID:-xiaoya}"
+export AVTR1_AVATAR_IDS="${AVTR1_AVATAR_ID:-xiaoya_locket}"
+export AVTR1_AVATAR_ID="${AVTR1_AVATAR_ID:-xiaoya_locket}"
 export AVTR1_BG_ID="${AVTR1_BG_ID:-plain_white}"
 export AVTR1_OUT_H="${AVTR1_OUT_H:-1280}"
 export AVTR1_OUT_W="${AVTR1_OUT_W:-720}"
@@ -234,6 +264,7 @@ export AVTR1_BLINK_ENABLED="${AVTR1_BLINK_ENABLED:-${AVTR1_IDLE_BLINK_ENABLED:-1
 export AVTR1_BLINK_MIN_SECONDS="${AVTR1_BLINK_MIN_SECONDS:-${AVTR1_IDLE_BLINK_MIN_SECONDS:-2.4}}"
 export AVTR1_BLINK_MAX_SECONDS="${AVTR1_BLINK_MAX_SECONDS:-${AVTR1_IDLE_BLINK_MAX_SECONDS:-6.8}}"
 export AVTR1_BLINK_STRENGTH="${AVTR1_BLINK_STRENGTH:-${AVTR1_IDLE_BLINK_STRENGTH:-1.08}}"
+export AVTR1_BLINK_SPEECH_STRENGTH="${AVTR1_BLINK_SPEECH_STRENGTH:-${AVTR1_BLINK_STRENGTH}}"
 export AVTR1_BLINK_SPEECH_INTERVAL_SCALE="${AVTR1_BLINK_SPEECH_INTERVAL_SCALE:-0.82}"
 export AVTR1_BLINK_DOUBLE_PROBABILITY="${AVTR1_BLINK_DOUBLE_PROBABILITY:-0.08}"
 export AVTR1_BLINK_PARTIAL_PROBABILITY="${AVTR1_BLINK_PARTIAL_PROBABILITY:-0.28}"
@@ -256,7 +287,7 @@ export LOAD_BALANCER_URL=disabled
 # first selection.
 AVTR1_FRAMES="$AVTR1_ROOT/artifacts/main/avatars_artifacts/reference_frames"
 mkdir -p "$AVTR1_FRAMES"
-for avatar_id in xiaoya xiaoya_idle xiaoya_beach_close xiaoya_beach xiaoya_locket; do
+for avatar_id in xiaoya_locket xiaoya xiaoya_idle xiaoya_beach_close xiaoya_beach sauna_portrait; do
   avatar_source="$ROOT/assets/looks/${avatar_id}.png"
   [[ -f "$avatar_source" ]] || die "missing avatar portrait $avatar_source"
   cp -f "$avatar_source" "$AVTR1_FRAMES/${avatar_id}.png"
@@ -314,9 +345,9 @@ export TTS_EMOTION_ENABLED="${TTS_EMOTION_ENABLED:-1}"
 export TTS_STYLE_INSTRUCT_ENABLED="${TTS_STYLE_INSTRUCT_ENABLED:-1}"
 export TTS_PROSODY_ENABLED="${TTS_PROSODY_ENABLED:-1}"
 export TTS_PROSODY_MAX_CLAUSE_CHARS="${TTS_PROSODY_MAX_CLAUSE_CHARS:-20}"
-export TTS_TEMPERATURE="${TTS_TEMPERATURE:-0.75}"
-export TTS_TOP_K="${TTS_TOP_K:-40}"
-export TTS_TOP_P="${TTS_TOP_P:-0.90}"
+export TTS_TEMPERATURE="${TTS_TEMPERATURE:-0.65}"
+export TTS_TOP_K="${TTS_TOP_K:-30}"
+export TTS_TOP_P="${TTS_TOP_P:-0.85}"
 export TTS_DO_SAMPLE="${TTS_DO_SAMPLE:-1}"
 export TTS_REPETITION_PENALTY="${TTS_REPETITION_PENALTY:-1.05}"
 if [[ -f "$REF_AUDIO" ]]; then
@@ -340,6 +371,7 @@ start_bg s2s "$RUN/s2s.pid" "$LOG/s2s.log" \
     --responses_api_api_key "$LLM_API_KEY" \
     --responses_api_stream \
     --responses_api_disable_thinking \
+    --stream_batch_sentences "$LLM_STREAM_BATCH_SENTENCES" \
     --chat_size "$LLM_CHAT_SIZE" \
     --compact_history \
     --init_chat_prompt "$INIT_CHAT_PROMPT 若用户消息包含内部声学线索，把它只当作不确定的语气参考，自然提高共情程度；不要复述线索、不要解释情绪识别。" \

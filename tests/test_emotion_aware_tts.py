@@ -13,11 +13,16 @@ from emotion_aware_tts import (  # noqa: E402
     choose_tts_style,
     prepare_tts_text,
     remove_unspeechable_preserving_cjk,
+    split_streaming_sentences,
 )
 from sensevoice_stt import SenseVoiceMetadata  # noqa: E402
 
 
 class EmotionAwareTTSTests(unittest.TestCase):
+    def test_chinese_streaming_split_emits_completed_sentence_immediately(self) -> None:
+        self.assertEqual(split_streaming_sentences("你好呀。你今天"), ["你好呀。", "你今天"])
+        self.assertEqual(split_streaming_sentences("你好呀。"), ["你好呀。", ""])
+
     def test_user_emotion_has_priority(self) -> None:
         self.assertEqual(
             choose_tts_style("欢迎回来", SenseVoiceMetadata(emotion="难过")),

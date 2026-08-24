@@ -9,7 +9,7 @@ import httpx
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "s2s" / "hf-realtime-voice"
 sys.path.insert(0, str(FRONTEND_DIR))
 
-from mcp_gateway import _parse_rpc_response, _tool_output  # noqa: E402
+from mcp_gateway import McpGateway, _parse_rpc_response, _tool_output  # noqa: E402
 
 
 class McpGatewayTests(unittest.TestCase):
@@ -35,6 +35,26 @@ class McpGatewayTests(unittest.TestCase):
             {"isError": True, "content": [{"type": "text", "text": "rate limited"}]}
         )
         self.assertEqual(output, "MCP tool error: rate limited")
+
+
+class LocalRssToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_rss_tool_is_always_exposed_and_callable(self):
+        class FakeRss:
+            enabled = True
+
+            async def query_topics(self, **kwargs):
+                return f"{kwargs['category']}:{kwargs['source']}:{kwargs['query']}"
+
+        gateway = McpGateway()
+        gateway.clients = {}
+        gateway.rss_news = FakeRss()
+        tools = await gateway.list_tools()
+        self.assertIn("local_rss_news", {tool["name"] for tool in tools})
+        output = await gateway.call(
+            "local_rss_news",
+            {"category": "科技", "source": "IT之家", "query": "今天的新闻"},
+        )
+        self.assertEqual(output, "科技:IT之家:今天的新闻")
 
 
 if __name__ == "__main__":

@@ -199,6 +199,14 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("reply_to", proactive)
 
+        interrupted = await self.room.publish_bot_reply(
+            message_id="proactive:interrupted",
+            text="已经实际播出的内容",
+            reply_to=None,
+            interrupted=True,
+        )
+        self.assertTrue(interrupted["interrupted"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from room_store import RoomStore
+
 
 CHINESE_SURNAMES = (
     "林", "苏", "沈", "顾", "陆", "江", "叶", "夏", "白", "许", "周", "程",
@@ -95,12 +97,14 @@ class LiveRoom:
         queue_ttl_s: int = 30 * 60,
         disconnect_grace_s: int = 12,
         max_call_s: int = 10 * 60,
+        store: RoomStore | None = None,
     ) -> None:
         self.queue_limit = max(1, queue_limit)
         self.pending_timeout_s = max(10, pending_timeout_s)
         self.queue_ttl_s = max(60, queue_ttl_s)
         self.disconnect_grace_s = max(3, disconnect_grace_s)
         self.max_call_s = max(60, max_call_s)
+        self.store = store
         self._participants: dict[str, Participant] = {}
         self._queue: list[QueueEntry] = []
         self._active: CallSession | None = None
@@ -115,6 +119,14 @@ class LiveRoom:
         if self._sweeper_task is None or self._sweeper_task.done():
             self._sweeper_task = asyncio.create_task(self._sweeper())
 
+    async def restore(self) -> None:
+        """Restore bounded public history; presence and queues stay ephemeral."""
+        if not self.store:
+            return
+        messages = await self.store.load_recent_messages(MESSAGE_LIMIT)
+        async with self._lock:
+            self._messages = messages[-MESSAGE_LIMIT:]
+
     async def stop(self) -> None:
         if self._sweeper_task:
             self._sweeper_task.cancel()
@@ -124,18 +136,56 @@ class LiveRoom:
                 pass
             self._sweeper_task = None
 
-    async def identify(self, token: str | None, *, create: bool = True) -> tuple[Participant, bool]:
+    async def identify(
+        self,
+        token: str | None,
+        *,
+        create: bool = True,
+        ip_address: str = "",
+        user_agent: str = "",
+    ) -> tuple[Participant, bool]:
         async with self._lock:
             participant = self._participants.get(token or "")
             if participant is not None:
                 participant.last_seen = time.monotonic()
                 return participant, False
-            if not create:
-                raise RoomError("请先进入直播间", status=401, code="not_joined")
-            participant = self._new_participant()
-            self._participants[participant.token] = participant
-            self._broadcast_locked()
+        if token and self.store:
+            saved = await self.store.resolve_user(token, ip_address=ip_address, user_agent=user_agent)
+            if saved:
+                now = time.monotonic()
+                participant = Participant(
+                    id=str(saved["id"]), token=token,
+                    name_zh=str(saved.get("name_zh") or ""), name_en=str(saved.get("name_en") or ""),
+                    display_name=str(saved["display_name"]), created_at=now, last_seen=now,
+                )
+                async with self._lock:
+                    existing = self._participants.get(token)
+                    if existing:
+                        existing.last_seen = now
+                        return existing, False
+                    self._participants[token] = participant
+                    self._broadcast_locked()
+                return participant, False
+        if not create:
+            raise RoomError("请先进入直播间", status=401, code="not_joined")
+        for _ in range(40):
+            async with self._lock:
+                participant = self._new_participant()
+            if self.store and not await self.store.create_user(
+                user_id=participant.id,
+                display_name=participant.display_name,
+                name_zh=participant.name_zh,
+                name_en=participant.name_en,
+                token=participant.token,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            ):
+                continue
+            async with self._lock:
+                self._participants[participant.token] = participant
+                self._broadcast_locked()
             return participant, True
+        raise RoomError("暂时无法创建直播间身份", status=503, code="identity_unavailable")
 
     def _new_participant(self) -> Participant:
         now = time.monotonic()
@@ -181,6 +231,8 @@ class LiveRoom:
                 p.token != token and p.display_name.casefold() == name.casefold()
                 for p in self._participants.values()
             ):
+                raise RoomError("这个名字已经有人使用", status=409, code="name_taken")
+            if self.store and not await self.store.rename_user(participant.id, name):
                 raise RoomError("这个名字已经有人使用", status=409, code="name_taken")
             participant.display_name = name
             participant.last_seen = time.monotonic()
@@ -320,7 +372,11 @@ class LiveRoom:
             session.connected_at = time.monotonic()
             participant.last_seen = time.monotonic()
             self._broadcast_locked()
-            return session.id, participant.display_name
+            result = (session.id, participant.display_name)
+            user_id = participant.id
+        if self.store:
+            await self.store.start_call(session.id, user_id, time.time(), time.time())
+        return result
 
     async def end_session(self, token: str, session_id: str | None = None) -> bool:
         async with self._lock:
@@ -329,9 +385,12 @@ class LiveRoom:
                 return False
             if session_id and session.id != session_id:
                 return False
+            ended_id = session.id
             self._active = None
             self._broadcast_locked()
-            return True
+        if self.store:
+            await self.store.end_call(ended_id)
+        return True
 
     async def snapshot(self, token: str) -> dict[str, Any]:
         async with self._lock:
@@ -352,7 +411,7 @@ class LiveRoom:
         interrupted: bool = False,
     ) -> None:
         """Upsert a recent public-room transcript line and notify all viewers."""
-        clean = _clean_public_text(text)[:500]
+        clean = _clean_public_text(text)[:2000]
         if not clean or role not in {"user", "assistant"}:
             return
         message_id = f"{session_id}:{role}:{event_id or 'unknown'}"
@@ -379,6 +438,11 @@ class LiveRoom:
                     interrupted=bool(interrupted),
                 )
             self._broadcast_locked()
+            saved = dict(message)
+            saved["call_session_id"] = session_id
+            user_id = self._message_user_id_locked(session_id)
+        if self.store and not partial:
+            await self.store.save_message(saved, user_id=user_id)
 
     async def publish_chat(self, token: str, raw_text: str) -> dict[str, Any]:
         """Publish a rate-limited viewer text message to the whole room."""
@@ -415,7 +479,10 @@ class LiveRoom:
             self._messages.append(message)
             self._messages = self._messages[-MESSAGE_LIMIT:]
             self._broadcast_locked()
-            return dict(message)
+            saved = dict(message)
+        if self.store:
+            await self.store.save_message(saved, user_id=participant.id)
+        return saved
 
     async def can_bot_reply(self) -> bool:
         """The room bot may speak only when no call grant/queue owns priority."""
@@ -441,9 +508,10 @@ class LiveRoom:
         text: str,
         reply_to: dict[str, Any] | None,
         partial: bool = False,
+        interrupted: bool = False,
     ) -> dict[str, Any] | None:
         """Upsert a quoted comment reply or an unquoted proactive room message."""
-        clean = _clean_public_text(text)[:500]
+        clean = _clean_public_text(text)[:2000]
         if not clean:
             return None
         quote = None
@@ -461,7 +529,7 @@ class LiveRoom:
                 "speaker": "小麻",
                 "text": clean,
                 "partial": partial,
-                "interrupted": False,
+                "interrupted": bool(interrupted),
                 "created_at": time.time(),
             }
             if quote:
@@ -473,7 +541,30 @@ class LiveRoom:
                 self._messages[existing] = item
             self._messages = self._messages[-MESSAGE_LIMIT:]
             self._broadcast_locked()
-            return dict(item)
+            saved = dict(item)
+            user_id = str(reply_to.get("participant_id") or "") if reply_to else ""
+        if self.store and not partial:
+            await self.store.save_message(saved, user_id=user_id or None)
+        return saved
+
+    async def memory_context(self, token: str, query: str = "") -> str:
+        if not self.store:
+            return ""
+        async with self._lock:
+            participant = self._require_locked(token)
+            user_id = participant.id
+        return await self.store.memory_context(user_id, query)
+
+    async def participant_memory_context(self, participant_id: str, query: str = "") -> str:
+        if not self.store or not participant_id:
+            return ""
+        return await self.store.memory_context(participant_id, query)
+
+    def _message_user_id_locked(self, session_id: str) -> str | None:
+        if not self._active or self._active.id != session_id:
+            return None
+        participant = self._participants.get(self._active.participant_token)
+        return participant.id if participant else None
 
     def _grant_locked(self, token: str) -> CallSession:
         now = time.monotonic()

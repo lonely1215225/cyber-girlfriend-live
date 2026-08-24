@@ -6,7 +6,13 @@ from pathlib import Path
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "s2s" / "hf-realtime-voice"
 sys.path.insert(0, str(FRONTEND_DIR))
 
-from rss_news import IdleNewsRotator, formatted_news_blocks, parse_feed  # noqa: E402
+from rss_news import (  # noqa: E402
+    IdleNewsRotator,
+    RssNewsAggregator,
+    formatted_news_blocks,
+    infer_topic_filters,
+    parse_feed,
+)
 
 
 class RssNewsTests(unittest.TestCase):
@@ -57,6 +63,67 @@ class RssNewsTests(unittest.TestCase):
         self.assertIn("First headline", first)
         self.assertIn("Second headline", second)
         self.assertIn("First headline", other)
+
+    def test_idle_rotator_cycles_news_technology_and_knowledge(self):
+        output = """RSS topics:
+1. [新闻｜人民日报] 2026-08-21 09:00 UTC — News headline
+2. [科技｜IT之家] 2026-08-21 08:00 UTC — Technology headline
+3. [知识｜知乎日报] 2026-08-21 07:00 UTC — Knowledge headline
+4. [新闻｜澎湃新闻] 2026-08-21 06:00 UTC — Another news headline"""
+        rotator = IdleNewsRotator()
+        self.assertIn("News headline", rotator.choose("live-room", output))
+        self.assertIn("Technology headline", rotator.choose("live-room", output))
+        self.assertIn("Knowledge headline", rotator.choose("live-room", output))
+        self.assertIn("Another news headline", rotator.choose("live-room", output))
+
+    def test_parse_feed_keeps_topic_category(self):
+        payload = b"""<rss><channel><item><title>Tech story</title>
+        <link>https://example.com/tech</link></item></channel></rss>"""
+        item = parse_feed(payload, "Tech Source", category="科技")[0]
+        self.assertEqual(item.category, "科技")
+
+    def test_infers_requested_category_and_source(self):
+        self.assertEqual(infer_topic_filters("讲讲今天的科技新闻"), ("科技", ""))
+        self.assertEqual(
+            infer_topic_filters("人民日报今天有什么内容"),
+            ("新闻", "人民日报"),
+        )
+        self.assertEqual(
+            infer_topic_filters("知乎日报有什么值得聊的"),
+            ("知识", "知乎日报"),
+        )
+        self.assertEqual(infer_topic_filters("今天有什么体育新闻"), ("新闻", ""))
+
+
+class RssDialogueQueryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_filters_dialogue_query_by_category_and_source(self):
+        aggregator = RssNewsAggregator()
+
+        async def latest_topics():
+            return """RSS topics:
+1. [新闻｜人民日报] 2026-08-21 09:00 UTC — News headline
+2. [科技｜IT之家] 2026-08-21 08:00 UTC — Technology headline
+3. [知识｜知乎日报] 2026-08-21 07:00 UTC — Knowledge headline"""
+
+        aggregator.latest_topics = latest_topics
+        technology = await aggregator.query_topics(category="科技", query="科技新闻")
+        self.assertIn("Technology headline", technology)
+        self.assertNotIn("News headline", technology)
+        zhihu = await aggregator.query_topics(source="知乎日报", query="知乎日报")
+        self.assertIn("Knowledge headline", zhihu)
+        self.assertNotIn("Technology headline", zhihu)
+
+    async def test_prioritizes_matching_subtopic_inside_category(self):
+        aggregator = RssNewsAggregator()
+
+        async def latest_topics():
+            return """RSS topics:
+1. [新闻｜人民日报] 2026-08-21 09:00 UTC — General headline
+2. [新闻｜澎湃新闻] 2026-08-21 08:00 UTC — 体育赛事最新赛果"""
+
+        aggregator.latest_topics = latest_topics
+        output = await aggregator.query_topics(query="今天有什么体育新闻", limit=2)
+        self.assertLess(output.index("体育赛事"), output.index("General headline"))
 
 
 if __name__ == "__main__":

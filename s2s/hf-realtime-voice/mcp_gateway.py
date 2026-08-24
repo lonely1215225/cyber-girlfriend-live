@@ -12,6 +12,8 @@ from typing import Any
 
 import httpx
 
+from rss_news import RssNewsAggregator
+
 
 logger = logging.getLogger("s2s.mcp")
 PROTOCOL_VERSION = "2025-03-26"
@@ -186,10 +188,11 @@ class McpGateway:
         self._tools: list[dict[str, Any]] = []
         self._mapping: dict[str, tuple[McpHttpClient, str]] = {}
         self._tools_lock = asyncio.Lock()
+        self.rss_news = RssNewsAggregator()
 
     @property
     def enabled(self) -> bool:
-        return bool(self.clients)
+        return bool(self.clients) or self.rss_news.enabled
 
     async def list_tools(self, *, refresh: bool = False) -> list[dict[str, Any]]:
         async with self._tools_lock:
@@ -228,6 +231,44 @@ class McpGateway:
                         }
                     )
                     mapping[public_name] = (client, original_name)
+            if self.rss_news.enabled:
+                tools.append(
+                    {
+                        "type": "function",
+                        "name": "local_rss_news",
+                        "description": (
+                            "查询直播间的实时中文 RSS 资讯池。用户询问最新新闻、科技资讯、"
+                            "知识话题，或指定 iDaily、中新网、澎湃、人民日报、极客公园、"
+                            "cnBeta、IT之家、知乎日报时必须调用。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "category": {
+                                    "type": "string",
+                                    "enum": ["新闻", "科技", "知识", "全部"],
+                                    "description": "用户指定的资讯类别。",
+                                },
+                                "source": {
+                                    "type": "string",
+                                    "description": "用户指定的来源名称；未指定则留空。",
+                                },
+                                "query": {
+                                    "type": "string",
+                                    "description": "用户原始问题或希望筛选的关键词。",
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 8,
+                                    "default": 5,
+                                },
+                            },
+                            "required": ["query"],
+                        },
+                        "source": "rss",
+                    }
+                )
             # CoinGecko's official server exposes a powerful generic `execute`
             # tool, but small local models frequently omit its required
             # TypeScript `run(client)` wrapper. Give the model a narrow,
@@ -269,6 +310,16 @@ class McpGateway:
             return [dict(tool) for tool in tools]
 
     async def call(self, public_name: str, arguments: dict[str, Any]) -> str:
+        if public_name == "local_rss_news":
+            category = str(arguments.get("category") or "").strip()
+            if category == "全部":
+                category = ""
+            return await self.rss_news.query_topics(
+                category=category,
+                source=str(arguments.get("source") or ""),
+                query=str(arguments.get("query") or ""),
+                limit=int(arguments.get("limit") or 5),
+            )
         if not self._mapping:
             await self.list_tools()
         target = self._mapping.get(public_name)

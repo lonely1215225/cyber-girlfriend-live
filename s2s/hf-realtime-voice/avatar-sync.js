@@ -18,7 +18,6 @@
   };
 
   const CFG = Object.assign({}, DEFAULTS, window.AVATAR_CONFIG || {});
-  const VIEW_STORAGE_KEY = 'avtr1.avatarView.v1';
   const MUSIC_STORAGE_KEY = 'avtr1.backgroundMusic.v1';
   const VIEW_DEFAULTS = {
     size: 100,
@@ -33,20 +32,11 @@
   }
 
   function loadAvatarView() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(VIEW_STORAGE_KEY) || '{}');
-      return {
-        size: clamp(saved.size, 70, 135, VIEW_DEFAULTS.size),
-        position: clamp(saved.position, -20, 20, VIEW_DEFAULTS.position),
-        vertical: clamp(saved.vertical, -20, 20, VIEW_DEFAULTS.vertical),
-        fade: clamp(saved.fade, 0, 70, VIEW_DEFAULTS.fade),
-      };
-    } catch (_) {
-      return { ...VIEW_DEFAULTS };
-    }
+    return { ...VIEW_DEFAULTS };
   }
 
   let avatarView = loadAvatarView();
+  let profilePreviewLocked = false;
   let musicEnabled = localStorage.getItem(MUSIC_STORAGE_KEY) !== '0';
   window.AVATAR_MUTE_TTS = true;
   const gw = () => CFG.gatewayBase.replace(/\/+$/, '');
@@ -170,7 +160,6 @@
     layer.style.setProperty('--av-fade-mid', `${(fade * 0.78).toFixed(1)}%`);
     layer.style.setProperty('--av-fade-end', `${fade}%`);
     layer.classList.toggle('av-no-mask', fade === 0);
-    if (persist) localStorage.setItem(VIEW_STORAGE_KEY, JSON.stringify(avatarView));
 
     const sizeValue = document.getElementById('avatar-size-value');
     const positionValue = document.getElementById('avatar-position-value');
@@ -200,7 +189,7 @@
         vertical: clamp(vertical.value, -20, 20, VIEW_DEFAULTS.vertical),
         fade: clamp(fade.value, 0, 70, VIEW_DEFAULTS.fade),
       };
-      applyAvatarView(true);
+      applyAvatarView(false);
     };
     size.addEventListener('input', update);
     position.addEventListener('input', update);
@@ -212,7 +201,7 @@
       position.value = String(avatarView.position);
       vertical.value = String(avatarView.vertical);
       fade.value = String(avatarView.fade);
-      applyAvatarView(true);
+      applyAvatarView(false);
     });
     applyAvatarView();
   }
@@ -367,6 +356,48 @@
     if (idle) idle.src = stillUrl(id);
   }
 
+  function applyProfile(profile, reconnect = false) {
+    if (!profile || !profile.avatar_id) return;
+    const view = profile.view || {};
+    avatarView = {
+      size: clamp(view.size, 70, 135, VIEW_DEFAULTS.size),
+      position: clamp(view.position, -20, 20, VIEW_DEFAULTS.position),
+      vertical: clamp(view.vertical, -20, 20, VIEW_DEFAULTS.vertical),
+      fade: clamp(view.fade, 0, 70, VIEW_DEFAULTS.fade),
+    };
+    applyAvatarView();
+    setStill(profile.avatar_id);
+    markLookPressed(profile.avatar_id);
+    try { localStorage.setItem(AVATAR_STORAGE_KEY, profile.avatar_id); } catch (_) { /* cache only */ }
+    if (reconnect) reconnectLive();
+  }
+
+  async function refreshActiveProfile(reconnect = false) {
+    try {
+      const response = await fetch('/api/avatar-profile/active', { cache: 'no-store' });
+      if (!response.ok) return;
+      const profile = await response.json();
+      const prior = window.AVTR_ACTIVE_PROFILE?.state_revision;
+      window.AVTR_ACTIVE_PROFILE = profile;
+      if (!profilePreviewLocked) {
+        applyProfile(profile, reconnect && prior !== undefined && prior !== profile.state_revision);
+      }
+      window.dispatchEvent(new CustomEvent('avtr1-profile-updated', { detail: profile }));
+    } catch (_) { /* retain last rendered profile */ }
+  }
+
+  window.AVATAR_PROFILE_UI = {
+    preview(view) { avatarView = { ...avatarView, ...(view || {}) }; applyAvatarView(); },
+    currentView() { return { ...avatarView }; },
+    apply: applyProfile,
+    refresh: refreshActiveProfile,
+    lockPreview(locked) {
+      profilePreviewLocked = Boolean(locked);
+      if (!profilePreviewLocked) void refreshActiveProfile(false);
+    },
+    reconnect: reconnectLive,
+  };
+
   async function switchAvatar(avatarId) {
     try {
       const response = await fetch('/api/admin/avatar', {
@@ -396,11 +427,12 @@
 
   async function buildLooks() {
     let avatars = [
+      { id: 'xiaoya_locket', label: '白背心' },
       { id: 'xiaoya', label: '小雅' },
       { id: 'xiaoya_idle', label: '暖光正脸' },
       { id: 'xiaoya_beach_close', label: '海边近景' },
       { id: 'xiaoya_beach', label: '海边' },
-      { id: 'xiaoya_locket', label: '白背心' },
+      { id: 'sauna_portrait', label: '桑拿正脸' },
     ];
     let selected = currentAvatarId();
     try {
@@ -457,7 +489,7 @@
     document.body.insertBefore(layer, document.body.firstChild);
     applyAvatarView();
     bindAvatarControls();
-    void buildLooks();
+    void refreshActiveProfile(false);
 
     statusEl = document.getElementById('avatar-connection-state');
     if (!statusEl && CFG.showStatus) {
@@ -521,6 +553,11 @@
       // the server endpoint has simultaneously cleared the renderer queue.
       reconnectLive();
     });
+    if (window.EventSource) {
+      const events = new EventSource('/api/avatar-profile/events');
+      events.addEventListener('profile', () => void refreshActiveProfile(true));
+    }
+    setInterval(() => void refreshActiveProfile(true), 2000);
     void connect();
   }
 

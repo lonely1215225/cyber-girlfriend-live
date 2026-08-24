@@ -3,9 +3,10 @@
 
 The realtime API normally sends generated PCM to the browser.  Sending that
 PCM back over public HTTP to animate AVTR-1 makes lip sync depend on a second
-network round trip.  This wrapper mirrors the same audio events to the local
-avatar gateway, with a short preroll and realtime pacing, before starting the
-normal CLI.
+network round trip. This wrapper mirrors the same audio events to the local
+avatar gateway with a short preroll. The gateway owns realtime playback pacing;
+the tee sends generated audio ahead as soon as it exists so GPU jitter cannot
+starve the renderer between 100 ms packets.
 """
 
 from __future__ import annotations
@@ -50,10 +51,9 @@ uvicorn.Config.__init__ = _quiet_uvicorn_config
 TEE_URL = os.environ.get("AVTR1_LOCAL_TEE_URL", "").rstrip("/")
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
-PREROLL_MS = max(200, int(os.environ.get("AVATAR_TEE_PREROLL_MS", "400")))
+PREROLL_MS = max(200, int(os.environ.get("AVATAR_TEE_PREROLL_MS", "480")))
 PREROLL_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * PREROLL_MS / 1000)
 PACE_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * 0.1)
-PACE_SECONDS = 0.1
 
 
 class LocalAvatarTee:
@@ -101,7 +101,6 @@ class LocalAvatarTee:
 
     async def _pump(self, generation: int) -> None:
         first = True
-        deadline = asyncio.get_running_loop().time()
         try:
             while generation == self.generation:
                 threshold = PREROLL_BYTES if first else PACE_BYTES
@@ -125,14 +124,20 @@ class LocalAvatarTee:
                     except Exception as exc:  # noqa: BLE001
                         LOG.warning("AVTR-1 local audio tee failed: %s", exc)
 
-                    deadline += PACE_SECONDS
-                    await asyncio.sleep(max(0.0, deadline - asyncio.get_running_loop().time()))
+                    # Do not sleep for the audio duration here. AVTR's FLV pacer
+                    # already plays at realtime speed; sending ahead builds a
+                    # bounded jitter buffer instead of causing underruns.
+                    await asyncio.sleep(0)
                     continue
 
                 if self.done and not self.pending:
                     self.done = False
+                    try:
+                        await self._client().post(f"{self.base_url}/audio-finish")
+                    except Exception as exc:  # noqa: BLE001
+                        LOG.warning("AVTR-1 local audio finish failed: %s", exc)
                     return
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.005)
         except asyncio.CancelledError:
             pass
         finally:
@@ -145,6 +150,11 @@ if TEE_URL:
     original_send_events = websocket_router._send_events
 
     async def send_events_with_avatar_tee(ws, events):
+        query_params = getattr(ws, "query_params", {})
+        is_preview = str(query_params.get("preview", "")) == "1" if hasattr(query_params, "get") else False
+        if is_preview:
+            await original_send_events(ws, events)
+            return
         for event in events:
             event_type = getattr(event, "type", "")
             if event_type in ("response.audio.delta", "response.output_audio.delta"):

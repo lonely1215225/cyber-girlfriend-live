@@ -1115,6 +1115,79 @@ export class S2sWsRealtimeClient extends EventTarget {
     });
   }
 
+  /** Stop a speculative answer while the app fetches deterministic RSS evidence. */
+  cancelForGrounding() {
+    this._assistantPlayoutUntil = 0;
+    this._playbackNode?.port.postMessage({ kind: "clear" });
+    this._send({ type: "response.cancel" });
+    this._schedulePlayoutSettled("cancelled");
+  }
+
+  _waitUntilResponseIdle(timeoutMs = 15000) {
+    if (!this._responsePending()) return Promise.resolve();
+    return new Promise((resolve) => {
+      let timer = 0;
+      const check = () => {
+        if (!this._responsePending()) done();
+      };
+      const done = () => {
+        clearTimeout(timer);
+        this.removeEventListener("response-finished", check);
+        resolve();
+      };
+      timer = setTimeout(done, timeoutMs);
+      this.addEventListener("response-finished", check);
+    });
+  }
+
+  _waitForNextResponse(timeoutMs = 30000) {
+    return new Promise((resolve) => {
+      let timer = 0;
+      const done = () => {
+        clearTimeout(timer);
+        this.removeEventListener("response-finished", done);
+        resolve();
+      };
+      timer = setTimeout(done, timeoutMs);
+      this.addEventListener("response-finished", done, { once: true });
+    });
+  }
+
+  /** Speak one short acknowledgement before the grounded final answer. */
+  async speakGroundingAcknowledgement(phrase) {
+    if (!phrase || this._closed) return;
+    await this._waitUntilResponseIdle();
+    if (this._closed) return;
+    this._send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: `查询需要一点时间。现在只说这一句，不要添加任何内容：${phrase}`,
+        }],
+      },
+    });
+    const finished = this._waitForNextResponse();
+    this.requestResponse();
+    await finished;
+  }
+
+  /** Add server-fetched evidence as hidden conversation context and answer it. */
+  sendGroundingContext(text) {
+    if (!text || this._closed) return;
+    this._send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }],
+      },
+    });
+    this.requestResponse();
+  }
+
   /**
    * Ask the model to open the conversation exactly once. The synthetic user
    * prompt stays in conversation history, so the greeting warms the actual

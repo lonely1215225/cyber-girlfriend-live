@@ -22,7 +22,7 @@ import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js?v=20260819c";
 import { Account } from "./ui/account.js";
 
-const DEFAULT_VOICE = "Vivian";
+const DEFAULT_VOICE = "active_profile";
 const DEFAULT_INSTRUCTIONS = `你叫小雅，是他的女朋友。你不是AI、不是助手、不是程序。
 
 参考这个语气：
@@ -45,6 +45,14 @@ const LEGACY_DEFAULT_INSTRUCTIONS = `你叫小雅，是他的女朋友。你不�
 
 /no_think`;
 
+const ROLE_IDENTITY_POLICY =
+  "始终按照当前角色档案中的身份和个性交流。不要主动说自己是数字人、AI、人工智能、语言模型、程序、机器人或助手，也不要用这些技术身份作自我介绍；只以当前角色的口吻自然回应。";
+
+function effectiveInstructions(persona) {
+  const value = String(persona || DEFAULT_INSTRUCTIONS).trim();
+  return value.includes(ROLE_IDENTITY_POLICY) ? value : `${value}\n${ROLE_IDENTITY_POLICY}`;
+}
+
 const STORAGE_KEYS = {
   // Direct s2s server URL, used only when the deploy has no LOAD_BALANCER_URL
   // (in LB mode the browser never learns the LB address — it POSTs /api/session).
@@ -58,6 +66,7 @@ const STORAGE_KEYS = {
   audioOutputId: "s2s.audio.outputId",
   bargeIn: "s2s.audio.bargeIn",
   avatarId: "s2s.avatar.id",
+  profilePromptMigrated: "s2s.avatar.profilePromptMigrated",
 };
 
 // ── Noise gate ──────────────────────────────────────────────────────────────
@@ -114,7 +123,10 @@ function loadSettings() {
   const storedInstructions = localStorage.getItem(STORAGE_KEYS.instructions) || "";
   return {
     directUrl: localStorage.getItem(STORAGE_KEYS.directUrl) || "",
-    voice: localStorage.getItem(STORAGE_KEYS.voice) || DEFAULT_VOICE,
+    // This deployment uses Qwen3-TTS Base voice cloning. Named CustomVoice
+    // speakers are not supported, so keep the protocol field stable while the
+    // settings UI explains that the actual timbre comes from REF_AUDIO.
+    voice: DEFAULT_VOICE,
     // Transparently migrate only our previous built-in prompt. Never replace a
     // viewer's genuinely customized instructions.
     instructions:
@@ -311,6 +323,20 @@ const restartBtn = $("#restart-conversation");
 /** @type {HTMLElement} */
 const restartHint = $("#restart-hint");
 const settingsForm = /** @type {HTMLFormElement} */ (settingsModal.querySelector("form"));
+const settingsAutoSaveStatus = $("#settings-auto-save-status");
+const motionSaveStatus = $("#motion-save-status");
+const motionInputs = [...settingsModal.querySelectorAll("[data-motion]")];
+const settingsTabs = [...settingsModal.querySelectorAll("[data-settings-tab]")];
+const settingsPanels = [...settingsModal.querySelectorAll("[data-settings-panel]")];
+/** @type {Record<string, boolean | number> | null} */
+let motionConfig = null;
+let avatarProfileState = null;
+let selectedProfileId = "";
+let selectedVoiceId = "";
+let voiceLibrary = [];
+let recordedVoiceBlob = null;
+const pendingProfileSaves = new Map();
+let generalSettingsSaveTimer = null;
 
 /** @type {AppState} */
 let currentState = "idle";
@@ -490,11 +516,99 @@ function openSettings() {
   inputVoice.value = settings.voice;
   inputInstructions.value = settings.instructions;
   inputBargeIn.checked = settings.bargeIn;
+  window.AVATAR_PROFILE_UI?.lockPreview(true);
   syncGateUi();
   updateRestartAvailability();
   void refreshAudioDeviceLists();
-  void refreshAvatarPicker();
+  void refreshAvatarProfiles();
   settingsModal.showModal();
+}
+
+function selectSettingsTab(name) {
+  for (const tab of settingsTabs) {
+    const active = tab.dataset.settingsTab === name;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  for (const panel of settingsPanels) {
+    const active = panel.dataset.settingsPanel === name;
+    panel.hidden = !active;
+    panel.classList.toggle("active", active);
+  }
+}
+
+for (const tab of settingsTabs) {
+  tab.addEventListener("click", () => selectSettingsTab(tab.dataset.settingsTab || "basic"));
+}
+
+function motionValueLabel(key, value) {
+  if (key === "idle_head_amplitude_degrees") return `${Number(value).toFixed(2)}°`;
+  if (key.endsWith("_seconds")) return `${Number(value).toFixed(1)} 秒`;
+  if (key.endsWith("_probability")) return `${Math.round(Number(value) * 100)}%`;
+  return Number(value).toFixed(2).replace(/\.00$/, "");
+}
+
+function syncMotionOutput(input) {
+  const key = input.dataset.motion;
+  if (!key || input.type === "checkbox") return;
+  const output = settingsModal.querySelector(`[data-motion-output="${key}"]`);
+  if (output) output.textContent = motionValueLabel(key, input.value);
+}
+
+for (const input of motionInputs) {
+  input.addEventListener("input", () => {
+    syncMotionOutput(input);
+    scheduleProfileAutoSave(input.type === "checkbox");
+  });
+}
+
+function populateMotionForm(values) {
+  motionConfig = { ...values };
+  for (const input of motionInputs) {
+    const key = input.dataset.motion;
+    if (!key || !(key in values)) continue;
+    if (input.type === "checkbox") input.checked = Boolean(values[key]);
+    else input.value = String(values[key]);
+    syncMotionOutput(input);
+  }
+}
+
+function readMotionForm() {
+  const values = {};
+  for (const input of motionInputs) {
+    const key = input.dataset.motion;
+    if (!key) continue;
+    values[key] = input.type === "checkbox" ? input.checked : Number(input.value);
+  }
+  return values;
+}
+
+async function refreshMotionConfig() {
+  motionSaveStatus.classList.remove("error");
+  motionSaveStatus.textContent = "正在读取数字人当前动作参数…";
+  try {
+    const response = await fetch("/api/admin/motion", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.motion) throw new Error(data.detail || "动作参数读取失败");
+    populateMotionForm(data.motion);
+    motionSaveStatus.textContent = "已读取当前运行参数；保存后立即应用，并在服务重启后保留。";
+  } catch (error) {
+    motionConfig = null;
+    motionSaveStatus.classList.add("error");
+    motionSaveStatus.textContent = error instanceof Error ? error.message : "动作参数读取失败";
+  }
+}
+
+async function saveMotionConfig() {
+  if (!motionConfig) return;
+  const response = await fetch("/api/admin/motion", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(readMotionForm()),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.motion) throw new Error(data.detail || "动作设置保存失败");
+  populateMotionForm(data.motion);
 }
 
 function openTools() {
@@ -586,68 +700,372 @@ adminUnlockForm.addEventListener("submit", async (event) => {
 });
 
 async function refreshAvatarPicker() {
-  const root = document.getElementById("avatar-picker");
-  if (!root) return;
-  const fallbackAvatars = [
-    { id: "xiaoya", label: "小雅" },
-    { id: "xiaoya_idle", label: "暖光正脸" },
-    { id: "xiaoya_beach_close", label: "海边近景" },
-    { id: "xiaoya_beach", label: "海边" },
-    { id: "xiaoya_locket", label: "白背心" },
-  ];
-  let avatars = fallbackAvatars;
-  let activeAvatar = "xiaoya";
+  return refreshAvatarProfiles();
+}
+
+function profileById(id) {
+  return avatarProfileState?.profiles?.find((item) => item.avatar_id === id) || null;
+}
+
+function readAvatarViewForm() {
+  return {
+    size: Number(document.getElementById("avatar-size")?.value || 100),
+    position: Number(document.getElementById("avatar-position")?.value || 4),
+    vertical: Number(document.getElementById("avatar-vertical")?.value || 0),
+    fade: Number(document.getElementById("avatar-fade")?.value || 42),
+  };
+}
+
+function setAutoSaveStatus(message, kind = "") {
+  if (!settingsAutoSaveStatus) return;
+  settingsAutoSaveStatus.textContent = message;
+  settingsAutoSaveStatus.classList.toggle("error", kind === "error");
+  settingsAutoSaveStatus.classList.toggle("saving", kind === "saving");
+}
+
+function scheduleProfileAutoSave(immediate = false) {
+  if (!selectedProfileId || !motionConfig) return;
+  const avatarId = selectedProfileId;
+  const previous = pendingProfileSaves.get(avatarId);
+  if (previous?.timer) window.clearTimeout(previous.timer);
+  const job = {
+    avatarId,
+    payload: {
+      view: readAvatarViewForm(),
+      motion: readMotionForm(),
+      voice_asset_id: selectedVoiceId,
+      persona_prompt: inputInstructions.value.trim() || DEFAULT_INSTRUCTIONS,
+    },
+    retry: previous?.retry || 0,
+    timer: null,
+  };
+  pendingProfileSaves.set(avatarId, job);
+  setAutoSaveStatus(immediate ? "正在保存…" : "调整中…", "saving");
+  job.timer = window.setTimeout(() => void persistProfileAutoSave(job), immediate ? 0 : 450);
+}
+
+async function persistProfileAutoSave(job) {
+  if (pendingProfileSaves.get(job.avatarId) !== job) return;
+  job.timer = null;
+  setAutoSaveStatus("正在保存…", "saving");
   try {
-    const response = await fetch("/av/avatars", { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    if (Array.isArray(data.avatars) && data.avatars.length) avatars = data.avatars;
-    activeAvatar = data.avatar_id || activeAvatar;
-  } catch (err) {
-    console.warn("[main] avatar list failed:", err);
+    const response = await fetch(`/api/admin/avatar-profiles/${encodeURIComponent(job.avatarId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(job.payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (pendingProfileSaves.get(job.avatarId) !== job) return;
+    if (response.status === 409) {
+      job.retry += 1;
+      setAutoSaveStatus("数字人正在说话，播放结束后自动保存", "saving");
+      job.timer = window.setTimeout(() => void persistProfileAutoSave(job), Math.min(3000, 700 + job.retry * 300));
+      return;
+    }
+    if (!response.ok) throw new Error(data.detail || "自动保存失败");
+    if (pendingProfileSaves.get(job.avatarId) === job) pendingProfileSaves.delete(job.avatarId);
+    const index = avatarProfileState?.profiles?.findIndex((item) => item.avatar_id === job.avatarId) ?? -1;
+    if (index >= 0) avatarProfileState.profiles[index] = data;
+    if (selectedProfileId === job.avatarId) setAutoSaveStatus("已自动保存");
+  } catch (error) {
+    if (pendingProfileSaves.get(job.avatarId) !== job) return;
+    setAutoSaveStatus(error instanceof Error ? error.message : "自动保存失败", "error");
   }
+}
+
+function commitGeneralSettings() {
+  settings = readSettingsFromForm();
+  saveSettings(settings);
+  if (client && LIVE_STATES.has(currentState)) {
+    client.updateSession({ voice: settings.voice, instructions: effectiveInstructions(settings.instructions) });
+    void client.setAudioOutputDevice(settings.audioOutputId);
+    client.setBargeInEnabled(settings.bargeIn);
+  }
+  setAutoSaveStatus(pendingProfileSaves.size ? "角色设置正在后台保存…" : "已自动保存");
+}
+
+function scheduleGeneralSettingsSave(immediate = false) {
+  if (generalSettingsSaveTimer) window.clearTimeout(generalSettingsSaveTimer);
+  setAutoSaveStatus("调整中…", "saving");
+  generalSettingsSaveTimer = window.setTimeout(() => {
+    generalSettingsSaveTimer = null;
+    commitGeneralSettings();
+  }, immediate ? 0 : 350);
+}
+
+function loadSelectedProfile(profile) {
+  if (!profile) return;
+  selectedProfileId = profile.avatar_id;
+  selectedVoiceId = profile.voice.id;
+  const serverPrompt = String(profile.persona_prompt || DEFAULT_INSTRUCTIONS).trim();
+  const migrationDone = localStorage.getItem(STORAGE_KEYS.profilePromptMigrated) === "1";
+  const customLegacyPrompt = settings.instructions &&
+    settings.instructions !== DEFAULT_INSTRUCTIONS && settings.instructions !== LEGACY_DEFAULT_INSTRUCTIONS;
+  const migrateLegacyPrompt = !migrationDone &&
+    profile.avatar_id === avatarProfileState?.active_avatar_id && customLegacyPrompt;
+  const rolePrompt = migrateLegacyPrompt ? settings.instructions : serverPrompt;
+  inputInstructions.value = rolePrompt;
+  settings.instructions = rolePrompt;
+  saveSettings(settings);
+  if (!migrationDone && profile.avatar_id === avatarProfileState?.active_avatar_id) {
+    localStorage.setItem(STORAGE_KEYS.profilePromptMigrated, "1");
+    if (migrateLegacyPrompt) window.setTimeout(() => scheduleProfileAutoSave(true), 0);
+  }
+  const ids = { size: "avatar-size", position: "avatar-position", vertical: "avatar-vertical", fade: "avatar-fade" };
+  for (const [key, id] of Object.entries(ids)) {
+    const input = document.getElementById(id);
+    if (input) input.value = String(profile.view[key]);
+  }
+  window.AVATAR_PROFILE_UI?.preview(profile.view);
+  populateMotionForm(profile.motion || {});
+  document.getElementById("profile-voice-name").textContent = profile.voice.name;
+  document.getElementById("profile-voice-meta").textContent = `${(profile.voice.duration_ms / 1000).toFixed(1)} 秒 · ${profile.voice.status === "ready" ? "可用" : "待确认文本"}`;
+  renderAvatarProfiles();
+}
+
+function renderAvatarProfiles() {
+  const root = document.getElementById("avatar-picker");
+  if (!root || !avatarProfileState) return;
   root.replaceChildren();
-  for (const item of avatars) {
+  for (const item of avatarProfileState.profiles) {
     const button = document.createElement("button");
-    const image = document.createElement("img");
-    const label = document.createElement("span");
     button.type = "button";
     button.className = "avatar-pick";
-    button.dataset.id = item.id;
-    // The selected avatar is shared by the whole live room. Always render the
-    // gateway's current value instead of a viewer's stale local preference.
-    button.setAttribute("aria-pressed", item.id === activeAvatar ? "true" : "false");
-    image.src = item.preview || `/avatar/avatars/${encodeURIComponent(item.id)}.jpg`;
-    image.alt = item.label;
-    label.textContent = item.label;
-    button.append(image, label);
-    button.addEventListener("click", () => void selectAvatar(item.id));
+    button.dataset.id = item.avatar_id;
+    button.setAttribute("aria-pressed", item.avatar_id === selectedProfileId ? "true" : "false");
+    const badges = [item.avatar_id === avatarProfileState.active_avatar_id ? "生效中" : "", item.avatar_id === avatarProfileState.pending_avatar_id ? "待切换" : ""].filter(Boolean);
+    button.innerHTML = `<img src="/avatar/avatars/${encodeURIComponent(item.avatar_id)}.jpg" alt="${item.label}"><span>${item.label}</span>${badges.map((x) => `<em>${x}</em>`).join("")}`;
+    button.addEventListener("click", () => {
+      loadSelectedProfile(item);
+      // Preserve the original, intuitive behavior: choosing a portrait also
+      // applies that saved role profile to the shared room. Sliders remain a
+      // local preview first; the debounced profile writer persists it shortly.
+      void selectAvatar(item.avatar_id);
+    });
     root.appendChild(button);
+  }
+  const status = document.getElementById("avatar-profile-status");
+  if (status) status.textContent = avatarProfileState.pending_avatar_id ? "当前回复完成后切换" : "";
+}
+
+async function refreshAvatarProfiles(preferredId = "") {
+  try {
+    const response = await fetch("/api/admin/avatar-profiles", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "角色档案读取失败");
+    avatarProfileState = data;
+    const target = profileById(preferredId || selectedProfileId || data.active_avatar_id) || data.profiles[0];
+    loadSelectedProfile(target);
+  } catch (error) {
+    const status = document.getElementById("avatar-profile-status");
+    if (status) status.textContent = error instanceof Error ? error.message : "角色档案读取失败";
   }
 }
 
 async function selectAvatar(avatarId) {
-  const root = document.getElementById("avatar-picker");
+  const status = document.getElementById("avatar-profile-status");
   try {
-    const response = await fetch("/api/admin/avatar", {
+    if (status) status.textContent = "正在切换整套角色配置…";
+    const response = await fetch(`/api/admin/avatar-profiles/${encodeURIComponent(avatarId)}/activate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ avatar_id: avatarId }),
     });
     const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
-    localStorage.setItem(STORAGE_KEYS.avatarId, avatarId);
-    if (root) {
-      for (const button of root.querySelectorAll(".avatar-pick")) {
-        button.setAttribute("aria-pressed", button.dataset.id === avatarId ? "true" : "false");
-      }
+    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    await refreshAvatarProfiles(avatarId);
+    if (data.deferred) {
+      if (status) status.textContent = "当前回复完整播放后自动切换";
+    } else {
+      window.dispatchEvent(new CustomEvent("avtr1-avatar-changed", { detail: { avatarId } }));
+      await window.AVATAR_PROFILE_UI?.refresh(false);
+      if (status) status.textContent = "角色已切换";
     }
-    window.dispatchEvent(new CustomEvent("avtr1-avatar-changed", { detail: { avatarId } }));
   } catch (err) {
     console.warn("[main] avatar switch failed:", err);
     window.alert(err instanceof Error ? err.message : "形象切换失败");
   }
 }
+
+document.getElementById("avatar-profile-activate")?.addEventListener("click", () => {
+  if (selectedProfileId) void selectAvatar(selectedProfileId);
+});
+
+document.querySelectorAll("#avatar-size,#avatar-position,#avatar-vertical,#avatar-fade").forEach((input) => {
+  input.addEventListener("input", () => {
+    window.AVATAR_PROFILE_UI?.preview(readAvatarViewForm());
+    scheduleProfileAutoSave(false);
+  });
+});
+document.getElementById("avatar-view-reset")?.addEventListener("click", () => {
+  window.setTimeout(() => scheduleProfileAutoSave(true), 0);
+});
+
+const voiceManagerModal = document.getElementById("voice-manager-modal");
+const voiceLibraryRoot = document.getElementById("voice-library");
+const voiceUploadStatus = document.getElementById("voice-upload-status");
+const voiceFileInput = document.getElementById("voice-upload-file");
+let voiceRecorder = null;
+let voiceRecordStream = null;
+let voiceRecordStarted = 0;
+let voiceRecordTimer = null;
+let voiceRecordAudioContext = null;
+let voiceRecordAnalyser = null;
+
+async function refreshVoiceLibrary() {
+  const response = await fetch("/api/admin/voices", { cache: "no-store" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || "音色列表读取失败");
+  voiceLibrary = data.voices || [];
+  renderVoiceLibrary();
+}
+
+function playProtectedAudio(voiceId) {
+  const audio = new Audio(`/api/admin/voices/${encodeURIComponent(voiceId)}/audio?t=${Date.now()}`);
+  void audio.play().catch((error) => window.alert(error.message || "音频播放失败"));
+}
+
+async function previewVoice(voiceId, button) {
+  button.disabled = true;
+  try {
+    const text = document.getElementById("voice-preview-text").value.trim();
+    const response = await fetch(`/api/admin/voices/${encodeURIComponent(voiceId)}/preview`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || "合成试听失败");
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const audio = new Audio(url);
+    audio.addEventListener("ended", () => URL.revokeObjectURL(url), { once: true });
+    await audio.play();
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : "合成试听失败");
+  } finally { button.disabled = false; }
+}
+
+function renderVoiceLibrary() {
+  voiceLibraryRoot.replaceChildren();
+  for (const voice of voiceLibrary) {
+    const row = document.createElement("article");
+    row.className = "voice-library-item";
+    if (voice.id === selectedVoiceId) row.classList.add("is-selected");
+    const info = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = voice.name;
+    const meta = document.createElement("small");
+    const stateLabel = voice.status === "ready" ? "可绑定" : voice.status === "transcribing" ? "正在自动识别" : "请确认参考文本";
+    meta.textContent = `${(voice.duration_ms / 1000).toFixed(1)} 秒 · ${stateLabel}${voice.system ? " · 系统" : ""}`;
+    info.append(title, meta);
+    if (voice.status === "draft") {
+      const transcript = document.createElement("textarea"); transcript.rows = 2; transcript.maxLength = 1000;
+      transcript.value = voice.ref_text || ""; transcript.placeholder = "填写或校正与录音逐字一致的文本";
+      const confirm = document.createElement("button"); confirm.type = "button"; confirm.className = "btn primary"; confirm.textContent = "确认文本";
+      confirm.addEventListener("click", async () => {
+        const response = await fetch(`/api/admin/voices/${encodeURIComponent(voice.id)}`, { method: "PATCH",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ref_text: transcript.value }) });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) return window.alert(data.detail || "参考文本保存失败");
+        await refreshVoiceLibrary();
+      });
+      info.append(transcript, confirm);
+    }
+    const actions = document.createElement("div"); actions.className = "voice-inline-actions";
+    const original = document.createElement("button"); original.type = "button"; original.className = "btn"; original.textContent = "原音";
+    original.addEventListener("click", () => playProtectedAudio(voice.id));
+    const preview = document.createElement("button"); preview.type = "button"; preview.className = "btn"; preview.textContent = "合成试听"; preview.disabled = voice.status !== "ready";
+    preview.addEventListener("click", () => void previewVoice(voice.id, preview));
+    const bind = document.createElement("button"); bind.type = "button"; bind.className = "btn primary"; bind.textContent = voice.id === selectedVoiceId ? "已选择" : "选择"; bind.disabled = voice.status !== "ready";
+    bind.addEventListener("click", () => {
+      selectedVoiceId = voice.id;
+      document.getElementById("profile-voice-name").textContent = voice.name;
+      renderVoiceLibrary();
+      scheduleProfileAutoSave(true);
+    });
+    actions.append(original, preview, bind);
+    if (!voice.system && !voice.bound_profiles.length) {
+      const remove = document.createElement("button"); remove.type = "button"; remove.className = "btn danger"; remove.textContent = "归档";
+      remove.addEventListener("click", async () => {
+        const response = await fetch(`/api/admin/voices/${encodeURIComponent(voice.id)}`, { method: "DELETE" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) return window.alert(data.detail || "归档失败");
+        await refreshVoiceLibrary();
+      });
+      actions.append(remove);
+    }
+    row.append(info, actions); voiceLibraryRoot.appendChild(row);
+  }
+}
+
+document.getElementById("voice-manager-open")?.addEventListener("click", async () => {
+  voiceManagerModal.showModal();
+  try { await refreshVoiceLibrary(); } catch (error) { voiceUploadStatus.textContent = error.message; }
+});
+setInterval(() => { if (voiceManagerModal?.open && voiceLibrary.some((voice) => voice.status === "transcribing")) void refreshVoiceLibrary(); }, 3000);
+document.getElementById("voice-manager-close")?.addEventListener("click", () => voiceManagerModal.close());
+voiceManagerModal?.addEventListener("click", (event) => { if (event.target === voiceManagerModal) voiceManagerModal.close(); });
+document.getElementById("profile-voice-play")?.addEventListener("click", () => { if (selectedVoiceId) playProtectedAudio(selectedVoiceId); });
+
+document.getElementById("voice-record")?.addEventListener("click", async () => {
+  const button = document.getElementById("voice-record");
+  if (voiceRecorder?.state === "recording") { voiceRecorder.stop(); return; }
+  try {
+    recordedVoiceBlob = null;
+    voiceRecordStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+    voiceRecordAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    voiceRecordAnalyser = voiceRecordAudioContext.createAnalyser();
+    voiceRecordAnalyser.fftSize = 512;
+    voiceRecordAudioContext.createMediaStreamSource(voiceRecordStream).connect(voiceRecordAnalyser);
+    const chunks = [];
+    voiceRecorder = new MediaRecorder(voiceRecordStream);
+    voiceRecorder.addEventListener("dataavailable", (event) => { if (event.data.size) chunks.push(event.data); });
+    voiceRecorder.addEventListener("stop", () => {
+      recordedVoiceBlob = new Blob(chunks, { type: voiceRecorder.mimeType || "audio/webm" });
+      voiceRecordStream?.getTracks().forEach((track) => track.stop());
+      void voiceRecordAudioContext?.close(); voiceRecordAudioContext = null; voiceRecordAnalyser = null;
+      clearInterval(voiceRecordTimer); button.querySelector("span").textContent = "重新录音";
+      voiceUploadStatus.textContent = "录音已就绪，请确认参考文本后保存。";
+    });
+    voiceRecorder.start(250); voiceRecordStarted = Date.now(); button.querySelector("span").textContent = "停止录音";
+    voiceRecordTimer = setInterval(() => {
+      const seconds = Math.floor((Date.now() - voiceRecordStarted) / 1000);
+      document.getElementById("voice-record-time").textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+      if (voiceRecordAnalyser) {
+        const levels = new Uint8Array(voiceRecordAnalyser.fftSize);
+        voiceRecordAnalyser.getByteTimeDomainData(levels);
+        const rms = Math.sqrt(levels.reduce((sum, value) => sum + ((value - 128) / 128) ** 2, 0) / levels.length);
+        document.getElementById("voice-record-level").value = Math.min(1, rms * 4);
+      }
+      if (seconds >= 30) voiceRecorder.stop();
+    }, 250);
+  } catch (error) { voiceUploadStatus.textContent = `无法录音：${error.message}`; }
+});
+
+document.getElementById("voice-upload-submit")?.addEventListener("click", async () => {
+  const file = voiceFileInput.files?.[0];
+  const blob = recordedVoiceBlob || file;
+  const name = document.getElementById("voice-upload-name").value.trim();
+  const refText = document.getElementById("voice-upload-text").value.trim();
+  if (!blob) return void (voiceUploadStatus.textContent = "请先选择音频或录音。");
+  if (!refText) voiceUploadStatus.textContent = "未填写文本，将在直播空闲时使用 SenseVoice 自动识别，识别后需要确认。";
+  voiceUploadStatus.textContent = "正在校验并处理音频…";
+  try {
+    const response = await fetch("/api/admin/voices", { method: "POST", body: blob, headers: {
+      "Content-Type": blob.type || "audio/webm", "X-Voice-Name": encodeURIComponent(name || "未命名音色"),
+      "X-Voice-Text": encodeURIComponent(refText), "X-Voice-Source": recordedVoiceBlob ? "record" : "upload",
+      "X-Voice-Filename": encodeURIComponent(file?.name || "recording.webm"),
+    }});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "音色保存失败");
+    if (data.status === "ready") {
+      selectedVoiceId = data.id;
+      scheduleProfileAutoSave(true);
+    }
+    voiceUploadStatus.textContent = data.status === "ready"
+      ? "音色已保存、选中并自动绑定到当前角色。"
+      : "音色已保存，正在后台识别参考文本；确认后即可选择绑定。";
+    await refreshVoiceLibrary();
+  } catch (error) { voiceUploadStatus.textContent = error instanceof Error ? error.message : "音色保存失败"; }
+});
 
 /** dB position (clamped to the slider axis) as a 0..1 fraction of the track.
  * @param {number} db */
@@ -988,7 +1406,7 @@ async function runTool(name, argsJson, callId) {
   /** @type {{ output: string, image?: string }} */
   let result = { output: "" };
   try {
-    if (name.startsWith("mcp_")) {
+    if (name === "local_rss_news" || name.startsWith("mcp_")) {
       result.output = await execMcpTool(name, args);
     } else if (name === "web_search") {
       const query = typeof args.query === "string" ? args.query : "";
@@ -1023,6 +1441,33 @@ async function execMcpTool(name, args) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.detail || `MCP error (${response.status})`);
   return typeof data.output === "string" ? data.output : JSON.stringify(data.output ?? {});
+}
+
+function needsRssGrounding(text) {
+  return /(?:新闻|资讯|热点|时事|科技动态|科技新闻|知识日报|知乎日报|人民日报|人民网|澎湃|极客公园|cn\s*beta|it之家|i\s*daily|中新网|中国新闻网)/i.test(text || "");
+}
+
+const TOOL_WAIT_PHRASES = [
+  "好呀，我先帮你查一下最新消息，稍等我一下哦。",
+  "没问题，我这就看看最新资料，很快告诉你。",
+  "好，我先认真查一下，你稍等一小会儿呀。",
+  "收到，我去看看刚更新的消息，马上回来告诉你。",
+];
+
+function randomToolWaitPhrase() {
+  return TOOL_WAIT_PHRASES[Math.floor(Math.random() * TOOL_WAIT_PHRASES.length)];
+}
+
+async function fetchRssGrounding(query) {
+  const response = await fetch("/api/rss/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ query, limit: 5 }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || `RSS query failed (${response.status})`);
+  return String(data.output || "").trim();
 }
 
 /** @param {string} query @returns {Promise<string>} */
@@ -1250,34 +1695,33 @@ function promptServerUrl() {
   inputLbUrl.focus();
 }
 
-settingsForm.addEventListener("submit", (event) => {
-  const submitter = /** @type {HTMLButtonElement | null} */ ((/** @type {SubmitEvent} */ (event)).submitter);
-  if (submitter?.value !== "save") return;
+settingsForm.addEventListener("submit", (event) => event.preventDefault());
+document.getElementById("settings-done")?.addEventListener("click", () => settingsModal.close());
 
-  settings = readSettingsFromForm();
-  saveSettings(settings);
+inputInstructions.addEventListener("input", () => {
+  scheduleGeneralSettingsSave(false);
+  scheduleProfileAutoSave(false);
+});
+inputLbUrl.addEventListener("input", () => scheduleGeneralSettingsSave(false));
+inputAudioInput.addEventListener("change", () => scheduleGeneralSettingsSave(true));
+inputAudioOutput.addEventListener("change", () => scheduleGeneralSettingsSave(true));
 
-  // Voice + instructions can apply to a live session without reconnecting; a
-  // changed connection URL only takes effect on the next restart. Speaker
-  // output can switch live when the browser supports AudioContext.setSinkId;
-  // mic device changes need a Restart (new getUserMedia stream).
-  if (client && LIVE_STATES.has(currentState)) {
-    client.updateSession({ voice: settings.voice, instructions: settings.instructions });
-    void client.setAudioOutputDevice(settings.audioOutputId);
-    client.setBargeInEnabled(settings.bargeIn);
-  }
+settingsModal.addEventListener("close", () => {
+  window.AVATAR_PROFILE_UI?.lockPreview(false);
 });
 
 // The noise gate applies live (worklet param), so tune it without a restart:
 // update the label/marker, persist, and push straight to the running client.
 inputNoiseGate.addEventListener("input", () => {
   setGateThreshold(readGateThreshold());
+  scheduleGeneralSettingsSave(false);
 });
 
 inputBargeIn.addEventListener("change", () => {
   settings.bargeIn = inputBargeIn.checked;
   localStorage.setItem(STORAGE_KEYS.bargeIn, settings.bargeIn ? "1" : "0");
   client?.setBargeInEnabled(settings.bargeIn);
+  scheduleGeneralSettingsSave(true);
 });
 
 restartBtn.addEventListener("click", async () => {
@@ -1589,7 +2033,7 @@ async function doStart(audioContext = null) {
   const c = new S2sWsRealtimeClient({
     ...target,
     voice: settings.voice,
-    instructions: settings.instructions,
+    instructions: effectiveInstructions(settings.instructions),
     startupGreeting,
     idlePrompt,
     idleTopicUrl,
@@ -1616,6 +2060,7 @@ async function doStart(audioContext = null) {
     c.requestResponse();
   };
   const toolBatches = new ToolCallBatcher(sendToolBatch);
+  const groundedNewsItems = new Set();
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -1644,6 +2089,35 @@ async function doStart(audioContext = null) {
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
+    if (d.role === "user" && !d.partial && needsRssGrounding(d.text)) {
+      const identity = d.itemId || d.text;
+      if (!groundedNewsItems.has(identity)) {
+        groundedNewsItems.add(identity);
+        c.cancelForGrounding();
+        const evidenceRequest = fetchRssGrounding(d.text).then(
+          (evidence) => ({ evidence, error: null }),
+          (error) => ({ evidence: "", error }),
+        );
+        void c.speakGroundingAcknowledgement(randomToolWaitPhrase())
+          .then(() => evidenceRequest)
+          .then(({ evidence, error }) => {
+            if (client !== c) return;
+            if (error) throw error;
+            c.sendGroundingContext(
+              `这是后端刚刚取得的 RSS 实时资料，用来回答用户上一句“${d.text}”。` +
+              "请直接依据资料用自然中文回答，不要说正在查询，不要重复调用新闻工具；资料不足就明确说明。\n\n" +
+              evidence,
+            );
+          })
+          .catch((error) => {
+            if (client !== c) return;
+            c.sendGroundingContext(
+              `用户上一句“${d.text}”需要实时 RSS 资料，但后端查询失败：${error.message}。` +
+              "请直接坦诚说明暂时无法取得该来源，不要编造最新内容。",
+            );
+          });
+      }
+    }
   });
   c.addEventListener("user-turn-started", (e) => {
     const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;

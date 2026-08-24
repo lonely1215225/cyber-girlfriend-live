@@ -5,6 +5,9 @@
 # Runtime state
 /logs/
 /run/
+/data/*.sqlite3*
+/data/*.json
+/data/voices/
 /.cache/
 
 # Downloaded models and generated environments

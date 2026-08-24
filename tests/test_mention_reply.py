@@ -1,5 +1,6 @@
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -147,6 +148,68 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
             [name for name, _ in gateway.calls],
             ["mcp_coingecko_price", "mcp_exa_web_search_exa"],
         )
+
+    async def test_proactive_speech_streams_to_room_and_is_finalized(self):
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+
+        class NoTools:
+            enabled = False
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    '{"type":"response.audio_transcript.delta","delta":"第一句新闻。"}',
+                    '{"type":"response.audio_transcript.done","transcript":"第一句新闻。"}',
+                    '{"type":"response.audio_transcript.done","transcript":"第二句也要显示。"}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def recv(self): return next(self.events)
+            async def send(self, _message): pass
+
+        room = RecordingRoom()
+        worker = MentionReplyWorker(room, NoTools(), "ws://unused")
+        worker.enqueue_proactive("讲新闻")
+        request = worker.pending.popleft()
+        with mock.patch("mention_reply.websockets.connect", return_value=FakeWebSocket()):
+            await worker._respond(request)
+        self.assertTrue(any(item.get("partial") for item in room.items))
+        final = [item for item in room.items if not item.get("partial")][-1]
+        self.assertEqual(final["text"], "第一句新闻。第二句也要显示。")
+        self.assertFalse(final.get("interrupted", False))
+
+    async def test_spoken_prefix_survives_connection_failure(self):
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+
+        class NoTools:
+            enabled = False
+
+        class FailingWebSocket:
+            def __init__(self): self.index = 0
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def send(self, _message): pass
+            async def recv(self):
+                self.index += 1
+                if self.index == 1: return '{"type":"session.created"}'
+                if self.index == 2: return '{"type":"response.audio_transcript.delta","delta":"已经播出的半句话"}'
+                raise ConnectionError("stream lost")
+
+        room = RecordingRoom()
+        worker = MentionReplyWorker(room, NoTools(), "ws://unused")
+        worker.enqueue_proactive("讲新闻")
+        with mock.patch("mention_reply.websockets.connect", return_value=FailingWebSocket()):
+            with self.assertRaises(ConnectionError):
+                await worker._respond(worker.pending.popleft())
+        final = [item for item in room.items if not item.get("partial")][-1]
+        self.assertEqual(final["text"], "已经播出的半句话")
+        self.assertTrue(final["interrupted"])
 
 
 if __name__ == "__main__":
