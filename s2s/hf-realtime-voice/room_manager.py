@@ -8,6 +8,7 @@ deployment runs one Uvicorn worker and a restart should clear stale callers.
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import re
 import secrets
@@ -109,6 +110,11 @@ class LiveRoom:
         self._queue: list[QueueEntry] = []
         self._active: CallSession | None = None
         self._messages: list[dict[str, Any]] = []
+        self._agent_jobs: dict[str, dict[str, Any]] = {}
+        self._proactive_block_until = 0.0
+        self._agent_proactive_cooldown_s = max(
+            0, int(os.environ.get("AGENT_PROACTIVE_COOLDOWN_SECONDS", "60"))
+        )
         self._chat_times: dict[str, list[float]] = {}
         self._subscribers: dict[asyncio.Queue, str] = {}
         self._disconnect_tasks: dict[str, asyncio.Task] = {}
@@ -124,8 +130,24 @@ class LiveRoom:
         if not self.store:
             return
         messages = await self.store.load_recent_messages(MESSAGE_LIMIT)
+        jobs = await self.store.load_agent_jobs(limit=30)
         async with self._lock:
             self._messages = messages[-MESSAGE_LIMIT:]
+            self._agent_jobs = {str(item["id"]): dict(item, type="agent_job") for item in jobs}
+            existing_ids = {item["id"] for item in self._messages}
+            for job in jobs:
+                message_id = f"bot:agent:{job['id']}"
+                if job.get("terminal") or message_id in existing_ids:
+                    continue
+                self._messages.append({
+                    "id": message_id, "kind": "agent_status", "role": "assistant", "speaker": "小麻",
+                    "text": job.get("status_text") or "正在继续查询…", "partial": True,
+                    "interrupted": False, "created_at": job.get("created_at") or time.time(),
+                    "reply_to": {"id": job.get("message_id") or "", "speaker": job.get("speaker") or "观众",
+                                 "text": job.get("prompt") or ""},
+                    "agent_job_id": job["id"], "agent_phase": job.get("phase") or "queued",
+                })
+            self._messages = self._messages[-MESSAGE_LIMIT:]
 
     async def stop(self) -> None:
         if self._sweeper_task:
@@ -490,6 +512,15 @@ class LiveRoom:
             self._expire_active_locked()
             return self._active is None and not self._queue
 
+    async def can_start_proactive(self) -> bool:
+        """Do not interrupt an Agent query or the user's immediate follow-up window."""
+        async with self._lock:
+            self._expire_active_locked()
+            return (
+                self._active is None and not self._queue
+                and time.monotonic() >= self._proactive_block_until
+            )
+
     async def is_active_caller(self, token: str) -> bool:
         """Return whether this participant currently owns a connected call."""
         async with self._lock:
@@ -547,6 +578,55 @@ class LiveRoom:
             await self.store.save_message(saved, user_id=user_id or None)
         return saved
 
+    async def publish_agent_job(
+        self,
+        job: dict[str, Any],
+        *,
+        reply_to: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Persist and broadcast one public agent lifecycle update."""
+        event_only = bool(job.get("event_only"))
+        saved_job = await self.store.save_agent_job(job) if self.store else dict(job)
+        if event_only:
+            saved_job["event_only"] = True
+        saved_job["type"] = "agent_job"
+        job_id = str(saved_job.get("id") or job.get("id") or "")
+        async with self._lock:
+            self._agent_jobs[job_id] = saved_job
+            self._proactive_block_until = max(
+                self._proactive_block_until,
+                time.monotonic() + self._agent_proactive_cooldown_s,
+            )
+            # Keep the public lifecycle list bounded even before SQLite cleanup.
+            if len(self._agent_jobs) > 30:
+                oldest = min(self._agent_jobs, key=lambda key: self._agent_jobs[key].get("updated_at", 0))
+                self._agent_jobs.pop(oldest, None)
+            if saved_job.get("event_only"):
+                self._broadcast_locked()
+        if saved_job.get("event_only"):
+            return saved_job
+        text = str(saved_job.get("final_text") or saved_job.get("status_text") or "正在处理…")
+        message = await self.publish_bot_reply(
+            message_id=f"agent:{job_id}", text=text, reply_to=reply_to,
+            partial=not bool(saved_job.get("terminal")),
+            # A failed lookup is a completed error response, not an audio
+            # interruption.  Only actual cancellation should show “已打断”.
+            interrupted=saved_job.get("phase") == "cancelled",
+        )
+        if message:
+            async with self._lock:
+                target = next((item for item in self._messages if item["id"] == message["id"]), None)
+                if target:
+                    target["kind"] = "agent_status" if not saved_job.get("terminal") else "mention_reply"
+                    target["agent_job_id"] = job_id
+                    target["agent_phase"] = saved_job.get("phase") or "queued"
+                    self._broadcast_locked()
+        return saved_job
+
+    async def public_agent_jobs(self) -> list[dict[str, Any]]:
+        async with self._lock:
+            return [dict(item) for item in self._agent_jobs.values()]
+
     async def memory_context(self, token: str, query: str = "") -> str:
         if not self.store:
             return ""
@@ -559,6 +639,13 @@ class LiveRoom:
         if not self.store or not participant_id:
             return ""
         return await self.store.memory_context(participant_id, query)
+
+    async def active_news_context(self, query: str = "", *, include_unconditionally: bool = False) -> str:
+        if not self.store:
+            return ""
+        return await self.store.active_news_context(
+            query, include_unconditionally=include_unconditionally
+        )
 
     def _message_user_id_locked(self, session_id: str) -> str | None:
         if not self._active or self._active.id != session_id:
@@ -647,6 +734,7 @@ class LiveRoom:
             "queue": queue_public,
             "active": self._participant_public(active_participant) if active_participant else None,
             "messages": [dict(item) for item in self._messages],
+            "agent_jobs": [dict(item) for item in self._agent_jobs.values()],
             "me": {
                 **(self._participant_public(participant) if participant else {}),
                 "status": status,

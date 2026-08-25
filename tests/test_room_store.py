@@ -114,6 +114,65 @@ class RoomStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.store.admin_session(first))
         self.assertIsNotNone(await self.store.admin_session(second))
 
+    async def test_agent_jobs_are_persistent_recoverable_and_keep_context(self):
+        base = {
+            "id": "aj-one", "message_id": "chat-one", "participant_id": "user-a",
+            "speaker": "林知夏", "prompt": "现在比特币多少钱", "phase": "researching",
+            "status_text": "正在核对最新价格", "terminal": False,
+        }
+        saved = await self.store.save_agent_job(base)
+        self.assertEqual(saved["phase"], "researching")
+        recovering = await self.store.load_agent_jobs(recoverable_only=True)
+        self.assertEqual([item["id"] for item in recovering], ["aj-one"])
+
+        await self.store.save_agent_job({
+            **base, "phase": "completed", "status_text": "现在大约是65,000美元。",
+            "final_text": "现在大约是65,000美元。", "terminal": True,
+        })
+        self.assertEqual(await self.store.load_agent_jobs(recoverable_only=True), [])
+        context = await self.store.recent_agent_context("user-a")
+        self.assertIn("比特币", context)
+        self.assertIn("65,000美元", context)
+
+    async def test_conversation_focus_is_private_and_persistent(self):
+        spec = {
+            "subject": "bitcoin", "subject_label": "比特币",
+            "aliases": ["比特币", "bitcoin", "btc"], "intent": "price_lookup",
+            "resolved_question": "现在比特币多少钱",
+        }
+        await self.store.set_conversation_focus(
+            "user-a", spec, "现在约65000美元", "2026-08-24T00:00:00Z"
+        )
+        focus = await self.store.get_conversation_focus("user-a")
+        self.assertEqual(focus["subject"], "bitcoin")
+        self.assertEqual(focus["last_intent"], "price_lookup")
+        self.assertIn("65000", focus["last_answer"])
+        self.assertEqual(await self.store.get_conversation_focus("user-b"), {})
+
+    async def test_only_one_full_news_topic_and_small_history_are_kept(self):
+        await self.store.set_active_news_topic({
+            "fingerprint": "event-one", "title": "比特币突破八万美元",
+            "title_normalized": "比特币突破80000美元", "category": "新闻",
+            "source": "人民日报", "summary": "市场价格出现上涨。",
+            "evidence": "可信的第一条资料", "locked_until": 9_999_999_999,
+        })
+        context = await self.store.active_news_context("这个为什么会上涨")
+        self.assertIn("比特币突破八万美元", context)
+        self.assertIn("可信的第一条资料", context)
+        self.assertEqual(await self.store.active_news_context("你喜欢什么动物"), "")
+
+        await self.store.set_active_news_topic({
+            "fingerprint": "event-two", "title": "新款芯片正式发布",
+            "title_normalized": "新款芯片正式发布", "category": "科技",
+            "source": "IT之家", "evidence": "可信的第二条资料",
+            "locked_until": 9_999_999_999,
+        })
+        current = await self.store.active_news_context("刚才那条新闻怎么样")
+        self.assertIn("新款芯片正式发布", current)
+        self.assertNotIn("比特币突破八万美元", current)
+        titles = await self.store.recent_news_titles()
+        self.assertEqual(set(titles), {"比特币突破八万美元", "新款芯片正式发布"})
+
 
 if __name__ == "__main__":
     unittest.main()

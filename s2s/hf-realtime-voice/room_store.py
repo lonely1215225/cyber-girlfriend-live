@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -136,6 +138,78 @@ class RoomStore:
                     user_agent_hash TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_admin_expiry ON admin_sessions(expires_at);
+                CREATE TABLE IF NOT EXISTS agent_jobs (
+                    id TEXT PRIMARY KEY,
+                    room_id TEXT NOT NULL DEFAULT 'default',
+                    message_id TEXT NOT NULL,
+                    participant_id TEXT NOT NULL DEFAULT '',
+                    speaker TEXT NOT NULL DEFAULT '',
+                    prompt TEXT NOT NULL,
+                    phase TEXT NOT NULL DEFAULT 'queued',
+                    status_text TEXT NOT NULL DEFAULT '',
+                    route_json TEXT NOT NULL DEFAULT '{}',
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    task_spec_json TEXT NOT NULL DEFAULT '{}',
+                    tool_plan_json TEXT NOT NULL DEFAULT '{}',
+                    evidence_items_json TEXT NOT NULL DEFAULT '[]',
+                    answer_draft_json TEXT NOT NULL DEFAULT '{}',
+                    coverage REAL NOT NULL DEFAULT 0,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    candidate_text TEXT NOT NULL DEFAULT '',
+                    validation_json TEXT NOT NULL DEFAULT '[]',
+                    final_text TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    feedback_count INTEGER NOT NULL DEFAULT 0,
+                    terminal INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(room_id, message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_jobs_room_time ON agent_jobs(room_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_agent_jobs_participant ON agent_jobs(participant_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_agent_jobs_terminal ON agent_jobs(terminal, updated_at);
+                CREATE TABLE IF NOT EXISTS conversation_focus (
+                    participant_id TEXT PRIMARY KEY,
+                    subject TEXT NOT NULL DEFAULT '',
+                    subject_label TEXT NOT NULL DEFAULT '',
+                    aliases_json TEXT NOT NULL DEFAULT '[]',
+                    last_intent TEXT NOT NULL DEFAULT '',
+                    last_question TEXT NOT NULL DEFAULT '',
+                    last_answer TEXT NOT NULL DEFAULT '',
+                    evidence_time TEXT NOT NULL DEFAULT '',
+                    expires_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_conversation_focus_expiry ON conversation_focus(expires_at);
+                CREATE TABLE IF NOT EXISTS active_news_topics (
+                    room_id TEXT PRIMARY KEY,
+                    topic_id TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT '新闻',
+                    title TEXT NOT NULL,
+                    title_normalized TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    source_url TEXT NOT NULL DEFAULT '',
+                    published_at TEXT NOT NULL DEFAULT '',
+                    evidence TEXT NOT NULL DEFAULT '',
+                    broadcast_text TEXT NOT NULL DEFAULT '',
+                    message_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'selected',
+                    locked_until REAL NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS news_broadcast_fingerprints (
+                    fingerprint TEXT PRIMARY KEY,
+                    title_normalized TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    canonical_url_hash TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    broadcasted_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_news_fingerprints_time
+                    ON news_broadcast_fingerprints(broadcasted_at DESC);
                 CREATE TABLE IF NOT EXISTS admin_audit_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     admin_session_id TEXT,
@@ -147,6 +221,19 @@ class RoomStore:
                 );
                 """
             )
+            agent_columns = {row["name"] for row in db.execute("PRAGMA table_info(agent_jobs)")}
+            agent_migrations = {
+                "metrics_json": "TEXT NOT NULL DEFAULT '{}'",
+                "task_spec_json": "TEXT NOT NULL DEFAULT '{}'",
+                "tool_plan_json": "TEXT NOT NULL DEFAULT '{}'",
+                "evidence_items_json": "TEXT NOT NULL DEFAULT '[]'",
+                "answer_draft_json": "TEXT NOT NULL DEFAULT '{}'",
+                "coverage": "REAL NOT NULL DEFAULT 0",
+                "retry_count": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for column, definition in agent_migrations.items():
+                if column not in agent_columns:
+                    db.execute(f"ALTER TABLE agent_jobs ADD COLUMN {column} {definition}")  # noqa: S608
             try:
                 db.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts "
@@ -298,6 +385,273 @@ class RoomStore:
 
     async def save_message(self, item: dict[str, Any], *, user_id: str | None = None) -> None:
         await asyncio.to_thread(self._save_message_sync, dict(item), user_id)
+
+    async def save_agent_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(self._save_agent_job_sync, dict(job))
+
+    def _save_agent_job_sync(self, job: dict[str, Any]) -> dict[str, Any]:
+        now = time.time()
+        job_id = str(job.get("id") or secrets.token_urlsafe(18))
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO agent_jobs(id,room_id,message_id,participant_id,speaker,prompt,phase,status_text,"
+                "route_json,evidence_json,task_spec_json,tool_plan_json,evidence_items_json,answer_draft_json,coverage,retry_count,"
+                "candidate_text,validation_json,final_text,error,metrics_json,feedback_count,terminal,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(room_id,message_id) DO UPDATE SET "
+                "phase=excluded.phase,status_text=excluded.status_text,route_json=excluded.route_json,"
+                "evidence_json=excluded.evidence_json,candidate_text=excluded.candidate_text,"
+                "task_spec_json=excluded.task_spec_json,tool_plan_json=excluded.tool_plan_json,"
+                "evidence_items_json=excluded.evidence_items_json,answer_draft_json=excluded.answer_draft_json,"
+                "coverage=excluded.coverage,retry_count=excluded.retry_count,"
+                "validation_json=excluded.validation_json,final_text=excluded.final_text,error=excluded.error,"
+                "metrics_json=excluded.metrics_json,"
+                "feedback_count=excluded.feedback_count,terminal=excluded.terminal,updated_at=excluded.updated_at",
+                (
+                    job_id, str(job.get("room_id") or "default"), str(job.get("message_id") or ""),
+                    str(job.get("participant_id") or ""), str(job.get("speaker") or ""),
+                    str(job.get("prompt") or ""), str(job.get("phase") or "queued"),
+                    str(job.get("status_text") or ""),
+                    json.dumps(job.get("route") or {}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(job.get("evidence") or {}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(job.get("task_spec") or {}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(job.get("tool_plan") or {}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(job.get("evidence_items") or [], ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(job.get("answer_draft") or {}, ensure_ascii=False, separators=(",", ":")),
+                    max(0.0, min(1.0, float(job.get("coverage") or 0))),
+                    max(0, int(job.get("retry_count") or 0)),
+                    str(job.get("candidate_text") or ""),
+                    json.dumps(job.get("validation_errors") or [], ensure_ascii=False, separators=(",", ":")),
+                    str(job.get("final_text") or ""), str(job.get("error") or "")[:1000],
+                    json.dumps(job.get("metrics") or {}, ensure_ascii=False, separators=(",", ":")),
+                    max(0, int(job.get("feedback_count") or 0)), int(bool(job.get("terminal"))),
+                    float(job.get("created_at") or now), now,
+                ),
+            )
+            row = db.execute("SELECT * FROM agent_jobs WHERE room_id=? AND message_id=?", (
+                str(job.get("room_id") or "default"), str(job.get("message_id") or ""),
+            )).fetchone()
+        return self._agent_job_public(dict(row))
+
+    @staticmethod
+    def _agent_job_public(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"], "message_id": row["message_id"],
+            "participant_id": row.get("participant_id") or "", "speaker": row.get("speaker") or "",
+            "prompt": row.get("prompt") or "", "phase": row.get("phase") or "queued",
+            "status_text": row.get("status_text") or "", "final_text": row.get("final_text") or "",
+            "feedback_count": int(row.get("feedback_count") or 0),
+            "terminal": bool(row.get("terminal")), "created_at": row.get("created_at") or 0,
+            "updated_at": row.get("updated_at") or 0,
+        }
+
+    async def load_agent_jobs(self, *, recoverable_only: bool = False, limit: int = 30) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._load_agent_jobs_sync, recoverable_only, limit)
+
+    def _load_agent_jobs_sync(self, recoverable_only: bool, limit: int) -> list[dict[str, Any]]:
+        where = "WHERE room_id='default'" + (" AND terminal=0" if recoverable_only else "")
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT * FROM agent_jobs {where} ORDER BY updated_at DESC LIMIT ?",  # noqa: S608
+                (max(1, min(100, int(limit))),),
+            ).fetchall()
+        return [self._agent_job_public(dict(row)) for row in reversed(rows)]
+
+    async def recent_agent_context(self, participant_id: str, *, max_chars: int = 800) -> str:
+        return await asyncio.to_thread(self._recent_agent_context_sync, participant_id, max_chars)
+
+    def _recent_agent_context_sync(self, participant_id: str, max_chars: int) -> str:
+        if not participant_id:
+            return ""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT prompt,final_text FROM agent_jobs WHERE participant_id=? AND terminal=1 "
+                "ORDER BY updated_at DESC LIMIT 3", (participant_id,),
+            ).fetchall()
+        lines = [f"问题：{row['prompt']}\n结果：{row['final_text']}" for row in reversed(rows) if row["final_text"]]
+        return "\n".join(lines)[-max(100, int(max_chars)):]
+
+    async def get_conversation_focus(self, participant_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self._get_conversation_focus_sync, participant_id)
+
+    def _get_conversation_focus_sync(self, participant_id: str) -> dict[str, Any]:
+        if not participant_id:
+            return {}
+        now = time.time()
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM conversation_focus WHERE participant_id=? AND expires_at>?",
+                (participant_id, now),
+            ).fetchone()
+        if not row:
+            return {}
+        item = dict(row)
+        with contextlib.suppress(json.JSONDecodeError):
+            item["aliases"] = json.loads(item.pop("aliases_json", "[]"))
+        return item
+
+    async def set_conversation_focus(
+        self, participant_id: str, task_spec: dict[str, Any], answer: str, evidence_time: str = ""
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_conversation_focus_sync, participant_id, dict(task_spec), answer, evidence_time
+        )
+
+    def _set_conversation_focus_sync(
+        self, participant_id: str, task_spec: dict[str, Any], answer: str, evidence_time: str
+    ) -> None:
+        if not participant_id or not task_spec.get("subject"):
+            return
+        now = time.time()
+        ttl = max(300, int(os.environ.get("AGENT_FOCUS_TTL_SECONDS", "1800")))
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO conversation_focus(participant_id,subject,subject_label,aliases_json,last_intent,"
+                "last_question,last_answer,evidence_time,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(participant_id) DO UPDATE SET subject=excluded.subject,subject_label=excluded.subject_label,"
+                "aliases_json=excluded.aliases_json,last_intent=excluded.last_intent,last_question=excluded.last_question,"
+                "last_answer=excluded.last_answer,evidence_time=excluded.evidence_time,expires_at=excluded.expires_at,"
+                "updated_at=excluded.updated_at",
+                (
+                    participant_id, str(task_spec.get("subject") or "")[:100],
+                    str(task_spec.get("subject_label") or "")[:100],
+                    json.dumps(task_spec.get("aliases") or [], ensure_ascii=False, separators=(",", ":")),
+                    str(task_spec.get("intent") or "")[:40], str(task_spec.get("resolved_question") or "")[:500],
+                    str(answer or "")[:1200], str(evidence_time or "")[:80], now + ttl, now,
+                ),
+            )
+
+    async def recent_news_titles(self, *, days: int = 7, limit: int = 500) -> list[str]:
+        return await asyncio.to_thread(self._recent_news_titles_sync, days, limit)
+
+    def _recent_news_titles_sync(self, days: int, limit: int) -> list[str]:
+        cutoff = time.time() - max(1, int(days)) * 86400
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT title FROM news_broadcast_fingerprints WHERE broadcasted_at>=? "
+                "ORDER BY broadcasted_at DESC LIMIT ?",
+                (cutoff, max(1, min(1000, int(limit)))),
+            ).fetchall()
+        return [str(row["title"] or "") for row in rows if row["title"]]
+
+    async def set_active_news_topic(self, topic: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(self._set_active_news_topic_sync, dict(topic))
+
+    async def can_replace_active_news(self, room_id: str = "default") -> bool:
+        return await asyncio.to_thread(self._can_replace_active_news_sync, room_id)
+
+    def _can_replace_active_news_sync(self, room_id: str) -> bool:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT status,locked_until FROM active_news_topics WHERE room_id=?", (room_id,)
+            ).fetchone()
+        return row is None or row["status"] != "discussed" or float(row["locked_until"] or 0) < time.time()
+
+    def _set_active_news_topic_sync(self, topic: dict[str, Any]) -> dict[str, Any]:
+        now = time.time()
+        room_id = str(topic.get("room_id") or "default")
+        title = str(topic.get("title") or "")[:300]
+        normalized = re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", str(topic.get("title_normalized") or title).lower())
+        fingerprint = str(topic.get("fingerprint") or hashlib.sha256(normalized.encode()).hexdigest()[:32])
+        topic_id = str(topic.get("topic_id") or f"news_{fingerprint[:24]}")
+        with self._connect() as db:
+            # One complete topic per room: this UPSERT atomically replaces the
+            # prior subject instead of accumulating RSS bodies indefinitely.
+            db.execute(
+                "INSERT INTO active_news_topics(room_id,topic_id,category,title,title_normalized,summary,source,"
+                "source_url,published_at,evidence,broadcast_text,message_id,status,locked_until,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(room_id) DO UPDATE SET "
+                "topic_id=excluded.topic_id,category=excluded.category,title=excluded.title,"
+                "title_normalized=excluded.title_normalized,summary=excluded.summary,source=excluded.source,"
+                "source_url=excluded.source_url,published_at=excluded.published_at,evidence=excluded.evidence,"
+                "broadcast_text=excluded.broadcast_text,message_id=excluded.message_id,status=excluded.status,"
+                "locked_until=excluded.locked_until,created_at=excluded.created_at,updated_at=excluded.updated_at",
+                (
+                    room_id, topic_id, str(topic.get("category") or "新闻")[:20], title, normalized,
+                    str(topic.get("summary") or "")[:1200], str(topic.get("source") or "")[:100],
+                    str(topic.get("source_url") or "")[:800], str(topic.get("published_at") or "")[:80],
+                    str(topic.get("evidence") or "")[:3000], str(topic.get("broadcast_text") or "")[:2000],
+                    str(topic.get("message_id") or "")[:160], str(topic.get("status") or "selected")[:24],
+                    float(topic.get("locked_until") or now + 900), now, now,
+                ),
+            )
+            db.execute(
+                "INSERT INTO news_broadcast_fingerprints(fingerprint,title_normalized,title,canonical_url_hash,source,broadcasted_at) "
+                "VALUES(?,?,?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET broadcasted_at=excluded.broadcasted_at",
+                (
+                    fingerprint, normalized, title, str(topic.get("canonical_url_hash") or "")[:64],
+                    str(topic.get("source") or "")[:100], now,
+                ),
+            )
+            # Hard cap as well as age retention, keeping storage bounded even
+            # when a deployment broadcasts unusually frequently.
+            db.execute("DELETE FROM news_broadcast_fingerprints WHERE broadcasted_at<?", (now - 7 * 86400,))
+            db.execute(
+                "DELETE FROM news_broadcast_fingerprints WHERE fingerprint NOT IN "
+                "(SELECT fingerprint FROM news_broadcast_fingerprints ORDER BY broadcasted_at DESC LIMIT 500)"
+            )
+            row = db.execute("SELECT * FROM active_news_topics WHERE room_id=?", (room_id,)).fetchone()
+        return dict(row)
+
+    async def finalize_active_news_broadcast(self, text: str, message_id: str) -> None:
+        await asyncio.to_thread(self._finalize_active_news_broadcast_sync, text, message_id)
+
+    def _finalize_active_news_broadcast_sync(self, text: str, message_id: str) -> None:
+        with self._connect() as db:
+            db.execute(
+                "UPDATE active_news_topics SET broadcast_text=?,message_id=?,status='broadcast',updated_at=? "
+                "WHERE room_id='default'",
+                (str(text or "")[:2000], str(message_id or "")[:160], time.time()),
+            )
+
+    async def active_news_context(self, query: str = "", *, max_chars: int = 1800,
+                                  include_unconditionally: bool = False) -> str:
+        return await asyncio.to_thread(
+            self._active_news_context_sync, query, max_chars, include_unconditionally
+        )
+
+    def _active_news_context_sync(self, query: str, max_chars: int,
+                                  include_unconditionally: bool) -> str:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM active_news_topics WHERE room_id='default'").fetchone()
+        if row is None:
+            return ""
+        item = dict(row)
+        # A current topic remains available briefly for deictic follow-ups. For
+        # explicit entity/title matches it can still be used after the soft TTL.
+        clean_query = re.sub(r"[\s，。！？,.!?@]", "", query or "").lower()
+        deictic = bool(re.search(r"这个|这条|刚才|刚刚|那个|它|此事|这件事|是真的吗|为什么|后来|进展", clean_query))
+        title = str(item.get("title") or "").lower()
+        terms = [token for token in re.findall(r"[a-z0-9]{3,}|[\u3400-\u9fff]{2,}", clean_query) if token not in {"什么", "怎么", "新闻", "现在", "最新"}]
+        matched = any(term in title or term in str(item.get("evidence") or "").lower() for term in terms)
+        fresh = float(item.get("locked_until") or 0) >= time.time()
+        if include_unconditionally and not fresh:
+            return ""
+        if not include_unconditionally and not matched and not (fresh and deictic):
+            return ""
+        if not include_unconditionally:
+            # A real follow-up pins the subject briefly so the scheduler cannot
+            # replace it with the next headline midway through discussion.
+            with self._connect() as db:
+                db.execute(
+                    "UPDATE active_news_topics SET status='discussed',locked_until=?,updated_at=? "
+                    "WHERE room_id='default' AND topic_id=?",
+                    (time.time() + 5 * 60, time.time(), item["topic_id"]),
+                )
+        lines = [
+            "【直播间当前新闻话题】",
+            f"标题：{item['title']}",
+            f"分类/来源：{item['category']} / {item['source'] or '未标注'}",
+        ]
+        if item.get("published_at"):
+            lines.append(f"发布时间：{item['published_at']}")
+        if item.get("summary"):
+            lines.append(f"摘要：{item['summary']}")
+        if item.get("evidence"):
+            lines.append(f"播报依据：{item['evidence']}")
+        if item.get("broadcast_text"):
+            lines.append(f"数字人刚才实际说的是：{item['broadcast_text']}")
+        lines.append("仅当用户明显在追问这条新闻时使用；若询问‘现在/最新/后来’，必须重新查询，不能把旧资料当实时结果。")
+        return "\n".join(lines)[:max(300, int(max_chars))]
 
     def _save_message_sync(self, item: dict[str, Any], user_id: str | None) -> None:
         text = str(item.get("text") or "").strip()
@@ -487,3 +841,6 @@ class RoomStore:
             db.execute("UPDATE user_sessions SET ip_address='' WHERE last_seen_at<?", (cutoff,))
             db.execute("DELETE FROM user_sessions WHERE expires_at<? OR revoked_at IS NOT NULL", (now - 86400,))
             db.execute("DELETE FROM admin_sessions WHERE expires_at<? OR revoked_at IS NOT NULL", (now - 86400,))
+            db.execute("DELETE FROM agent_jobs WHERE terminal=1 AND updated_at<?", (now - 7 * 86400,))
+            db.execute("DELETE FROM conversation_focus WHERE expires_at<?", (now,))
+            db.execute("DELETE FROM news_broadcast_fingerprints WHERE broadcasted_at<?", (now - 7 * 86400,))

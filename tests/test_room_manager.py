@@ -29,6 +29,15 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
             await self.room.rename(self.cara.token, "独一无二")
         self.assertEqual(caught.exception.code, "name_taken")
 
+    async def test_agent_updates_block_proactive_news_cooldown(self):
+        self.assertTrue(await self.room.can_start_proactive())
+        await self.room.publish_agent_job({
+            "id": "job-one", "message_id": "msg-one", "participant_id": self.alice.id,
+            "speaker": self.alice.display_name, "prompt": "查一下新闻", "phase": "planning",
+            "status_text": "正在查询", "terminal": False,
+        }, reply_to=None)
+        self.assertFalse(await self.room.can_start_proactive())
+
     async def test_only_one_caller_and_fifo_queue(self):
         first = await self.room.request_session(self.alice.token)
         second = await self.room.request_session(self.bob.token)

@@ -11,6 +11,9 @@ from rss_news import (  # noqa: E402
     RssNewsAggregator,
     formatted_news_blocks,
     infer_topic_filters,
+    canonical_news_url,
+    news_titles_similar,
+    normalize_news_title,
     parse_feed,
 )
 
@@ -93,6 +96,25 @@ class RssNewsTests(unittest.TestCase):
             ("知识", "知乎日报"),
         )
         self.assertEqual(infer_topic_filters("今天有什么体育新闻"), ("新闻", ""))
+
+    def test_normalizes_numbers_urls_and_syndicated_titles(self):
+        self.assertEqual(normalize_news_title("快讯：比特币突破 8 万美元"), "比特币突破80000美元")
+        self.assertEqual(
+            canonical_news_url("https://EXAMPLE.com/story/?utm_source=x&id=2#top"),
+            "https://example.com/story?id=2",
+        )
+        self.assertTrue(news_titles_similar("比特币突破8万美元", "比特币价格站上80000美元"))
+        self.assertFalse(news_titles_similar("某公司发布新手机", "某公司季度利润大涨"))
+
+    def test_persisted_history_blocks_cross_restart_repeat(self):
+        output = """RSS topics:
+1. [新闻｜人民日报] 2026-08-21 09:00 UTC — 比特币价格站上80000美元
+2. [科技｜IT之家] 2026-08-21 08:00 UTC — 新款芯片正式发布"""
+        rotator = IdleNewsRotator()
+        selected = rotator.choose(
+            "fresh-process", output, persisted_titles=["比特币突破8万美元"]
+        )
+        self.assertIn("新款芯片", selected)
 
 
 class RssDialogueQueryTests(unittest.IsolatedAsyncioTestCase):

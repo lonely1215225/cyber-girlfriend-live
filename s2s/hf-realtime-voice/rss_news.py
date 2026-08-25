@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import logging
 import os
@@ -13,7 +14,8 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus, urlparse
+from difflib import SequenceMatcher
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -22,6 +24,12 @@ logger = logging.getLogger("s2s.rss_news")
 _TAG_RE = re.compile(r"<[^>]+>")
 _SPACE_RE = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9]{3,}|[\u4e00-\u9fff]{2,}")
+_TITLE_NOISE_RE = re.compile(
+    r"(?:最新|刚刚|突发|重磅|快讯|独家|现场|视频|图集|组图|媒体|消息称|"
+    r"人民日报|澎湃新闻|中新网|中国新闻网|cnBeta|IT之家|极客公园|知乎日报)",
+    re.IGNORECASE,
+)
+_TRACKING_QUERY_PREFIXES = ("utm_", "spm", "from", "source", "ref", "share")
 _CATEGORY_KEYWORDS = {
     "科技": ("科技", "数码", "互联网", "人工智能", "ai新闻", "it新闻"),
     "知识": ("知识", "科普", "知乎", "知乎日报"),
@@ -100,7 +108,86 @@ class NewsItem:
     category: str = "新闻"
 
 
-def formatted_news_blocks(output: str) -> list[str]:
+def normalize_news_title(title: str) -> str:
+    """Stable, cheap title form used by both pool and persisted broadcast history."""
+    text = html.unescape(title or "").lower()
+    text = re.sub(r"(?<=\d)[,.，](?=\d)", "", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*万", lambda m: str(int(float(m.group(1)) * 10_000)), text)
+    text = _TITLE_NOISE_RE.sub("", text)
+    return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", text)
+
+
+def canonical_news_url(url: str) -> str:
+    parsed = urlparse(url or "")
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    query = [
+        (key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith(_TRACKING_QUERY_PREFIXES)
+    ]
+    path = re.sub(r"/{2,}", "/", parsed.path or "/").rstrip("/") or "/"
+    return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, "", urlencode(query), ""))
+
+
+def news_event_fingerprint(title: str, url: str = "") -> str:
+    """Small persistent ID; fuzzy comparisons still use the stored normalized title."""
+    canonical = canonical_news_url(url)
+    basis = canonical or normalize_news_title(title)
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
+
+
+def news_titles_similar(left: str, right: str) -> bool:
+    """Detect syndicated versions without an embedding model or LLM latency."""
+    a, b = normalize_news_title(left), normalize_news_title(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter, longer = sorted((a, b), key=len)
+    if len(shorter) >= 14 and shorter in longer:
+        return True
+    ratio = SequenceMatcher(None, a, b, autojunk=False).ratio()
+    # CJK bigram overlap catches reordered syndicated headlines while requiring
+    # enough shared substance to avoid collapsing merely related stories.
+    def grams(value: str) -> set[str]:
+        return {value[i:i + 2] for i in range(max(0, len(value) - 1))}
+    ga, gb = grams(a), grams(b)
+    overlap = len(ga & gb) / max(1, min(len(ga), len(gb)))
+    numbers_a, numbers_b = set(re.findall(r"\d+(?:\.\d+)?", a)), set(re.findall(r"\d+(?:\.\d+)?", b))
+    same_numbered_event = bool(numbers_a & numbers_b) and ratio >= 0.65 and overlap >= 0.55
+    return ratio >= 0.82 or same_numbered_event or (
+        len(shorter) >= 14 and ratio >= 0.68 and overlap >= 0.72
+    )
+
+
+def news_block_title(block: str) -> str:
+    headline = block.splitlines()[0] if block else ""
+    return headline.split(" — ", 1)[-1].strip()
+
+
+def news_block_metadata(block: str) -> dict[str, str]:
+    first = block.splitlines()[0] if block else ""
+    match = re.match(r"\[(?P<category>[^｜\]]+)｜(?P<source>[^\]]+)\]\s+(?P<published>.*?)\s+—\s+(?P<title>.+)", first)
+    summary = ""
+    source_url = ""
+    for line in block.splitlines()[1:]:
+        if line.startswith("摘要："):
+            summary = line.removeprefix("摘要：").strip()
+        elif line.startswith("原文："):
+            source_url = line.removeprefix("原文：").strip()
+    values = match.groupdict() if match else {}
+    return {
+        "category": values.get("category", "新闻"),
+        "source": values.get("source", ""),
+        "published_at": values.get("published", ""),
+        "title": values.get("title", news_block_title(block)),
+        "summary": summary,
+        "source_url": source_url,
+        "evidence": block[:2400],
+    }
+
+
+def formatted_news_blocks(output: str, *, include_links: bool = False) -> list[str]:
     """Extract compact attributed story blocks from formatted RSS output."""
     starts = list(re.finditer(r"(?m)^\d+\.\s+", output))
     blocks: list[str] = []
@@ -108,7 +195,8 @@ def formatted_news_blocks(output: str) -> list[str]:
         end = starts[index + 1].start() if index + 1 < len(starts) else len(output)
         block = output[match.end() : end].strip()
         lines = [line.strip() for line in block.splitlines() if line.strip()]
-        lines = [line for line in lines if not line.startswith("原文：")]
+        if not include_links:
+            lines = [line for line in lines if not line.startswith("原文：")]
         if lines:
             blocks.append("\n".join(lines)[:1200])
     return blocks
@@ -180,8 +268,8 @@ class IdleNewsRotator:
         headline = block.splitlines()[0] if block else ""
         return re.sub(r"\W+", "", headline).lower()
 
-    def choose(self, audience: str, output: str) -> str:
-        blocks = formatted_news_blocks(output)
+    def choose(self, audience: str, output: str, *, persisted_titles: list[str] | None = None) -> str:
+        blocks = formatted_news_blocks(output, include_links=True)
         if not blocks:
             raise ValueError("RSS output contains no news stories")
         recent = self._recent.setdefault(audience, deque(maxlen=self.history_size))
@@ -194,13 +282,23 @@ class IdleNewsRotator:
         categories = self.CATEGORY_ORDER[start:] + self.CATEGORY_ORDER[:start]
         selected = None
         selected_category = ""
+        persisted_titles = persisted_titles or []
+
+        def unused(block: str) -> bool:
+            title = news_block_title(block)
+            return (
+                self._identity(block) not in recent
+                and not any(news_titles_similar(title, old) for old in persisted_titles)
+                and not any(news_titles_similar(title, old) for old in recent)
+            )
+
         for category in categories:
             marker = f"[{category}｜"
             selected = next(
                 (
                     block
                     for block in blocks
-                    if marker in block and self._identity(block) not in recent
+                    if marker in block and unused(block)
                 ),
                 None,
             )
@@ -208,11 +306,10 @@ class IdleNewsRotator:
                 selected_category = category
                 break
         if selected is None:
-            selected = next((block for block in blocks if self._identity(block) not in recent), None)
+            selected = next((block for block in blocks if unused(block)), None)
         if selected is None:
-            recent.clear()
-            selected = blocks[0]
-        recent.append(self._identity(selected))
+            raise ValueError("RSS pool has no unbroadcast news events")
+        recent.append(news_block_title(selected))
         if selected_category:
             category_index = self.CATEGORY_ORDER.index(selected_category)
             self._category_index[audience] = (category_index + 1) % len(self.CATEGORY_ORDER)
@@ -401,18 +498,25 @@ class RssNewsAggregator:
             items = timely
 
         unique: list[NewsItem] = []
-        seen: set[str] = set()
+        seen_urls: set[str] = set()
         source_counts: dict[str, int] = {}
         for item in sorted(
             items,
             key=lambda value: value.published.timestamp() if value.published else 0.0,
             reverse=True,
         ):
-            identity = re.sub(r"\W+", "", item.title).lower()
+            identity = normalize_news_title(item.title)
+            canonical_url = canonical_news_url(item.link)
             source_key = item.source.strip().lower()
-            if not identity or identity in seen or source_counts.get(source_key, 0) >= 12:
+            if (
+                not identity
+                or (canonical_url and canonical_url in seen_urls)
+                or any(news_titles_similar(item.title, old.title) for old in unique)
+                or source_counts.get(source_key, 0) >= 12
+            ):
                 continue
-            seen.add(identity)
+            if canonical_url:
+                seen_urls.add(canonical_url)
             source_counts[source_key] = source_counts.get(source_key, 0) + 1
             unique.append(item)
 
@@ -516,14 +620,21 @@ class RssNewsAggregator:
             return (100 if item.query_match else 0) + overlap * 10, timestamp
 
         unique: list[NewsItem] = []
-        seen: set[str] = set()
+        seen_urls: set[str] = set()
         source_counts: dict[str, int] = {}
         for item in sorted(items, key=score, reverse=True):
-            identity = re.sub(r"\W+", "", item.title).lower()
+            identity = normalize_news_title(item.title)
+            canonical_url = canonical_news_url(item.link)
             source_key = item.source.strip().lower()
-            if not identity or identity in seen or source_counts.get(source_key, 0) >= 2:
+            if (
+                not identity
+                or (canonical_url and canonical_url in seen_urls)
+                or any(news_titles_similar(item.title, old.title) for old in unique)
+                or source_counts.get(source_key, 0) >= 2
+            ):
                 continue
-            seen.add(identity)
+            if canonical_url:
+                seen_urls.add(canonical_url)
             source_counts[source_key] = source_counts.get(source_key, 0) + 1
             unique.append(item)
             if len(unique) >= self.max_items:
