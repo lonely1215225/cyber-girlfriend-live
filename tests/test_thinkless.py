@@ -9,6 +9,9 @@ sys.path.insert(0, str(ROOT / "proxy"))
 
 from ollama_thinkless import (  # noqa: E402
     ModelOutputSanitizer,
+    _is_exact_speech_request,
+    _is_fast_conversation_followup,
+    _is_fast_discovery_turn,
     clean_model_output,
     completed_response,
     local_compaction,
@@ -18,6 +21,37 @@ from ollama_thinkless import (  # noqa: E402
 
 
 class ModelOutputSanitizerTests(unittest.TestCase):
+    def test_only_the_initial_discovery_turn_uses_fast_local_model(self):
+        payload = {
+            "tools": [{"type": "function", "name": "request_external_capabilities"}],
+            "input": [{"role": "user", "content": "晚上好"}],
+        }
+        self.assertTrue(_is_fast_discovery_turn(payload))
+        payload["input"].append({"type": "function_call_output", "output": "enabled"})
+        self.assertFalse(_is_fast_discovery_turn(payload))
+        payload["tools"].append({"type": "function", "name": "smart_web_search"})
+        self.assertFalse(_is_fast_discovery_turn(payload))
+
+    def test_conversation_route_followup_stays_local_without_research_tools(self):
+        payload = {
+            "tools": [],
+            "input": [{
+                "type": "function_call_output",
+                "output": '{"enabled":[],"route":"conversation_fast"}',
+            }],
+        }
+        self.assertTrue(_is_fast_conversation_followup(payload))
+        payload["tools"] = [{"type": "function", "name": "smart_web_search"}]
+        self.assertFalse(_is_fast_conversation_followup(payload))
+
+    def test_fixed_tts_readout_stays_on_local_provider(self):
+        messages = [
+            {"role": "system", "content": "只逐字朗读用户提供的文字，不要改写。"},
+            {"role": "user", "content": "逐字朗读：我查到了。"},
+        ]
+        self.assertTrue(_is_exact_speech_request(messages))
+        self.assertFalse(_is_exact_speech_request([{"role": "user", "content": "现在多少钱？"}]))
+
     def test_translates_responses_api_tools_for_ollama(self):
         tools = to_ollama_tools(
             [{"type": "function", "name": "search", "description": "Search", "parameters": {"type": "object"}}]

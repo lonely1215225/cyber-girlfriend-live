@@ -11,6 +11,7 @@ import os
 import re
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from memory_compaction import local_compaction as _local_compaction
@@ -23,6 +24,12 @@ PREWARM = os.environ.get("LLM_PREWARM", "1").strip().lower() in {"1", "true", "y
 COMPACTION_NUM_PREDICT = int(os.environ.get("LLM_COMPACTION_NUM_PREDICT", "256"))
 COMPACTION_MODE = os.environ.get("LLM_COMPACTION_MODE", "local").strip().lower()
 COMPACTION_MAX_CHARS = max(300, int(os.environ.get("LLM_COMPACTION_MAX_CHARS", "900")))
+GROK_ENABLED = os.environ.get("GROK_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+GROK_BASE_URL = os.environ.get("GROK_PROXY_BASE_URL", "http://127.0.0.1:18080/v1").rstrip("/")
+GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4.6").strip() or "grok-4.6"
+GROK_API_KEY = os.environ.get("GROK_PROXY_API_KEY", "").strip()
+GROK_REASONING_EFFORT = os.environ.get("GROK_REASONING_EFFORT", "low").strip().lower() or "low"
+GROK_TIMEOUT_SECONDS = max(2.0, float(os.environ.get("GROK_TIMEOUT_SECONDS", "45")))
 _REASONING_TAGS = {"think", "analysis", "reasoning"}
 
 
@@ -179,6 +186,45 @@ def _is_compaction_request(messages: list[dict]) -> bool:
     )
 
 
+def _is_exact_speech_request(messages: list[dict]) -> bool:
+    """Fixed TTS readouts do not need a remote reasoning-model request."""
+    return any(
+        "只逐字朗读用户提供的文字" in str(message.get("content", ""))
+        for message in messages
+    )
+
+
+def _is_fast_discovery_turn(payload: dict) -> bool:
+    """Use the resident model for the lightweight first turn.
+
+    The first turn can either answer ordinary conversation immediately or ask
+    for external capabilities.  Once a capability result exists, subsequent
+    research and synthesis return to the stronger remote model.
+    """
+    tools = [tool for tool in payload.get("tools") or [] if isinstance(tool, dict)]
+    names = {str(tool.get("name") or "") for tool in tools}
+    if names != {"request_external_capabilities"}:
+        return False
+    return not any(
+        isinstance(item, dict) and item.get("type") == "function_call_output"
+        for item in payload.get("input") or []
+    )
+
+
+def _is_fast_conversation_followup(payload: dict) -> bool:
+    """Keep the post-router ordinary reply local; research still uses Grok."""
+    if payload.get("tools"):
+        return False
+    for item in reversed(payload.get("input") or []):
+        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+            continue
+        output = item.get("output")
+        if not isinstance(output, str):
+            output = json.dumps(output or {}, ensure_ascii=False)
+        return '"route": "conversation_fast"' in output or '"route":"conversation_fast"' in output
+    return False
+
+
 def local_compaction(messages: list[dict]) -> str:
     """Compatibility wrapper used by tests and the Responses API handler."""
     return _local_compaction(messages, COMPACTION_MAX_CHARS)
@@ -212,6 +258,43 @@ def ollama_chat(model: str, messages: list[dict], stream: bool, tools: list[dict
         method="POST",
     )
     return urlopen(req, timeout=120)
+
+
+def grok_response(payload: dict):
+    """Forward one Responses API request to the private Grok OAuth proxy.
+
+    The public application continues to address this shim with its logical
+    model name.  Provider-specific model rewriting happens only here, so the
+    same request can safely fall back to the local Ollama model.
+    """
+    forwarded = dict(payload)
+    forwarded["model"] = GROK_MODEL
+    forwarded.setdefault("reasoning", {"effort": GROK_REASONING_EFFORT})
+    headers = {"Content-Type": "application/json", "Accept": "text/event-stream" if forwarded.get("stream") else "application/json"}
+    if GROK_API_KEY:
+        headers["Authorization"] = f"Bearer {GROK_API_KEY}"
+    request = Request(
+        f"{GROK_BASE_URL}/responses",
+        data=json.dumps(forwarded, ensure_ascii=False).encode(),
+        headers=headers,
+        method="POST",
+    )
+    return urlopen(request, timeout=GROK_TIMEOUT_SECONDS)
+
+
+def response_output_text(payload: dict) -> str:
+    """Derive the SDK-style output_text helper from a raw Responses result."""
+    direct = payload.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return clean_model_output(direct)
+    parts: list[str] = []
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content") or []:
+            if isinstance(content, dict) and content.get("type") == "output_text":
+                parts.append(str(content.get("text") or ""))
+    return clean_model_output("".join(parts))
 
 
 def _function_call_item(call: dict) -> dict:
@@ -296,6 +379,8 @@ class Handler(BaseHTTPRequestHandler):
                 for m in data.get("models") or []
                 if m.get("name")
             ]
+            if GROK_ENABLED:
+                models.insert(0, {"id": GROK_MODEL, "object": "model", "owned_by": "xai"})
             body = json.dumps({"object": "list", "data": models}).encode()
             self._send(200, body, "application/json")
             return
@@ -312,12 +397,75 @@ class Handler(BaseHTTPRequestHandler):
         messages = to_messages(req.get("input"))
         tools = to_ollama_tools(req.get("tools"))
         want_stream = bool(req.get("stream"))
+        fast_discovery = _is_fast_discovery_turn(req)
+        fast_conversation = _is_fast_conversation_followup(req)
+        if fast_discovery:
+            # Routing must not see old prices/news from memory: that made an
+            # ordinary "I'm back" continuation request web access.  The full
+            # history remains in the original request for the answer turn.
+            current = next(
+                (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
+                "",
+            )
+            current = current.split("\n\n【", 1)[0].strip()
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Route only; do not answer. Call request_external_capabilities once. "
+                        "Use conversation for chat, roleplay, opinions or continuation. Use the smallest "
+                        "external set only for current facts, news, prices, lookup or verification."
+                    ),
+                },
+                {"role": "user", "content": current},
+            ]
 
         if COMPACTION_MODE == "local" and _is_compaction_request(messages):
             text = local_compaction(messages)
             out = completed_response(model, text, 0, 0)
             self._send(200, json.dumps(out, ensure_ascii=False).encode(), "application/json")
             return
+
+        # Grok is the high-quality primary provider.  Connection, DNS, OAuth,
+        # quota, and 5xx failures fall back before any response headers are
+        # emitted, preserving the existing local low-latency path.
+        if (
+            GROK_ENABLED
+            and not _is_exact_speech_request(messages)
+            and not fast_discovery
+            and not fast_conversation
+        ):
+            try:
+                upstream = grok_response(req)
+                if not want_stream:
+                    with upstream:
+                        data = json.loads(upstream.read())
+                    data["output_text"] = response_output_text(data)
+                    has_tool_call = any(
+                        isinstance(item, dict) and item.get("type") == "function_call"
+                        for item in data.get("output") or []
+                    )
+                    if data.get("status") != "completed" or not (data["output_text"] or has_tool_call):
+                        raise RuntimeError("Grok returned no completed answer")
+                    self._send(200, json.dumps(data, ensure_ascii=False).encode(), "application/json")
+                    return
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                with upstream:
+                    while True:
+                        chunk = upstream.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                return
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+                print(f"[thinkless] Grok unavailable, using local fallback: {type(exc).__name__}: {exc}", flush=True)
 
         if not want_stream:
             with ollama_chat(model, messages, False, tools) as r:
@@ -472,7 +620,8 @@ def main():
         except Exception as exc:  # The HTTP service must still start for diagnostics/retry.
             print(f"Ollama prewarm failed: {exc!r}", flush=True)
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"thinkless proxy {HOST}:{PORT} -> {OLLAMA} (think=false)", flush=True)
+    primary = f", primary={GROK_BASE_URL}/{GROK_MODEL}" if GROK_ENABLED else ""
+    print(f"thinkless proxy {HOST}:{PORT} -> {OLLAMA} (think=false){primary}", flush=True)
     httpd.serve_forever()
 
 
