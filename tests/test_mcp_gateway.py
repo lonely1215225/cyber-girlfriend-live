@@ -2,6 +2,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import httpx
 
@@ -55,6 +56,20 @@ class LocalRssToolTests(unittest.IsolatedAsyncioTestCase):
             {"category": "科技", "source": "IT之家", "query": "今天的新闻"},
         )
         self.assertEqual(output, "科技:IT之家:今天的新闻")
+
+    async def test_smart_search_tools_are_exposed_when_configured(self):
+        with mock.patch.dict(
+            "os.environ", {"MCP_ENABLED": "0", "TAVILY_API_KEY": "tvly-test"}
+        ):
+            gateway = McpGateway()
+        gateway.rss_news.enabled = False
+        try:
+            tools = await gateway.list_tools()
+            names = {tool["name"] for tool in tools}
+            self.assertIn("smart_web_search", names)
+            self.assertIn("smart_web_fetch", names)
+        finally:
+            await gateway.close()
 
 
 if __name__ == "__main__":

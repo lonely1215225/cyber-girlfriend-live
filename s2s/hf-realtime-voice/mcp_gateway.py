@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from rss_news import RssNewsAggregator
+from smart_search import SmartSearchGateway
 
 
 logger = logging.getLogger("s2s.mcp")
@@ -160,6 +161,8 @@ class McpHttpClient:
 
 
 class McpGateway:
+    DISCOVERY_TOOL_NAME = "request_external_capabilities"
+
     def __init__(self) -> None:
         enabled = os.environ.get("MCP_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
         configs = []
@@ -188,11 +191,86 @@ class McpGateway:
         self._tools: list[dict[str, Any]] = []
         self._mapping: dict[str, tuple[McpHttpClient, str]] = {}
         self._tools_lock = asyncio.Lock()
+        self._price_http = httpx.AsyncClient(
+            base_url="https://api.coingecko.com/api/v3",
+            timeout=httpx.Timeout(5.0, connect=1.5),
+            headers={"accept": "application/json", "user-agent": "cyber-girlfriend-live/1.0"},
+        )
         self.rss_news = RssNewsAggregator()
+        self.smart_search = SmartSearchGateway()
 
     @property
     def enabled(self) -> bool:
-        return bool(self.clients) or self.rss_news.enabled
+        return bool(self.clients) or self.rss_news.enabled or self.smart_search.enabled
+
+    @classmethod
+    def discovery_tool(cls) -> dict[str, Any]:
+        """Expose one small capability request instead of every remote schema.
+
+        The model still decides whether external data is necessary.  This is
+        progressive tool disclosure: ordinary conversation does not pay for,
+        or get distracted by, the full remote tool registry.
+        """
+        return {
+            "type": "function",
+            "name": cls.DISCOVERY_TOOL_NAME,
+            "description": (
+                "Classify this turn: conversation, or the smallest external capability set needed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "capabilities": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["conversation", "web", "news", "market", "page", "knowledge"],
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "description": (
+                            "Use conversation when external data is unnecessary."
+                        ),
+                    }
+                },
+                "required": ["capabilities"],
+            },
+            "source": "tool-discovery",
+        }
+
+    async def tools_for_capabilities(self, capabilities: list[str]) -> list[dict[str, Any]]:
+        """Return a compact, non-duplicated tool set for model-selected capabilities."""
+        requested = {str(item).strip().lower() for item in capabilities}
+        tools = await self.list_tools()
+        by_name = {str(tool.get("name") or ""): tool for tool in tools}
+        selected: list[dict[str, Any]] = []
+
+        def add(name: str) -> None:
+            tool = by_name.get(name)
+            if tool is not None and tool not in selected:
+                selected.append(tool)
+
+        if requested & {"web", "news"}:
+            add("smart_web_search")
+        if "news" in requested:
+            add("local_rss_news")
+            for tool in tools:
+                if str(tool.get("source") or "") == "gdelt" and tool not in selected:
+                    selected.append(tool)
+        if "market" in requested:
+            add("mcp_coingecko_price")
+        if "page" in requested:
+            add("smart_web_fetch")
+        if "knowledge" in requested:
+            # Unknown/custom MCP servers are document or domain capabilities.
+            # Exa and CoinGecko raw tools are intentionally omitted because
+            # their compact adapters above provide the same operation.
+            for tool in tools:
+                source = str(tool.get("source") or "")
+                if source not in {"coingecko", "exa", "gdelt", "rss", "smart-search", "jina-reader"}:
+                    if tool not in selected:
+                        selected.append(tool)
+        return [dict(tool) for tool in selected]
 
     async def list_tools(self, *, refresh: bool = False) -> list[dict[str, Any]]:
         async with self._tools_lock:
@@ -228,6 +306,7 @@ class McpGateway:
                             "description": f"[{client.config.label} MCP] {raw.get('description') or original_name}",
                             "parameters": schema,
                             "source": client.config.key,
+                            "progress_text": "我正在查询外部资料，核对完就告诉你呀。",
                         }
                     )
                     mapping[public_name] = (client, original_name)
@@ -267,15 +346,59 @@ class McpGateway:
                             "required": ["query"],
                         },
                         "source": "rss",
+                        "progress_text": "我正在翻看最新资讯，马上整理给你呀。",
                     }
                 )
-            # CoinGecko's official server exposes a powerful generic `execute`
-            # tool, but small local models frequently omit its required
-            # TypeScript `run(client)` wrapper. Give the model a narrow,
-            # deterministic price operation while still executing it through
-            # the official CoinGecko MCP server underneath.
+            if self.smart_search.search_enabled:
+                tools.append(
+                    {
+                        "type": "function",
+                        "name": "smart_web_search",
+                        "description": (
+                            "查询当前互联网并返回经过清洗的结构化结果。适用于实时事实、网页资料、"
+                            "非 RSS 新闻和需要联网核实的问题；不要用它查询币价。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "description": "具体、完整的查询问题。"},
+                                "topic": {
+                                    "type": "string", "enum": ["general", "news"],
+                                    "default": "general",
+                                },
+                                "limit": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
+                            },
+                            "required": ["query"],
+                        },
+                        "source": "smart-search",
+                        "progress_text": "我正在联网查找相关资料，再核对一下来源呀。",
+                    }
+                )
+            if self.smart_search.fetch_enabled:
+                tools.append(
+                    {
+                        "type": "function",
+                        "name": "smart_web_fetch",
+                        "description": "读取一个公开网页的正文。仅在搜索摘要不足以回答时使用。",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "description": "搜索结果给出的公开 HTTP(S) URL。"},
+                                "max_chars": {
+                                    "type": "integer", "minimum": 1000, "maximum": 12000, "default": 5000,
+                                },
+                            },
+                            "required": ["url"],
+                        },
+                        "source": "jina-reader",
+                        "progress_text": "我正在打开相关页面确认细节，稍等一下呀。",
+                    }
+                )
+            # CoinGecko's official server exposes a generic `execute` tool.
+            # This capability adapter supplies its required TypeScript wrapper
+            # while leaving the decision to use it entirely to the model.
             coingecko = self.clients.get("coingecko")
-            if coingecko and "mcp_coingecko_execute" in mapping:
+            if coingecko:
                 price_name = "mcp_coingecko_price"
                 tools.append(
                     {
@@ -301,6 +424,7 @@ class McpGateway:
                             "required": ["coin_id"],
                         },
                         "source": "coingecko",
+                        "progress_text": "我正在核对实时行情和币种，马上告诉你呀。",
                     }
                 )
                 mapping[price_name] = (coingecko, "__price__")
@@ -310,6 +434,17 @@ class McpGateway:
             return [dict(tool) for tool in tools]
 
     async def call(self, public_name: str, arguments: dict[str, Any]) -> str:
+        if public_name == "smart_web_search":
+            return await self.smart_search.search(
+                str(arguments.get("query") or ""),
+                topic=str(arguments.get("topic") or "general"),
+                limit=int(arguments.get("limit") or 5),
+            )
+        if public_name == "smart_web_fetch":
+            return await self.smart_search.fetch(
+                str(arguments.get("url") or ""),
+                max_chars=int(arguments.get("max_chars") or 5000),
+            )
         if public_name == "local_rss_news":
             category = str(arguments.get("category") or "").strip()
             if category == "全部":
@@ -327,25 +462,73 @@ class McpGateway:
             raise KeyError(public_name)
         client, original_name = target
         if original_name == "__price__":
-            coin_id = str(arguments.get("coin_id") or "bitcoin").strip().lower()
+            coin_id = str(arguments.get("coin_id") or "").strip().lower()
+            if not coin_id:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "missing_required_argument",
+                        "message": "coin_id is required; infer it from the user's actual subject before retrying",
+                    },
+                    ensure_ascii=False,
+                )
             currencies = str(arguments.get("vs_currencies") or "usd,cny").strip().lower()
             if not re.fullmatch(r"[a-z0-9-]{1,80}", coin_id):
                 raise ValueError("invalid CoinGecko coin id")
             if not re.fullmatch(r"[a-z0-9,-]{1,80}", currencies):
                 raise ValueError("invalid quote currencies")
+            async def fetch_rest() -> str:
+                response = await self._price_http.get(
+                    "/simple/price",
+                    params={"ids": coin_id, "vs_currencies": currencies},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, dict) and isinstance(payload.get(coin_id), dict):
+                    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                raise RuntimeError("CoinGecko REST returned no requested price")
+
             code = (
                 "async function run(client) { return await client.simple.price.get({ "
                 f"ids: {json.dumps(coin_id)}, vs_currencies: {json.dumps(currencies)}"
                 " }); }"
             )
-            result = await client.request(
-                "tools/call",
-                {
-                    "name": "execute",
-                    "arguments": {"code": code, "intent": "Get current cryptocurrency price"},
-                },
-            )
-            return _tool_output(result)
+
+            async def fetch_mcp() -> str:
+                result = await client.request(
+                    "tools/call",
+                    {
+                        "name": "execute",
+                        "arguments": {"code": code, "intent": "Get current cryptocurrency price"},
+                    },
+                )
+                output = _tool_output(result)
+                if not output or output.lower().startswith("mcp tool error:"):
+                    raise RuntimeError(output or "CoinGecko MCP returned no price")
+                return output
+
+            # Race CoinGecko's narrow REST endpoint and its official MCP
+            # endpoint. Network conditions vary; waiting for one to fail before
+            # starting the other made their latency add up.
+            pending = {asyncio.create_task(fetch_rest()), asyncio.create_task(fetch_mcp())}
+            errors: list[BaseException] = []
+            try:
+                while pending:
+                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    winner = ""
+                    for task in done:
+                        try:
+                            winner = winner or task.result()
+                        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+                            errors.append(exc)
+                    if winner:
+                        return winner
+                raise RuntimeError("; ".join(str(error) or type(error).__name__ for error in errors))
+            finally:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
         result = await client.request(
             "tools/call", {"name": original_name, "arguments": arguments}
         )
@@ -360,4 +543,9 @@ class McpGateway:
             logger.warning("MCP warmup failed: %s", exc)
 
     async def close(self) -> None:
-        await asyncio.gather(*(client.close() for client in self.clients.values()), return_exceptions=True)
+        await asyncio.gather(
+            *(client.close() for client in self.clients.values()),
+            self._price_http.aclose(),
+            self.smart_search.close(),
+            return_exceptions=True,
+        )
