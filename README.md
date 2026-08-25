@@ -22,7 +22,7 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 共享数字人直播 | 所有观众观看同一路 AVTR-1 HTTP-FLV 流，视频、声音和口型共用封装时钟 |
+| 共享数字人直播 | WebRTC/WHEP 优先、HTTP-FLV 自动回退；视频、声音和口型始终共用封装时钟 |
 | 多人在线房间 | 访客自动获得纯中文或纯英文随机名，可改名并查看当前在线观众 |
 | 公平连线队列 | 同一时刻仅一位观众连线，其余申请 FIFO 排队；超时、掉线和主动下线自动释放席位 |
 | 完整回复与手动打断 | 默认关闭自然语音打断，优先完整播放；数字人说话时点击中央圆圈仍可立即手动打断 |
@@ -60,7 +60,9 @@ flowchart LR
     W --> R[房间、队列、评论与鉴权]
     R -->|仅当前连线者| S[Speech-to-Speech]
     S --> STT[FunASR SenseVoice STT]
-    STT --> L[Ollama + Qwen LLM]
+    STT --> L[Responses LLM Router]
+    L -->|primary| GX[Grok 4.6]
+    L -. automatic fallback .-> O[Ollama + Qwen 9B]
     L <--> M[MCP Gateway]
     M --> C[CoinGecko]
     M --> E[Exa]
@@ -69,20 +71,23 @@ flowchart LR
     T --> P[音频 Tee / 预缓冲]
     P --> V[AVTR-1 Renderer]
     V --> F[H.264 + AAC HTTP-FLV]
-    F --> N
+    F --> X[FFmpeg H.264 直通 + Opus]
+    X --> Q[MediaMTX WHEP / WebRTC]
+    Q --> N
+    F -. 自动回退 .-> N
     N --> A
 ```
 
-音频不会在浏览器和数字人之间分别走两套播放器。TTS 音频进入 AVTR-1 后与视频一起封装为 HTTP-FLV，因此声音与口型使用同一个时间轴。网关同时生成“语音原轨”和“语音加背景音乐”两种时间戳一致的直播变体；每位观众可用 LIVE 旁的喇叭独立选择，关闭音乐不会影响数字人语音，也不会改变其他观众。根目录下的 MP3 作为纯音乐播放列表循环混入音乐变体；检测到数字人或连线用户说话时自动平滑降低音乐音量，音乐本身不会进入口型模型。`AVATAR_TEE_PREROLL_MS` 提供首包预缓冲，降低网络或推理抖动造成的半句丢失。
+音频不会在浏览器和数字人之间分别走两套播放器。TTS 音频进入 AVTR-1 后先与视频共用同一个封装时钟，再以 H.264 Baseline + Opus 发布到 MediaMTX。浏览器优先通过 WHEP 建立 WebRTC，使用 RTP 抖动缓冲、NACK、Opus FEC 和弱网统计；协商或 ICE 失败时自动回退到原有 HTTP-FLV。网关同时生成“语音原轨”和“语音加背景音乐”两种时间戳一致的直播变体；每位观众可用 LIVE 旁的喇叭独立选择，关闭音乐不会影响数字人语音，也不会改变其他观众。`AVATAR_TEE_PREROLL_MS` 提供整轮首播水位，欠载后动态提高恢复水位，连续稳定时再逐步回落。AVTR 仍按五帧一批推理，但发布层固定输出 25 FPS；推理偶尔迟到时复用上一张原始帧补齐时间轴，不再向 WebRTC 发送断裂的视频节拍。
 
 ## 技术栈
 
 - **Web / 房间服务：** FastAPI、Uvicorn、原生 JavaScript、SSE、WebSocket
 - **公网入口：** Nginx、HTTPS、自签名证书
 - **语音识别：** FunASR `SenseVoiceSmall` + Silero VAD（中/英/粤/日/韩）
-- **大语言模型：** Ollama + `jaahas/qwen3.5-uncensored:9b`
+- **大语言模型：** 可选 Grok 4.6 主模型 + Ollama `jaahas/qwen3.5-uncensored:9b` 自动降级
 - **语音合成：** Qwen3-TTS 1.7B，支持参考音频音色克隆
-- **数字人渲染：** AVTR-1、TensorRT、H.264/AAC、HTTP-FLV
+- **数字人渲染与分发：** AVTR-1、TensorRT、H.264/Opus、MediaMTX WebRTC/WHEP、HTTP-FLV 回退
 - **工具调用：** Streamable HTTP MCP（CoinGecko、Exa、GDELT）
 - **运行环境：** Ubuntu、Python 3.12、CUDA 12.8、Pixi、uv
 
@@ -97,7 +102,7 @@ flowchart LR
 | GPU | NVIDIA Ampere 或更新架构；推荐 RTX 4090 / 24 GB 显存级别 |
 | 驱动 | 可用的 NVIDIA 驱动；安装器按 CUDA 12.8 环境构建 AVTR-1 TensorRT 引擎 |
 | 磁盘 | 建议预留约 80 GB，用于依赖、模型、缓存和 TensorRT 产物 |
-| 网络 | 首次安装需要访问 Hugging Face、Ollama 模型仓库和系统软件源 |
+| 网络 | 首次安装需要访问模型仓库；公网需开放 `19800/TCP`、`8189/UDP`，建议同时开放 `8190/TCP` |
 
 > 首次安装耗时主要取决于模型下载速度和 TensorRT 引擎编译速度。不同 GPU 架构生成的 TensorRT 引擎不建议直接跨机器复制。
 
@@ -142,6 +147,8 @@ sudo -E ./install.sh
 
 浏览器访问 `https://你的公网IP:19800/`。首次访问需要接受自签名证书提示并允许浏览器使用麦克风。页面加载后即可观看直播；申请连线后，排到队首并确认即可开始语音交流。
 
+WebRTC 媒体默认使用 `8189/UDP`，`8190/TCP` 是 UDP 被封时的次级 ICE 通道。Docker 部署必须同时发布这些端口，例如 `-p 19800:19800 -p 8189:8189/udp -p 8190:8190`；只发布网页端口时页面仍能打开，但播放器会自动退回 HTTP-FLV。
+
 ### 4. 运维命令
 
 ```bash
@@ -177,6 +184,12 @@ sudo -E ./install.sh
 | `LLM_NAME` | `jaahas/qwen3.5-uncensored:9b` | Ollama 模型名 |
 | `LLM_NUM_CTX` | `4096` | 模型上下文窗口 token 数 |
 | `LLM_NUM_PREDICT` | `128` | 普通回复最大生成 token 数 |
+| `GROK_ENABLED` | `0` | 使用本机 Grok CLI OAuth 会话作为高质量主模型；异常时自动降级到 Ollama |
+| `GROK_PROXY_BASE_URL` | `http://127.0.0.1:18080/v1` | 私有 Grok Responses 代理地址，只应监听 loopback |
+| `GROK_MODEL` | `grok-4.6` | Grok 主模型名称 |
+| `GROK_REASONING_EFFORT` | `low` | 实时直播工具循环的默认推理强度 |
+| `GROK_MAX_CONCURRENCY_PER_ACCOUNT` | `2` | 同一订阅最多并行请求数；过程朗读和记忆压缩不会占用 Grok |
+| `AGENT_TIMEZONE` | `Asia/Shanghai` | 传给模型的当前时间所属时区，供“今天、当前、最新”等问题使用 |
 | `LLM_CHAT_SIZE` | `12` | 保留的近期用户轮次数 |
 | `LLM_STREAM_BATCH_SENTENCES` | `1` | LLM 每生成一个完整中文句子就交给 TTS；不等待整段回复 |
 | `LLM_COMPACTION_MODE` | `local` | 第一层压缩模式；默认本地规则提取，不占用模型推理 |
@@ -189,7 +202,40 @@ sudo -E ./install.sh
 
 模型代理会流式移除 `<think>`、`<analysis>` 和 `<reasoning>` 等推理片段，避免它们出现在公屏或被 TTS 读出。每次连线的短期记忆相互隔离，避免不同观众之间串线。
 
+可选 Grok 链路使用官方 Grok CLI 完成设备授权，再由社区兼容代理把当前服务器上的 OAuth 会话转换为仅本机可访问的 Responses API。凭据和刷新状态必须放在项目目录之外并保持 `0600` 权限，不能提交 Git，也不能把代理端口暴露到公网。该方式依赖消费级订阅及非官方兼容层，适合自有账号的内部试用；公开、多租户或商业部署应优先使用 xAI 官方 API。启用前在服务器执行 `grok login --device-auth`，安装并审计兼容代理后设置 `GROK_ENABLED=1`。DNS、授权、额度、限流或上游 5xx 都会在回答开始前自动回退本地模型。
+
 跨连线记忆保存在 SQLite：匿名观众由长期 HttpOnly 随机会话识别，改名结果、最终公屏消息和完整语音转写在服务重启后仍可恢复。程序会从用户自己说过的内容中提取称呼、喜好、不喜欢、所在地和身份等结构化事实，同时使用 SQLite FTS5 trigram 索引进行轻量 RAG 检索。连线时只注入该用户最近对话和结构化事实；`@小麻` 评论会根据当前问题检索该用户自己的相关历史。其他观众的记录不会进入个人记忆上下文，流式半句话也不会落库。
+
+### 联网智能搜索
+
+联网查询不再由关键词规则预判问题类型。模型会看到 CoinGecko、RSS、Tavily/Exa/SearXNG 与 Jina Reader 的能力说明，自主决定是否调用、调用顺序及是否继续读取网页正文；程序只负责权限、参数校验、并发、超时、结果裁剪和循环上限。
+
+```dotenv
+# 主搜索：每月 1000 免费 credits，无需信用卡
+TAVILY_API_KEY=tvly-...
+
+# 备用搜索：免费账户包含注册及每月赠送额度
+EXA_API_KEY=...
+
+# 网页正文提取；不填也可尝试 Jina 的低频匿名额度
+JINA_API_KEY=jina_...
+
+# 可选的自建 SearXNG，例如 http://127.0.0.1:8080
+SEARXNG_URL=
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `TAVILY_API_KEY` | 空 | Tavily 主搜索 Key；申请地址：<https://app.tavily.com/> |
+| `EXA_API_KEY` | 空 | Exa 备用搜索 Key；申请地址：<https://dashboard.exa.ai/api-keys> |
+| `JINA_API_KEY` | 空 | Jina Reader Key；申请地址：<https://jina.ai/api-dashboard/key-manager> |
+| `SEARXNG_URL` | 空 | 自建 SearXNG 根地址；为空时跳过 |
+| `JINA_READER_ENABLED` | `1` | 是否允许读取搜索结果中的公开网页正文 |
+| `SMART_SEARCH_TIMEOUT_SECONDS` | `5` | 单个搜索供应商的超时时间 |
+| `SMART_SEARCH_CACHE_SECONDS` | `180` | 相同查询的结果缓存时间，减少免费额度消耗 |
+| `SMART_SEARCH_COOLDOWN_SECONDS` | `60` | 同一供应商连续失败后的熔断时间 |
+
+没有配置任何搜索 Key 时，项目仍能正常启动，并继续使用 RSS、CoinGecko 和已有 MCP。配置 Key 后运行 `./scripts/start.sh` 重启服务即可自动出现 `smart_web_search` 工具。Tavily 正常返回时不会再调用 Exa，避免一次提问同时消耗两家的免费额度；连续失败的来源会临时熔断并自动恢复。
 
 在线状态、连线排队和未完成回复仍只保存在内存，因为这些状态在进程重启后已经失效。管理员解锁采用数据库中的随机独立会话，每个浏览器分别授权、分别过期和撤销；全局形象修改会写入审计日志。
 
@@ -217,8 +263,18 @@ sudo -E ./install.sh
 | `TTS_TOP_P` | `0.85` | TTS 核采样范围 |
 | `TTS_DO_SAMPLE` | `1` | 保留自然采样；设为 `0` 会更固定但可能更机械 |
 | `TTS_REPETITION_PENALTY` | `1.05` | 声码重复惩罚 |
-| `AVATAR_TEE_PREROLL_MS` | `480` | 数字人直播音频预缓冲；必须覆盖 AVTR-1 约 405ms 的前瞻窗口 |
+| `AVATAR_TEE_PREROLL_MS` | `800` | 数字人整轮语音首播水位；必须覆盖 AVTR-1 约 405ms 的前瞻窗口和短时推理抖动 |
+| `AVTR1_AUDIO_REBUFFER_STEP_MS` | `200` | 一轮语音发生欠载后，动态恢复水位的递增步长 |
+| `AVTR1_AUDIO_MAX_BUFFER_MS` | `1400` | 动态语音水位上限；连续稳定三轮后会逐步回落 |
+| `AVTR1_OUTPUT_RESERVOIR_MS` | `480` | AVTR 渲染后的同步音画输出水位目标 |
+| `AVTR1_MAX_SPEECH_SECONDS` | `90` | 单轮数字人音频安全上限；主动新闻整轮预生成后播放，避免长播报裁掉开头 |
 | `AVTR1_H264_BITRATE` | `900000` | 直播视频码率，带宽不足时可适当降低 |
+| `WEBRTC_ENABLED` | `1` | WebRTC/WHEP 主播放；关闭后只使用 HTTP-FLV |
+| `WEBRTC_PUBLIC_HOST` | `PUBLIC_IP` | 写入 ICE candidate 的公网 IP 或域名 |
+| `WEBRTC_UDP_PORT` | `8189` | 首选 UDP/ICE 媒体端口，必须在宿主机和安全组放行 |
+| `WEBRTC_TCP_PORT` | `8190` | UDP 不可达时的 ICE/TCP 备用端口 |
+| `WEBRTC_OPUS_BITRATE` | `48000` | 数字人单声道 Opus 码率 |
+| `WEBRTC_PACKET_LOSS_PERCENT` | `5` | Opus 编码器预期丢包率，用于启用适量 in-band FEC |
 | `AVTR1_CFG_SELF_AUDIO` | `2.3` | 说话动作的音频引导强度 |
 | `AVTR1_CFG_OTHER_AUDIO` | `2.0` | 倾听动作的音频引导强度 |
 | `AVTR1_CFG_KP` | `3.0` | 原始人物关键点与身份姿态约束；过高可能显得僵硬 |
@@ -259,7 +315,7 @@ sudo -E ./install.sh
 
 TTS 首次启动会把 `REF_AUDIO` 和 `REF_TEXT` 注册为不可删除的系统默认音色。管理员可在独立的“音色管理”中上传或录制 3～30 秒参考音频，服务端会解码、裁剪首尾静音、响度归一化并检查无声与削波；没有填写参考文本时，会在直播空闲时复用已经加载的 SenseVoice 异步识别，管理员校正并确认逐字文本后才能绑定。音频存放在权限受限且不公开静态访问的 `data/voices/`，浏览器和会话只使用不可伪造的 `voice_asset:<uuid>` 令牌。Qwen3-TTS 每次合成前解析当前角色音色并复用参考特征缓存，因此角色切换不需要重新加载模型。SenseVoice 的短期情绪仍参与当前回复的语气规划；LLM 与 TTS 保持中文标点感知的句级流式管线。
 
-背景音乐由服务端一次解码，分别输出带音乐和不带音乐的 HTTP-FLV 音轨。把纯音乐 `.mp3` 放进 `BACKGROUND_MUSIC_DIR` 后重启服务即可加入播放列表；多首音乐会按文件名顺序播放，播完后从头循环。观众的开关偏好保存在自己的浏览器中，切换只会快速重连该观众的直播流。
+背景音乐由服务端一次解码，分别输出带音乐和不带音乐的时间戳一致音轨；两者均发布为 WebRTC Opus，并保留 HTTP-FLV 版本。把纯音乐 `.mp3` 放进 `BACKGROUND_MUSIC_DIR` 后重启服务即可加入播放列表；多首音乐会按文件名顺序播放，播完后从头循环。观众的开关偏好保存在自己的浏览器中，切换只会快速重连该观众选择的音轨。
 
 ### 主动欢迎与空闲话题
 
@@ -278,13 +334,13 @@ TTS 首次启动会把 `REF_AUDIO` 和 `REF_TEXT` 注册为不可删除的系统
 
 ## MCP 工具
 
-涉及“最新新闻、当前价格、涨跌原因”的 `@小麻` 评论不会依赖小模型自行决定是否调用工具：后端会先并行查询价格与新闻，在评论区显示查询状态，再把有时间戳的结果交给模型生成可直接播报的最终答案。
+`@小麻` 使用统一的模型原生工具循环，不再维护“价格、新闻、涨跌原因”等关键词路由。模型可连续进行最多三轮工具调用；同一轮的独立调用会并行执行，工具结果作为结构化观察返回给同一会话，再由模型决定继续查询还是给出答案。
 
 主动话题默认使用无需 API Key 的中文 AnyFeeder RSS 池：新闻类包括 iDaily 每日环球视野、中国新闻网国际新闻、澎湃新闻和人民日报；科技类包括极客公园、cnBeta 和 IT之家；知识类使用知乎日报。固定源采用受控并发拉取，单源失败只跳过该源，不会拖垮整批播报。Google News 查询 RSS 仅用于观众主动提出的具体新闻检索，不参与日常主动话题池。聚合器只保留标题、发布时间、简短摘要、来源和原文链接，按相关性与发布时间去重排序；不抓取或转载新闻全文。
 
-这套 RSS 池同时服务主动播报、评论区 `@小麻` 和连线语音。用户可以直接问“今天有什么科技新闻”“知乎日报有什么值得聊的”“说说人民日报最新内容”，后端会识别新闻/科技/知识类别及指定来源并筛选最新条目。语音请求采用确定性预取：识别到新闻意图后先取消模型的推测性回答，从受权限保护的 `/api/rss/query` 获取资料，再把结果注入同一轮回复；即使本地 LLM 没有主动调用工具，也不会凭训练知识回答实时新闻。`local_rss_news` 同时作为本地函数工具提供给对话模型，支持 `category`、`source`、`query` 和 `limit` 参数。
+这套 RSS 池同时服务主动播报、评论区 `@小麻` 和连线语音。`local_rss_news` 作为本地函数工具向模型提供 `category`、`source`、`query` 和 `limit` 参数；类别和来源由模型根据完整对话选择，而不是由后端关键词替模型猜测。
 
-需要联网或调用工具时采用两段式反馈。评论区会立即显示并播放一句随机确认话术，同时在后台查询；连线语音会先说完简短确认话术，再按队列播放最终答案。两段音频复用同一条实时会话，不会为确认话术额外占用语音槽。查询成功、部分来源失败或全部失败都会产生第二段明确结果，不允许只留下“我去查一下”便结束。确认话术播放期间查询已经并行开始，因此不会额外串行等待外部服务。若语音槽出现瞬时繁忙，评论任务会保留查询缓存并自动退避重试，不能把播报通道繁忙误报成价格或新闻工具被删除。
+工具真正开始执行时，直播间会显示并播放与工具能力对应的短进度反馈；如果模型已经主动说过自然反馈，只有实际调用超过 2.5 秒才追加一次。进度 TTS 与网络调用并行，不会先播完整句话再开始查询。工具返回后若模型仍只说“稍等、我再看看”，系统会要求它基于已返回资料立即完成回答；连续不完成则明确失败。任务状态继续写入 SQLite `agent_jobs`，连线开始时暂停并让出最高语音优先级。
 
 | 服务 | 工具能力 | 默认地址 |
 | --- | --- | --- |
@@ -293,11 +349,11 @@ TTS 首次启动会把 `REF_AUDIO` 和 `REF_TEXT` 注册为不可删除的系统
 | GDELT | 全球新闻检索 | `https://gdelt.caseyjhand.com/mcp` |
 | Tavily（可选） | 搜索与正文提取 | 通过 `MCP_TAVILY_URL` 配置 |
 
-完整新闻降级顺序为 RSS → Tavily（若配置）→ Exa → GDELT；价格和 MCP 新闻分别缓存 30 秒与 180 秒，RSS 查询缓存 120 秒，避免热门问题瞬间打满免费服务。可通过 `MCP_COINGECKO_URL`、`MCP_EXA_URL`、`MCP_GDELT_URL` 替换服务地址，或将带 API Key 的 Tavily MCP 地址填入 `MCP_TAVILY_URL`。单次工具结果默认限制为 `MCP_MAX_OUTPUT_CHARS=6000`，防止外部内容挤占全部模型上下文。
+模型可以在 RSS、智能搜索和网页读取之间自主选择；智能搜索内部支持 Tavily、Exa 与 SearXNG 的健康检查、短缓存和失败熔断。可通过 `MCP_COINGECKO_URL`、`MCP_EXA_URL`、`MCP_GDELT_URL` 替换服务地址。单次工具结果默认限制为 `MCP_MAX_OUTPUT_CHARS=6000`，防止外部内容挤占全部模型上下文。
 
 `NEWS_RSS_ENABLED` 和 `NEWS_GOOGLE_RSS_ENABLED` 可分别控制 RSS 聚合与查询型 RSS；默认只采用最近 72 小时的条目，可通过 `NEWS_RSS_MAX_AGE_HOURS` 调整。`NEWS_RSS_FEEDS` 可用 `来源名=https://...;来源名=https://...` 自定义订阅，并需在 `NEWS_RSS_ALLOWED_HOSTS` 中列出新增域名。RSS 只是信息入口，不等于内容没有版权；对外展示或商业使用时仍应保留来源署名并遵守各发布方条款。
 
-`MENTION_RESEARCH_TIMEOUT` 控制单个研究工具超时，`MENTION_PRICE_CACHE_SECONDS` 和 `MENTION_NEWS_CACHE_SECONDS` 控制短缓存。来源失败时会继续尝试后备方案；所有来源都失败时，数字人会明确说明无法核实，不会用旧知识猜测实时事实。
+每个工具使用自身超时与缓存设置；来源失败信息会作为工具结果返回模型，由模型决定改用其他来源或明确说明无法核实。
 
 只有当前连线者或被调度到的 `@小麻` 回复任务能够驱动工具调用；公开接口不能绕过房间权限直接替数字人调用工具。
 
@@ -324,6 +380,7 @@ cyber-girlfriend-live/
 ├── data/                           # 运行时 SQLite 用户与记忆数据库（不提交 Git）
 ├── proxy/
 │   ├── avtr1_gateway.py            # AVTR-1 会话、音画封装与 HTTP-FLV 网关
+│   ├── mediamtx.yml.tpl             # WHEP、ICE 端口与只读直播路径配置
 │   ├── s2s_with_avatar_tee.py      # TTS 音频分流、预缓冲与完整性控制
 │   ├── ollama_thinkless.py         # Ollama Responses 兼容及推理标签过滤
 │   ├── memory_compaction.py        # 本地结构化记忆压缩
@@ -366,14 +423,14 @@ s2s/.venv/bin/python -m unittest discover -s tests -v
 <details>
 <summary><strong>声音先出来，口型随后才动怎么办？</strong></summary>
 
-确认观众播放的是统一的 HTTP-FLV 流，而不是浏览器本地 TTS 音频；本项目默认已经使用统一音画链路。若服务器瞬时负载较高，可适当增大 `AVATAR_TEE_PREROLL_MS`，并检查 `logs/avatar_gw.log` 与 `logs/avtr1_renderer.log` 是否出现渲染积压。
+确认状态显示 WebRTC 或 HTTP-FLV 兼容模式，而不是浏览器本地 TTS 音频；两种模式均使用统一音画链路。若服务器瞬时负载较高，可适当增大 `AVATAR_TEE_PREROLL_MS`，并检查 `logs/avatar_gw.log` 与 `logs/avtr1_renderer.log` 是否出现渲染积压。
 
 </details>
 
 <details>
 <summary><strong>回复只播放了一半或像“丢包”怎么办？</strong></summary>
 
-先保持自然打断关闭，排除麦克风回声误触发；再检查公网下行、GPU 利用率和网关日志。降低 `AVTR1_H264_BITRATE` 可以减少直播带宽，但语音文本缺失通常还需要检查 LLM/TTS 是否提前结束，而不能只归因于公网带宽。
+先查看左上角状态是否为“兼容模式”：若是，说明 WebRTC 协商或 ICE 不通，应检查 `8189/UDP`、`8190/TCP` 的宿主机映射和安全组。WebRTC 模式可在 `window.AVATAR_STREAM_STATS` 查看丢包率、抖动、RTT、隐藏音频样本和冻结次数。仍然卡顿时再检查 GPU 利用率和 AVTR 网关日志；WebRTC 无法修复服务端已经发生的推理或渲染停顿。
 
 </details>
 
@@ -412,7 +469,7 @@ s2s/.venv/bin/python -m unittest discover -s tests -v
 - [ ] Redis 房间状态与多实例水平扩展
 - [ ] 管理员控制台与运行指标面板
 - [ ] 可选的持久化用户记忆与隐私控制
-- [ ] WebRTC / LL-HLS 等低延迟分发方案
+- [x] WebRTC/WHEP 主播放、弱网指标与 HTTP-FLV 自动回退
 - [ ] Docker / Compose 标准化部署
 - [ ] 更多语言、音色与数字人预设
 
