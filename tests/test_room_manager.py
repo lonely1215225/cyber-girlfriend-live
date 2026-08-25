@@ -106,6 +106,26 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
             await asyncio.gather(*self.room._disconnect_tasks.values(), return_exceptions=True)
 
+    async def test_presence_marks_arrival_but_not_sse_reconnect(self):
+        first, arrived = await self.room.subscribe_presence(self.alice.token)
+        self.assertTrue(arrived)
+        await self.room.unsubscribe(first)
+
+        reconnect, arrived = await self.room.subscribe_presence(self.alice.token)
+        self.assertFalse(arrived)
+        await self.room.unsubscribe(reconnect)
+        task = self.room._disconnect_tasks.pop(self.alice.token, None)
+        self.assertIsNotNone(task)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        returned, arrived = await self.room.subscribe_presence(self.alice.token)
+        self.assertTrue(arrived)
+        await self.room.unsubscribe(returned)
+        for pending in tuple(self.room._disconnect_tasks.values()):
+            pending.cancel()
+        await asyncio.gather(*self.room._disconnect_tasks.values(), return_exceptions=True)
+
     async def test_public_transcript_upserts_and_is_bounded(self):
         for index in range(MESSAGE_LIMIT + 2):
             await self.room.publish_transcript(

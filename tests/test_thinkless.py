@@ -13,6 +13,7 @@ from ollama_thinkless import (  # noqa: E402
     _is_fast_conversation_followup,
     _is_fast_discovery_turn,
     _is_fast_external_planning,
+    _is_room_welcome_request,
     clean_model_output,
     completed_response,
     local_compaction,
@@ -64,6 +65,13 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         ]
         self.assertTrue(_is_exact_speech_request(messages))
         self.assertFalse(_is_exact_speech_request([{"role": "user", "content": "现在多少钱？"}]))
+
+    def test_room_welcome_uses_fast_local_provider(self):
+        self.assertTrue(_is_room_welcome_request([
+            {"role": "system", "content": "你现在是直播间入场欢迎生成器。"},
+            {"role": "user", "content": "欢迎林清欢"},
+        ]))
+        self.assertFalse(_is_room_welcome_request([{"role": "user", "content": "普通聊天"}]))
 
     def test_translates_responses_api_tools_for_ollama(self):
         tools = to_ollama_tools(

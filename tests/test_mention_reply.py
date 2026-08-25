@@ -40,6 +40,56 @@ class FakeRoom:
 
 
 class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_welcome_queue_is_deduplicated_and_prioritized(self):
+        worker = MentionReplyWorker(FakeRoom(), mock.Mock(), "ws://unused")
+        worker.enqueue_proactive("讲一条新闻")
+        self.assertTrue(worker.enqueue_welcome(participant_id="p1", speaker="林清欢"))
+        self.assertFalse(worker.enqueue_welcome(participant_id="p1", speaker="林清欢"))
+        worker.enqueue({"id": "m1", "participant_id": "p2", "speaker": "Nova", "text": "@小麻 在吗"})
+        self.assertEqual(
+            [(item.welcome, item.proactive) for item in worker.pending],
+            [(False, False), (True, False), (False, True)],
+        )
+
+    async def test_welcome_uses_persona_without_loading_tools(self):
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+
+        class ToolsMustNotBeLoaded:
+            enabled = True
+            async def list_tools(self):
+                raise AssertionError("welcome must not load research tools")
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    '{"type":"response.audio_transcript.done","transcript":"林清欢，你一来，今晚的月亮都像偷偷调亮了一格呀。"}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+                self.sent = []
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def recv(self): return next(self.events)
+            async def send(self, message): self.sent.append(json.loads(message))
+
+        room, socket = RecordingRoom(), FakeWebSocket()
+        worker = MentionReplyWorker(
+            room, ToolsMustNotBeLoaded(), "ws://unused",
+            persona_provider=mock.AsyncMock(return_value="你叫小麻，性格甜美灵动。"),
+        )
+        worker.enqueue_welcome(participant_id="p1", speaker="林清欢")
+        with mock.patch("mention_reply.websockets.connect", return_value=socket):
+            await worker._respond(worker.pending.popleft())
+        session = next(item["session"] for item in socket.sent if item.get("type") == "session.update")
+        user_item = next(item for item in socket.sent if item.get("type") == "conversation.item.create")
+        self.assertIn("甜美灵动", session["instructions"])
+        self.assertIn("直播间入场欢迎生成器", session["instructions"])
+        self.assertIn("林清欢", user_item["item"]["content"][0]["text"])
+        self.assertEqual(room.items[-1]["text"], "林清欢，你一来，今晚的月亮都像偷偷调亮了一格呀。")
+        self.assertIsNone(room.items[-1]["reply_to"])
+
     async def test_only_one_proactive_room_topic_can_be_pending(self):
         worker = MentionReplyWorker(FakeRoom(), mock.Mock(), "ws://unused")
         self.assertTrue(worker.enqueue_proactive("讲一条新闻"))

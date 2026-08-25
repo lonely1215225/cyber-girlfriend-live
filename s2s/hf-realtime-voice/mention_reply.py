@@ -41,6 +41,7 @@ class MentionRequest:
     text: str
     prompt: str
     proactive: bool = False
+    welcome: bool = False
     session_busy_retries: int = 0
 
 
@@ -98,7 +99,11 @@ class MentionReplyWorker:
             return None
         if len(self.pending) >= self.max_queue:
             self.pending.popleft()
-        self.pending.append(request)
+        insert_at = next(
+            (index for index, pending in enumerate(self.pending) if pending.welcome or pending.proactive),
+            len(self.pending),
+        )
+        self.pending.insert(insert_at, request)
         self._wake.set()
         return len(self.pending)
 
@@ -116,6 +121,36 @@ class MentionReplyWorker:
                 proactive=True,
             )
         )
+        self._wake.set()
+        return True
+
+    def enqueue_welcome(self, *, participant_id: str, speaker: str) -> bool:
+        """Queue one LLM-generated arrival welcome ahead of idle broadcasts."""
+        message_id = f"welcome:{participant_id}:{int(time.time() * 1000)}"
+        if any(request.welcome and request.participant_id == participant_id for request in self.pending):
+            return False
+        if len(self.pending) >= self.max_queue:
+            disposable = next(
+                (index for index, request in enumerate(self.pending) if request.proactive or request.welcome),
+                None,
+            )
+            if disposable is None:
+                return False
+            del self.pending[disposable]
+        request = MentionRequest(
+            message_id=message_id,
+            participant_id=participant_id,
+            speaker=str(speaker or "新来的朋友")[:24],
+            text="",
+            prompt="生成一条入场欢迎词",
+            welcome=True,
+        )
+        # Priority: live call > @ reply > arrival welcome > idle news.
+        insert_at = next(
+            (index for index, pending in enumerate(self.pending) if pending.proactive),
+            len(self.pending),
+        )
+        self.pending.insert(insert_at, request)
         self._wake.set()
         return True
 
@@ -167,7 +202,7 @@ class MentionReplyWorker:
                     await asyncio.sleep(min(4.0, 0.75 * (2 ** request.session_busy_retries)))
                     self._wake.set()
                     continue
-                if not request.proactive:
+                if not request.proactive and not request.welcome:
                     await self.room.publish_agent_job({
                         "id": self._agent_job_id(request), "message_id": request.message_id,
                         "participant_id": request.participant_id, "speaker": request.speaker,
@@ -209,7 +244,7 @@ class MentionReplyWorker:
         return f"aj_{digest}"
 
     async def _reset_agent_job(self, request: MentionRequest) -> None:
-        if request.proactive:
+        if request.proactive or request.welcome:
             return
         await self.room.publish_agent_job({
             "id": self._agent_job_id(request), "message_id": request.message_id,
@@ -228,7 +263,7 @@ class MentionReplyWorker:
         round_finalized = False
         last_partial_at = 0.0
         reply_quote = self._reply_quote(request)
-        job = None if request.proactive else {
+        job = None if request.proactive or request.welcome else {
             "id": self._agent_job_id(request), "message_id": request.message_id,
             "participant_id": request.participant_id, "speaker": request.speaker,
             "prompt": request.prompt, "phase": "planning", "status_text": "正在理解你的问题",
@@ -271,7 +306,7 @@ class MentionReplyWorker:
         # audible before every broadcast.
         tools = (
             await self.mcp_gateway.list_tools()
-            if self.mcp_gateway.enabled and not request.proactive
+            if self.mcp_gateway.enabled and not request.proactive and not request.welcome
             else []
         )
         discovery_tool = self.mcp_gateway.discovery_tool() if tools else None
@@ -285,7 +320,7 @@ class MentionReplyWorker:
         }
         try:
             ws_url = self.ws_url
-            if request.proactive:
+            if request.proactive or request.welcome:
                 ws_url += ("&" if "?" in ws_url else "?") + "complete_audio=1"
             async with websockets.connect(
                 ws_url, max_size=None, ping_interval=20, ping_timeout=20
@@ -312,6 +347,14 @@ class MentionReplyWorker:
                 if request.proactive:
                     instructions += "现在是无人连线时的直播间主动播报，不要假装在回复某位观众。"
                     user_text = request.prompt
+                elif request.welcome:
+                    instructions += (
+                        "你现在是直播间入场欢迎生成器。观众刚进入直播间，请直接叫对方的名字，"
+                        "生成一句十二到四十五个汉字的中文口语欢迎词。必须符合当前角色甜美、灵动的性格，"
+                        "有一点撩人和让人心动的暧昧感，同时抽象、有趣、有画面感；每次临场创作，不套固定模板。"
+                        "只说一句，不用Markdown、表情、引号，不询问隐私，不低俗，不提AI、任务或系统。"
+                    )
+                    user_text = f"刚进入直播间的观众名字是“{request.speaker}”，现在欢迎对方。"
                 else:
                     user_text = f"直播间观众“{request.speaker}”评论：{request.prompt}"
                     memory, active_topic = await asyncio.gather(
@@ -680,7 +723,7 @@ class MentionReplyWorker:
 
     @staticmethod
     def _reply_quote(request: MentionRequest) -> dict[str, str] | None:
-        if request.proactive:
+        if request.proactive or request.welcome:
             return None
         return {
             "id": request.message_id,

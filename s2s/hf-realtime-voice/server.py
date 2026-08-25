@@ -1270,7 +1270,12 @@ async def room_events(request: Request):
         participant, _ = await _room_identity(request, create=False)
     except RoomError as exc:
         return _room_error(exc)
-    channel = await live_room.subscribe(participant.token)
+    channel, arrived = await live_room.subscribe_presence(participant.token)
+    if arrived:
+        mention_replies.enqueue_welcome(
+            participant_id=participant.id,
+            speaker=participant.display_name,
+        )
 
     async def stream():
         try:

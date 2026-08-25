@@ -262,8 +262,20 @@ class LiveRoom:
             return self._participant_public(participant)
 
     async def subscribe(self, token: str) -> asyncio.Queue:
+        channel, _ = await self.subscribe_presence(token)
+        return channel
+
+    async def subscribe_presence(self, token: str) -> tuple[asyncio.Queue, bool]:
+        """Subscribe and report a real room arrival exactly once.
+
+        EventSource reconnects and page refreshes briefly overlap or reuse the
+        disconnect grace task. Neither is a new arrival. Once the grace period
+        has elapsed, the same persisted user returning is an arrival again.
+        """
         async with self._lock:
             participant = self._require_locked(token)
+            reconnecting = token in self._disconnect_tasks
+            arrived = participant.connections == 0 and not reconnecting
             participant.connections += 1
             participant.last_seen = time.monotonic()
             task = self._disconnect_tasks.pop(token, None)
@@ -273,7 +285,7 @@ class LiveRoom:
             self._subscribers[channel] = token
             channel.put_nowait(self._snapshot_locked(token))
             self._broadcast_locked(skip=channel)
-            return channel
+            return channel, arrived
 
     async def unsubscribe(self, channel: asyncio.Queue) -> None:
         async with self._lock:

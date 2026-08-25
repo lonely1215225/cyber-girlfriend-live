@@ -194,6 +194,14 @@ def _is_exact_speech_request(messages: list[dict]) -> bool:
     )
 
 
+def _is_room_welcome_request(messages: list[dict]) -> bool:
+    """Arrival greetings are short creative work suited to the resident LLM."""
+    return any(
+        "直播间入场欢迎生成器" in str(message.get("content", ""))
+        for message in messages
+    )
+
+
 def _is_fast_discovery_turn(payload: dict) -> bool:
     """Use the resident model for the lightweight first turn.
 
@@ -257,6 +265,8 @@ def ollama_chat(model: str, messages: list[dict], stream: bool, tools: list[dict
     num_predict = int(os.environ.get("LLM_NUM_PREDICT", "128"))
     if _is_compaction_request(messages):
         num_predict = COMPACTION_NUM_PREDICT
+    elif _is_room_welcome_request(messages):
+        num_predict = min(num_predict, 48)
     payload = {
             "model": model,
             "messages": messages,
@@ -420,6 +430,7 @@ class Handler(BaseHTTPRequestHandler):
         fast_discovery = _is_fast_discovery_turn(req)
         fast_conversation = _is_fast_conversation_followup(req)
         fast_external_planning = _is_fast_external_planning(req)
+        fast_welcome = _is_room_welcome_request(messages)
         if fast_discovery:
             # Routing must not see old prices/news from memory: that made an
             # ordinary "I'm back" continuation request web access.  The full
@@ -467,6 +478,7 @@ class Handler(BaseHTTPRequestHandler):
             and not fast_discovery
             and not fast_conversation
             and not fast_external_planning
+            and not fast_welcome
         ):
             try:
                 upstream = grok_response(req)
