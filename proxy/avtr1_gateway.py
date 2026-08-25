@@ -24,6 +24,19 @@ PORT = int(os.environ.get("AVATAR_GW_PORT", "18011"))
 AVATAR_ID = os.environ.get("AVTR1_AVATAR_ID", "xiaoya_locket")
 BG_ID = os.environ.get("AVTR1_BG_ID", "plain_white")
 H264_BITRATE = int(os.environ.get("AVTR1_H264_BITRATE", "1800000"))
+SPEECH_START_BUFFER_MS = max(
+    420, int(os.environ.get("AVATAR_TEE_PREROLL_MS", "800"))
+)
+SPEECH_REBUFFER_STEP_MS = max(
+    100, int(os.environ.get("AVTR1_AUDIO_REBUFFER_STEP_MS", "200"))
+)
+SPEECH_MAX_BUFFER_MS = max(
+    SPEECH_START_BUFFER_MS,
+    int(os.environ.get("AVTR1_AUDIO_MAX_BUFFER_MS", "1400")),
+)
+AV_OUTPUT_RESERVOIR_MS = max(
+    200, int(os.environ.get("AVTR1_OUTPUT_RESERVOIR_MS", "480"))
+)
 CFG_SELF_AUDIO = float(os.environ.get("AVTR1_CFG_SELF_AUDIO", "2.3"))
 CFG_OTHER_AUDIO = float(os.environ.get("AVTR1_CFG_OTHER_AUDIO", "2.0"))
 CFG_KP = float(os.environ.get("AVTR1_CFG_KP", "3.0"))
@@ -289,7 +302,12 @@ CURRENT_SAMPLES = CHUNK_SIZE * FRAME_LEN
 FUTURE_SAMPLES = CHUNK_SIZE * FRAME_LEN + AUDIO_SHIFT
 WINDOW_SAMPLES = CURRENT_SAMPLES + FUTURE_SAMPLES
 PCM_PACKET_BYTES = 640
-MAX_SPEECH_BYTES = SAMPLE_RATE * 2 * 30
+MAX_SPEECH_SECONDS = max(30, int(os.environ.get("AVTR1_MAX_SPEECH_SECONDS", "90")))
+MAX_SPEECH_BYTES = SAMPLE_RATE * 2 * MAX_SPEECH_SECONDS
+SPEECH_START_BUFFER_BYTES = SAMPLE_RATE * 2 * SPEECH_START_BUFFER_MS // 1000
+SPEECH_MAX_BUFFER_BYTES = SAMPLE_RATE * 2 * SPEECH_MAX_BUFFER_MS // 1000
+SPEECH_REBUFFER_STEP_BYTES = SAMPLE_RATE * 2 * SPEECH_REBUFFER_STEP_MS // 1000
+OUTPUT_AV_TARGET_FRAMES = max(CHUNK_SIZE, AV_OUTPUT_RESERVOIR_MS // 40)
 
 last_frame_at = 0.0
 last_speech_input_at = 0.0
@@ -304,14 +322,38 @@ state_blob: bytes | None = None
 state_avatar_id: str | None = None
 speech_pcm = bytearray()
 speech_finished = False
+speech_turn_active = False
+speech_playing = False
+speech_rebuffering = False
+speech_output_ready = False
+speech_dynamic_buffer_bytes = SPEECH_START_BUFFER_BYTES
+speech_turn_underruns = 0
+speech_buffer_underruns = 0
+speech_silence_inserted_ms = 0
+speech_turns_completed = 0
+speech_stable_turns = 0
+last_tts_metrics: dict[str, float | int] = {}
 listen_pcm = bytearray()
 buf_lock = asyncio.Lock()
 # Queue -> whether this viewer requested the mixed background-music variant.
 flv_subscribers: dict[asyncio.Queue, bool] = {}
-video_pace_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
-audio_pace_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+# A single frame queue keeps the rendered face and its exact 40ms audio slice
+# inseparable. Separate video/audio queues can drift when either side drops.
+av_pace_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
 h264_encoder: H264Encoder | None = None
 h264_bytes = 0
+video_epoch = 0
+video_frames_rendered = 0
+video_frames_published = 0
+video_frames_held = 0
+video_queue_drops = 0
+publisher_late_ticks = 0
+audio_output_underruns = 0
+render_batches = 0
+render_deadline_misses = 0
+render_errors = 0
+render_short_batches = 0
+render_durations_ms: deque[float] = deque(maxlen=900)
 renderer_session: aiohttp.ClientSession | None = None
 flv_muxer_music: FlvMuxer | None = None
 flv_muxer_voice: FlvMuxer | None = None
@@ -613,16 +655,18 @@ def publish_flv(data: bytes, *, music: bool) -> None:
             pass
 
 
-def enqueue_paced(q: asyncio.Queue, data) -> None:
-    if q.full():
+def enqueue_av_frame(data) -> None:
+    global video_queue_drops
+    if av_pace_queue.full():
         try:
-            q.get_nowait()
+            av_pace_queue.get_nowait()
+            video_queue_drops += 1
         except asyncio.QueueEmpty:
             pass
     try:
-        q.put_nowait(data)
+        av_pace_queue.put_nowait(data)
     except asyncio.QueueFull:
-        pass
+        video_queue_drops += 1
 
 
 def wav_to_pcm16(raw: bytes) -> bytes:
@@ -647,27 +691,69 @@ def wav_to_pcm16(raw: bytes) -> bytes:
 
 
 async def pace_av() -> None:
+    global h264_encoder, h264_bytes
+    global video_frames_published, video_frames_held, publisher_late_ticks
+    global audio_output_underruns, speech_output_ready
     loop = asyncio.get_running_loop()
     deadline = loop.time()
-    last_audio = b"\0" * PCM_PACKET_BYTES
+    last_video: tuple[int, bytes, int, int] | None = None
+    active_epoch = -1
     while True:
-        try:
-            fresh_video = video_pace_queue.get_nowait()
-        except asyncio.QueueEmpty:
-            fresh_video = None
-        if fresh_video:
-            packets = fresh_video
+        now = loop.time()
+        if now - deadline > 0.06:
+            publisher_late_ticks += 1
+            # Never burst several overdue frames: restart the wall clock while
+            # preserving FLV/RTP timestamps at an exact 40ms cadence.
+            deadline = now
+        # Rendering owns 200ms batches while publishing owns a strict 40ms
+        # clock. Hold the previous silent/idle frame until enough synchronized
+        # speech frames are ready; then transient >200ms inference spikes are
+        # absorbed without putting silence between spoken words.
+        if speech_playing and not speech_output_ready:
+            if av_pace_queue.qsize() >= OUTPUT_AV_TARGET_FRAMES:
+                speech_output_ready = True
+            else:
+                fresh = None
+        if not speech_playing or speech_output_ready:
+            try:
+                fresh = av_pace_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                fresh = None
+
+        audio_chunks = (bytes(PCM_PACKET_BYTES), bytes(PCM_PACKET_BYTES))
+        if fresh is not None:
+            epoch, raw, width, height, audio_chunks = fresh
+            if epoch != active_epoch:
+                active_epoch = epoch
+                h264_encoder = None
+                last_video = None
+            last_video = (epoch, raw, width, height)
+        elif last_video is not None:
+            video_frames_held += 1
+            if speech_playing and speech_output_ready:
+                audio_output_underruns += 1
+
+        if last_video is not None:
+            _epoch, raw, width, height = last_video
+            if h264_encoder is None or (
+                h264_encoder.width,
+                h264_encoder.height,
+            ) != (width, height):
+                h264_encoder = H264Encoder(width, height)
+                print(
+                    f"[avtr1-gw] H.264 {width}x{height} 25fps bitrate={H264_BITRATE}",
+                    flush=True,
+                )
+            packets = h264_encoder.encode(raw)
+            h264_bytes += sum(len(packet) for packet, _ in packets)
+            video_frames_published += 1
             if flv_muxer_music is not None and flv_muxer_voice is not None:
                 for packet, keyframe in packets:
                     for tag in flv_muxer_music.video_tags(packet, keyframe):
                         publish_flv(tag, music=True)
                     for tag in flv_muxer_voice.video_tags(packet, keyframe):
                         publish_flv(tag, music=False)
-        for _ in range(2):
-            try:
-                last_audio = audio_pace_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                last_audio = b"\0" * len(last_audio)
+        for last_audio in audio_chunks:
             now = time.monotonic()
             ducked = (
                 bool(speech_pcm)
@@ -687,34 +773,86 @@ async def pace_av() -> None:
         await asyncio.sleep(max(0.0, deadline - loop.time()))
 
 
-def _window_from_speech(buf: bytearray) -> tuple[bytes, bytes, bytes]:
-    """Build an AVTR look-ahead window without discarding future speech.
+def _window_from_speech(buf: bytearray) -> tuple[bytes, bytes, bytes, bool]:
+    """Return one continuous 200ms speech slice plus AVTR look-ahead.
 
-    The renderer needs about 405 ms while only 200 ms is played per call. The
-    old short-buffer branch cleared everything, so a 300–400 ms TTS burst lost
-    the tail that had only been used as look-ahead. Hold partial live input;
-    after /audio-finish, drain it in 200 ms steps with zero padding.
+    Playback starts only after the whole-turn reservoir reaches its dynamic
+    watermark. If synthesis later falls behind, enter one rebuffering period
+    and wait for the reservoir to recover instead of alternating 200ms speech
+    and 200ms silence forever.
     """
-    global speech_finished
+    global speech_finished, speech_turn_active, speech_playing, speech_rebuffering
+    global speech_dynamic_buffer_bytes, speech_turn_underruns
+    global speech_buffer_underruns, speech_silence_inserted_ms
+    global speech_turns_completed, speech_stable_turns
+
+    def silence() -> tuple[bytes, bytes, bytes, bool]:
+        current = bytes(CURRENT_SAMPLES * 2)
+        return current, bytes(FUTURE_SAMPLES * 2), current, False
+
+    def finish_turn() -> None:
+        nonlocal buf
+        global speech_finished, speech_turn_active, speech_playing, speech_rebuffering
+        global speech_dynamic_buffer_bytes, speech_turn_underruns
+        global speech_turns_completed, speech_stable_turns
+        speech_finished = False
+        speech_turn_active = False
+        speech_playing = False
+        speech_rebuffering = False
+        speech_turns_completed += 1
+        if speech_turn_underruns == 0:
+            speech_stable_turns += 1
+            if speech_stable_turns >= 3:
+                speech_dynamic_buffer_bytes = max(
+                    SPEECH_START_BUFFER_BYTES,
+                    speech_dynamic_buffer_bytes - SPEECH_REBUFFER_STEP_BYTES,
+                )
+                speech_stable_turns = 0
+        else:
+            speech_stable_turns = 0
+        speech_turn_underruns = 0
+
     need = WINDOW_SAMPLES * 2
+    if not speech_turn_active and not buf:
+        return silence()
+
+    if not speech_playing:
+        if not buf and speech_finished:
+            finish_turn()
+            return silence()
+        if not speech_finished and len(buf) < speech_dynamic_buffer_bytes:
+            if speech_rebuffering:
+                speech_silence_inserted_ms += 200
+            return silence()
+        speech_playing = True
+        speech_rebuffering = False
+
     if len(buf) >= need:
         window = bytes(buf[:need])
         del buf[: CURRENT_SAMPLES * 2]
     elif not speech_finished:
-        silent_current = bytes(CURRENT_SAMPLES * 2)
-        return silent_current, bytes(FUTURE_SAMPLES * 2), silent_current
+        speech_playing = False
+        speech_rebuffering = True
+        speech_turn_underruns += 1
+        speech_buffer_underruns += 1
+        speech_silence_inserted_ms += 200
+        speech_dynamic_buffer_bytes = min(
+            SPEECH_MAX_BUFFER_BYTES,
+            speech_dynamic_buffer_bytes + SPEECH_REBUFFER_STEP_BYTES,
+        )
+        return silence()
     elif buf:
         window = bytes(buf[:need]) + bytes(max(0, need - len(buf)))
         consumed = min(len(buf), CURRENT_SAMPLES * 2)
         del buf[:consumed]
         if not buf:
-            speech_finished = False
+            finish_turn()
     else:
-        speech_finished = False
-        window = bytes(need)
+        finish_turn()
+        return silence()
     cur = window[: CURRENT_SAMPLES * 2]
     fut = window[CURRENT_SAMPLES * 2 :]
-    return cur, fut, cur
+    return cur, fut, cur, True
 
 
 def _window_from_listen(buf: bytearray) -> tuple[bytes, bytes]:
@@ -798,19 +936,20 @@ async def render_loop() -> None:
         connected, \
         state_blob, \
         state_avatar_id, \
-        h264_encoder, \
-        h264_bytes, \
         renderer_session
     global last_motion_audio_at
     global last_blink_at, next_blink_at, breath_mix
+    global render_batches, render_deadline_misses, render_errors, render_short_batches
+    global video_frames_rendered
     loop = asyncio.get_running_loop()
     while True:
         t0 = loop.time()
         try:
             async with buf_lock:
-                cur, fut, played = _window_from_speech(speech_pcm)
+                cur, fut, played, rendered_speech = _window_from_speech(speech_pcm)
                 listen_cur, listen_fut = _window_from_listen(listen_pcm)
                 avatar_id = AVATAR_ID
+                epoch = video_epoch
                 blob = state_blob if state_avatar_id == avatar_id else None
             now = time.monotonic()
             speech_active = _pcm_rms(cur, fut) >= MOTION_AUDIO_RMS
@@ -904,6 +1043,7 @@ async def render_loop() -> None:
                     body = await r.text()
                     print(f"[avtr1-gw] renderer {r.status}: {body[:300]}", flush=True)
                     connected = False
+                    render_errors += 1
                     async with buf_lock:
                         if state_avatar_id == avatar_id:
                             state_blob = None
@@ -916,44 +1056,61 @@ async def render_loop() -> None:
                 frame_len = int(r.headers["X-Frame-Length-Bytes"])
                 n_frames = int(r.headers["X-Num-Frames"])
                 body = await r.read()
+            elapsed = loop.time() - t0
+            render_batches += 1
+            render_durations_ms.append(elapsed * 1000.0)
+            if elapsed > 0.2:
+                render_deadline_misses += 1
+            if n_frames < CHUNK_SIZE:
+                render_short_batches += 1
             next_state = body[:state_len]
             frames = body[state_len:]
             async with buf_lock:
                 if AVATAR_ID == avatar_id:
                     state_blob = next_state
                     state_avatar_id = avatar_id
+                else:
+                    # The administrator switched profiles while this inference
+                    # was running. Never publish stale frames from the old face.
+                    continue
             for i in range(n_frames):
                 raw = frames[i * frame_len : (i + 1) * frame_len]
                 if len(raw) != frame_len:
                     break
-                if h264_encoder is None or (
-                    h264_encoder.width,
-                    h264_encoder.height,
-                ) != (w, h):
-                    h264_encoder = H264Encoder(w, h)
-                    print(
-                        f"[avtr1-gw] H.264 {w}x{h} 25fps bitrate={H264_BITRATE}",
-                        flush=True,
-                    )
-                packets = h264_encoder.encode(raw)
-                h264_bytes += sum(len(packet) for packet, _ in packets)
                 last_frame_at = time.time()
                 connected = True
-                enqueue_paced(video_pace_queue, packets)
+                video_frames_rendered += 1
                 off = i * 2 * PCM_PACKET_BYTES
-                enqueue_paced(
-                    audio_pace_queue,
-                    played[off : off + PCM_PACKET_BYTES] or bytes(PCM_PACKET_BYTES),
+                first_audio = (
+                    played[off : off + PCM_PACKET_BYTES]
+                    if rendered_speech
+                    else bytes(PCM_PACKET_BYTES)
                 )
-                enqueue_paced(
-                    audio_pace_queue,
+                second_audio = (
                     played[off + PCM_PACKET_BYTES : off + 2 * PCM_PACKET_BYTES]
-                    or bytes(PCM_PACKET_BYTES),
+                    if rendered_speech
+                    else bytes(PCM_PACKET_BYTES)
                 )
-            elapsed = loop.time() - t0
-            await asyncio.sleep(max(0.0, 0.2 - elapsed))
+                enqueue_av_frame(
+                    (
+                        epoch,
+                        raw,
+                        w,
+                        h,
+                        (
+                            first_audio or bytes(PCM_PACKET_BYTES),
+                            second_audio or bytes(PCM_PACKET_BYTES),
+                        ),
+                    )
+                )
+            # While a response is playing, use spare renderer capacity to keep
+            # a bounded synchronized A/V reservoir. TTS can synthesize the next
+            # sentence while the current sentence drains from this queue.
+            fill_reservoir = rendered_speech and av_pace_queue.qsize() < OUTPUT_AV_TARGET_FRAMES
+            await asyncio.sleep(0 if fill_reservoir else max(0.0, 0.2 - elapsed))
         except Exception as exc:
             connected = False
+            render_errors += 1
             async with buf_lock:
                 state_blob = None
                 state_avatar_id = None
@@ -963,11 +1120,24 @@ async def render_loop() -> None:
 
 async def append_speech(pcm: bytes) -> None:
     global last_speech_input_at, speech_finished
+    global speech_turn_active, speech_playing, speech_rebuffering, speech_turn_underruns
+    global speech_output_ready
     if not pcm:
         return
     last_speech_input_at = time.monotonic()
-    speech_finished = False
     async with buf_lock:
+        if not speech_turn_active:
+            speech_turn_active = True
+            speech_playing = False
+            speech_rebuffering = False
+            speech_turn_underruns = 0
+            speech_output_ready = False
+            while not av_pace_queue.empty():
+                try:
+                    av_pace_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+        speech_finished = False
         speech_pcm.extend(pcm)
         overflow = len(speech_pcm) - MAX_SPEECH_BYTES
         if overflow > 0:
@@ -1031,7 +1201,12 @@ async def _list_avatar_ids() -> tuple[list[str], list[str]]:
 
 
 async def handle_status(_request):
-    speaking = bool(speech_pcm) or time.monotonic() - last_speech_input_at < 1.6
+    def percentile(values: deque[float], value: float) -> float | None:
+        if not values:
+            return None
+        return round(float(np.percentile(np.asarray(values), value)), 2)
+
+    speaking = speech_turn_active or time.monotonic() - last_speech_input_at < 1.6
     music_ducked = speaking or time.monotonic() - last_user_voice_at < 0.8
     return web.json_response(
         {
@@ -1043,6 +1218,45 @@ async def handle_status(_request):
             else None,
             "speech_ms": int(len(speech_pcm) / 2 / SAMPLE_RATE * 1000),
             "speaking": speaking,
+            "audio_buffer": {
+                "state": (
+                    "playing"
+                    if speech_playing
+                    else "rebuffering"
+                    if speech_rebuffering
+                    else "buffering"
+                    if speech_turn_active
+                    else "idle"
+                ),
+                "queued_ms": int(len(speech_pcm) / 2 / SAMPLE_RATE * 1000),
+                "output_reservoir_ms": av_pace_queue.qsize() * 40,
+                "output_buffering": speech_playing and not speech_output_ready,
+                "watermark_ms": int(
+                    speech_dynamic_buffer_bytes / 2 / SAMPLE_RATE * 1000
+                ),
+                "start_watermark_ms": SPEECH_START_BUFFER_MS,
+                "max_watermark_ms": SPEECH_MAX_BUFFER_MS,
+                "underruns": speech_buffer_underruns,
+                "output_underruns": audio_output_underruns,
+                "inserted_silence_ms": speech_silence_inserted_ms,
+                "turns_completed": speech_turns_completed,
+                "last_tts": last_tts_metrics,
+            },
+            "render": {
+                "batches": render_batches,
+                "duration_p50_ms": percentile(render_durations_ms, 50),
+                "duration_p95_ms": percentile(render_durations_ms, 95),
+                "duration_p99_ms": percentile(render_durations_ms, 99),
+                "deadline_misses": render_deadline_misses,
+                "errors": render_errors,
+                "short_batches": render_short_batches,
+                "frames_rendered": video_frames_rendered,
+                "frames_published": video_frames_published,
+                "held_frames": video_frames_held,
+                "queue_drops": video_queue_drops,
+                "publisher_late_ticks": publisher_late_ticks,
+                "queue_frames": av_pace_queue.qsize(),
+            },
             "background_music": {
                 "enabled": background_music.available,
                 "track": background_music.track_name,
@@ -1112,7 +1326,9 @@ async def handle_avatars(_request):
 
 
 async def handle_set_avatar(request):
-    global AVATAR_ID, state_blob, state_avatar_id, h264_encoder, next_blink_at, speech_finished
+    global AVATAR_ID, state_blob, state_avatar_id, h264_encoder, next_blink_at
+    global speech_finished, speech_turn_active, speech_playing, speech_rebuffering
+    global speech_turn_underruns, speech_dynamic_buffer_bytes, speech_output_ready, video_epoch
     body = await request.json()
     avatar_id = str(body.get("avatar_id") or "").strip()
     if not avatar_id or "/" in avatar_id or ".." in avatar_id:
@@ -1126,20 +1342,26 @@ async def handle_set_avatar(request):
         AVATAR_ID = avatar_id
         speech_pcm.clear()
         speech_finished = False
+        speech_turn_active = False
+        speech_playing = False
+        speech_rebuffering = False
+        speech_turn_underruns = 0
+        speech_output_ready = False
+        speech_dynamic_buffer_bytes = SPEECH_START_BUFFER_BYTES
         listen_pcm.clear()
         state_blob = None
         state_avatar_id = None
         h264_encoder = None
+        video_epoch += 1
         # Show the newly selected portrait is alive soon after switching,
         # without blinking immediately on the first generated frame.
         blink_frames.clear()
         next_blink_at = time.monotonic() + random.uniform(1.2, 2.4)
-    for q in (video_pace_queue, audio_pace_queue):
-        while not q.empty():
-            try:
-                q.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+    while not av_pace_queue.empty():
+        try:
+            av_pace_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
     print(f"[avtr1-gw] avatar -> {AVATAR_ID}", flush=True)
     return web.json_response(
         {"ok": True, "avatar_id": AVATAR_ID, "label": _avatar_label(AVATAR_ID)}
@@ -1231,9 +1453,23 @@ async def handle_audio_chunk(request):
 
 
 async def handle_audio_finish(_request):
-    global speech_finished
+    global speech_finished, last_tts_metrics
     async with buf_lock:
         speech_finished = True
+        metrics: dict[str, float | int] = {}
+        for key in ("audio_ms", "generation_ms", "rtf", "chunks", "max_gap_ms"):
+            raw = _request.query.get(key)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if np.isfinite(value) and 0 <= value <= 3_600_000:
+                metrics[key] = round(value, 3)
+        # Direct WAV tests do not carry synthesis metrics; clear the previous
+        # turn rather than presenting stale TTS performance as current data.
+        last_tts_metrics = metrics
     return web.json_response({"ok": True, "remaining_bytes": len(speech_pcm)})
 
 
@@ -1253,17 +1489,23 @@ async def handle_listen_reset(_request):
 
 async def handle_interrupt(_request):
     global state_blob, last_speech_input_at, speech_finished
+    global speech_turn_active, speech_playing, speech_rebuffering, speech_turn_underruns
+    global speech_output_ready
     async with buf_lock:
         speech_pcm.clear()
         speech_finished = False
+        speech_turn_active = False
+        speech_playing = False
+        speech_rebuffering = False
+        speech_turn_underruns = 0
+        speech_output_ready = False
         state_blob = None
         last_speech_input_at = 0.0
-    for q in (video_pace_queue, audio_pace_queue):
-        while not q.empty():
-            try:
-                q.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+    while not av_pace_queue.empty():
+        try:
+            av_pace_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
     return web.json_response({"ok": True})
 
 
