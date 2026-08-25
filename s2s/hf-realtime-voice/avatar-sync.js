@@ -1,5 +1,5 @@
 /* ============================================================================
- * avatar-sync.js  —  AVTR-1 HTTP-FLV into a native <video> element
+ * avatar-sync.js  —  AVTR-1 WebRTC/WHEP with HTTP-FLV fallback
  *
  * TTS PCM is routed to AVTR-1 on the server. The browser only plays the
  * muxed live stream and never sends generated audio back upstream.
@@ -102,12 +102,39 @@
 
   let layer, idle, liveVideo, statusEl;
   let flvPlayer = null;
+  let peerConnection = null;
+  let whepSessionUrl = '';
+  let webrtcStatsHandle = null;
+  let streamConfig = null;
+  let webrtcRetryAfter = 0;
   let audioUnlocked = false;
   let connecting = false;
   let retryHandle = null;
   let watchdogHandle = null;
   let lastProgressAt = 0;
   let lastMediaTime = -1;
+  let webrtcFallbackReason = '';
+
+  function getPeerConnectionConstructor() {
+    // Current Chromium exposes RTCPeerConnection. The prefixed names keep the
+    // viewer usable in older Chromium/WebView shells still found on TVs and
+    // embedded Android browsers.
+    return window.RTCPeerConnection
+      || window.webkitRTCPeerConnection
+      || window.mozRTCPeerConnection
+      || null;
+  }
+
+  function describeWebRTCEnvironment() {
+    const diagnostics = {
+      supported: Boolean(getPeerConnectionConstructor()),
+      secureContext: Boolean(window.isSecureContext),
+      protocol: window.location.protocol,
+      topLevel: window.top === window.self,
+    };
+    window.AVATAR_WEBRTC_DIAGNOSTICS = diagnostics;
+    return diagnostics;
+  }
 
   function syncAudioRoute() {
     if (liveVideo) liveVideo.muted = !audioUnlocked;
@@ -127,8 +154,11 @@
     } else if (s === 'speaking') {
       label = '说话中';
       state = 'speaking';
-    } else if (s.includes('FLV') || s === 'connected') {
-      label = '已连接';
+    } else if (s.includes('弱网')) {
+      label = '弱网保护中';
+      state = 'connected';
+    } else if (s.includes('WebRTC') || s.includes('FLV') || s === 'connected') {
+      label = s.includes('FLV') ? '已连接 · 兼容模式' : '已连接';
       state = 'connected';
     } else if (s.includes('失败')) {
       label = '连接失败';
@@ -218,6 +248,20 @@
   }
 
   function destroyPlayer() {
+    if (webrtcStatsHandle) {
+      clearInterval(webrtcStatsHandle);
+      webrtcStatsHandle = null;
+    }
+    const pc = peerConnection;
+    peerConnection = null;
+    if (pc) {
+      try { pc.ontrack = null; pc.onconnectionstatechange = null; pc.close(); } catch (_) { /* ignore */ }
+    }
+    const sessionUrl = whepSessionUrl;
+    whepSessionUrl = '';
+    if (sessionUrl) {
+      fetch(sessionUrl, { method: 'DELETE', keepalive: true }).catch(() => {});
+    }
     const player = flvPlayer;
     flvPlayer = null;
     if (player) {
@@ -265,67 +309,216 @@
     }, 1500);
   }
 
+  async function avatarStreamConfig() {
+    if (streamConfig) return streamConfig;
+    const response = await fetch('/api/avatar-config', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`直播配置不可用 (${response.status})`);
+    streamConfig = await response.json();
+    return streamConfig;
+  }
+
+  function waitForIceGathering(pc, timeoutMs = 2500) {
+    if (pc.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve) => {
+      const timeout = setTimeout(done, timeoutMs);
+      function done() {
+        clearTimeout(timeout);
+        pc.removeEventListener('icegatheringstatechange', changed);
+        resolve();
+      }
+      function changed() {
+        if (pc.iceGatheringState === 'complete') done();
+      }
+      pc.addEventListener('icegatheringstatechange', changed);
+    });
+  }
+
+  function waitForPlayback(timeoutMs = 8000) {
+    return new Promise((resolve, reject) => {
+      let timeout = null;
+      const done = () => {
+        if (timeout) clearTimeout(timeout);
+        liveVideo.removeEventListener('playing', done);
+        resolve();
+      };
+      liveVideo.addEventListener('playing', done, { once: true });
+      timeout = setTimeout(() => {
+        liveVideo.removeEventListener('playing', done);
+        reject(new Error('直播首帧超时'));
+      }, timeoutMs);
+      liveVideo.play().catch(() => {
+        // A later user gesture will unlock audio; muted video normally starts
+        // immediately, so keep waiting for the real playing event here.
+      });
+      if (!liveVideo.paused && liveVideo.readyState >= 2) done();
+    });
+  }
+
+  function startWebRTCStats(pc) {
+    let previous = null;
+    if (webrtcStatsHandle) clearInterval(webrtcStatsHandle);
+    webrtcStatsHandle = setInterval(async () => {
+      if (peerConnection !== pc || pc.connectionState === 'closed') return;
+      try {
+        const reports = await pc.getStats();
+        const current = {
+          received: 0, lost: 0, bytes: 0, jitter: 0, rtt: 0,
+          decodedFrames: 0, droppedFrames: 0, freezes: 0,
+          concealedSamples: 0, at: Date.now(), transport: 'webrtc',
+        };
+        reports.forEach((report) => {
+          if (report.type === 'inbound-rtp' && !report.isRemote) {
+            current.received += Number(report.packetsReceived || 0);
+            current.lost += Math.max(0, Number(report.packetsLost || 0));
+            current.bytes += Number(report.bytesReceived || 0);
+            current.jitter = Math.max(current.jitter, Number(report.jitter || 0));
+            current.decodedFrames += Number(report.framesDecoded || 0);
+            current.droppedFrames += Number(report.framesDropped || 0);
+            current.freezes += Number(report.freezeCount || 0);
+            current.concealedSamples += Number(report.concealedSamples || 0);
+          } else if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+            current.rtt = Number(report.currentRoundTripTime || 0);
+          }
+        });
+        const packetDelta = previous
+          ? Math.max(0, current.received - previous.received) + Math.max(0, current.lost - previous.lost)
+          : 0;
+        current.lossRate = packetDelta
+          ? Math.max(0, current.lost - previous.lost) / packetDelta
+          : 0;
+        current.bitrate = previous
+          ? Math.max(0, current.bytes - previous.bytes) * 8 * 1000 / Math.max(1, current.at - previous.at)
+          : 0;
+        previous = current;
+        window.AVATAR_STREAM_STATS = current;
+        if (current.lossRate >= 0.08 || current.jitter >= 0.12) {
+          setStatus('AVTR-1 WebRTC · 弱网');
+        } else {
+          setStatus('AVTR-1 WebRTC');
+        }
+      } catch (_) { /* stats are diagnostic only */ }
+    }, 2000);
+  }
+
+  async function connectWebRTC(config) {
+    const PeerConnection = getPeerConnectionConstructor();
+    if (!PeerConnection) {
+      const diagnostics = describeWebRTCEnvironment();
+      const reason = diagnostics.secureContext
+        ? 'WebRTC 被浏览器设置、扩展或管理策略禁用'
+        : '当前页面未被浏览器视为安全连接，WebRTC 不可用';
+      throw new Error(reason);
+    }
+    if (!config?.whep) throw new Error('WHEP 地址未配置');
+    const endpoint = musicEnabled ? config.whep.music : config.whep.voice;
+    if (!endpoint) throw new Error('WHEP 地址未配置');
+    const pc = new PeerConnection({ bundlePolicy: 'max-bundle' });
+    peerConnection = pc;
+    const media = new MediaStream();
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    pc.addTransceiver('audio', { direction: 'recvonly' });
+    pc.ontrack = (event) => {
+      if (peerConnection !== pc) return;
+      media.addTrack(event.track);
+      liveVideo.srcObject = media;
+    };
+    pc.onconnectionstatechange = () => {
+      if (peerConnection !== pc) return;
+      if (pc.connectionState === 'failed') {
+        webrtcRetryAfter = Date.now() + 30000;
+        scheduleReconnect(200);
+      } else if (pc.connectionState === 'disconnected') {
+        setTimeout(() => {
+          if (peerConnection === pc && pc.connectionState === 'disconnected') scheduleReconnect(200);
+        }, 2500);
+      }
+    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitForIceGathering(pc);
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp', Accept: 'application/sdp' },
+      body: pc.localDescription.sdp,
+    });
+    if (response.status !== 201) {
+      throw new Error(`WHEP 协商失败 (${response.status})`);
+    }
+    const location = response.headers.get('Location');
+    if (location) whepSessionUrl = new URL(location, new URL(endpoint, window.location.href)).href;
+    await pc.setRemoteDescription({ type: 'answer', sdp: await response.text() });
+    liveVideo.muted = true;
+    await waitForPlayback(6000);
+    startWebRTCStats(pc);
+    return 'AVTR-1 WebRTC';
+  }
+
+  async function connectFLV() {
+    const mpegts = window.mpegts;
+    if (!mpegts?.isSupported?.() || !mpegts.createPlayer) throw new Error('当前浏览器不支持直播解码');
+    quietMpegts();
+    const player = mpegts.createPlayer({
+      type: 'flv', isLive: true,
+      url: `${gw()}/livestream.flv?music=${musicEnabled ? '1' : '0'}&t=${Date.now()}`,
+    }, {
+      enableStashBuffer: true,
+      stashInitialSize: 128 * 1024,
+      liveBufferLatencyChasing: true,
+      liveBufferLatencyMaxLatency: 2.4,
+      liveBufferLatencyMinRemain: 0.8,
+      lazyLoad: false,
+      autoCleanupSourceBuffer: true,
+      autoCleanupMaxBackwardDuration: 4,
+      autoCleanupMinBackwardDuration: 2,
+    });
+    flvPlayer = player;
+    liveVideo.muted = true;
+    player.attachMediaElement(liveVideo);
+    player.load();
+    const statsEvent = mpegts.Events?.STATISTICS_INFO;
+    if (statsEvent) player.on(statsEvent, (info) => {
+      window.AVATAR_STREAM_STATS = {
+        transport: 'http-flv', speed: Number(info?.speed || 0),
+        decodedFrames: Number(info?.decodedFrames || 0),
+        droppedFrames: Number(info?.droppedFrames || 0), at: Date.now(),
+      };
+    });
+    await waitForPlayback(8000);
+    return 'AVTR-1 HTTP-FLV';
+  }
+
   async function connect() {
     if (connecting) return;
     connecting = true;
-    if (retryHandle) {
-      clearTimeout(retryHandle);
-      retryHandle = null;
-    }
+    if (retryHandle) { clearTimeout(retryHandle); retryHandle = null; }
     setStatus('connecting…');
     destroyPlayer();
     try {
-      const mpegts = window.mpegts;
-      if (!mpegts?.isSupported?.() || !mpegts.createPlayer) {
-        throw new Error('当前浏览器不支持直播解码');
+      const config = await avatarStreamConfig();
+      let label = '';
+      if (config.transport === 'webrtc' && Date.now() >= webrtcRetryAfter) {
+        try {
+          label = await connectWebRTC(config);
+        } catch (err) {
+          console.warn('[avatar] WebRTC unavailable, falling back to FLV:', err);
+          webrtcFallbackReason = err?.message || String(err);
+          webrtcRetryAfter = Date.now() + 30000;
+          destroyPlayer();
+        }
       }
-      quietMpegts();
-      const player = mpegts.createPlayer({
-        type: 'flv',
-        isLive: true,
-        url: `${gw()}/livestream.flv?music=${musicEnabled ? '1' : '0'}&t=${Date.now()}`,
-      }, {
-        // A small bounded stash is smoother on real-world mobile/public
-        // networks than zero-buffer chasing. Audio and video stay muxed, so
-        // the added latency never changes lip-sync.
-        enableStashBuffer: true,
-        stashInitialSize: 128 * 1024,
-        liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 2.4,
-        liveBufferLatencyMinRemain: 0.8,
-        lazyLoad: false,
-        autoCleanupSourceBuffer: true,
-        autoCleanupMaxBackwardDuration: 4,
-        autoCleanupMinBackwardDuration: 2,
-      });
-      flvPlayer = player;
-      // Always establish playback muted first so reconnects remain eligible
-      // for autoplay even when they happen outside a user gesture. We restore
-      // audio immediately below when this page has already been unlocked.
-      liveVideo.muted = true;
-      player.attachMediaElement(liveVideo);
-      player.load();
-      const statsEvent = mpegts.Events?.STATISTICS_INFO;
-      if (statsEvent) {
-        player.on(statsEvent, (info) => {
-          window.AVATAR_STREAM_STATS = {
-            speed: Number(info?.speed || 0),
-            decodedFrames: Number(info?.decodedFrames || 0),
-            droppedFrames: Number(info?.droppedFrames || 0),
-            at: Date.now(),
-          };
-        });
-      }
+      if (!label) label = await connectFLV();
       lastMediaTime = -1;
       lastProgressAt = Date.now();
-      await Promise.race([
-        player.play().catch(() => {}),
-        new Promise((resolve) => liveVideo.addEventListener('playing', resolve, { once: true })),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('直播首帧超时')), 8000)),
-      ]);
       layer.classList.add('live');
       syncAudioRoute();
-      setStatus('AVTR-1 HTTP-FLV');
+      setStatus(label);
+      if (statusEl && label.includes('FLV') && webrtcFallbackReason) {
+        statusEl.title = webrtcFallbackReason;
+        statusEl.setAttribute('aria-label', `数字人已使用兼容模式：${webrtcFallbackReason}`);
+      } else if (statusEl) {
+        statusEl.title = '';
+        statusEl.removeAttribute('aria-label');
+      }
       startWatchdog();
     } catch (err) {
       destroyPlayer();

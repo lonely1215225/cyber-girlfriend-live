@@ -15,6 +15,7 @@
 /s2s/.venv/
 /third_party/avtr-1/.pixi/
 /third_party/avtr-1/artifacts/
+/third_party/mediamtx/
 
 # Retained legacy implementation (not part of the AVTR-1 runtime)
 /LiveTalking/

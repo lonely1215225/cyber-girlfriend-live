@@ -54,6 +54,24 @@ http {
             client_max_body_size 80m;
         }
 
+        # WHEP signaling stays same-origin. Media packets use the dedicated
+        # ICE UDP/TCP ports advertised by MediaMTX, while FLV remains fallback.
+        location /avatar_music/ {
+            proxy_pass http://127.0.0.1:__MEDIAMTX_WHEP_PORT__/avatar_music/;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 30s;
+            proxy_send_timeout 30s;
+        }
+
+        location /avatar_voice/ {
+            proxy_pass http://127.0.0.1:__MEDIAMTX_WHEP_PORT__/avatar_voice/;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 30s;
+            proxy_send_timeout 30s;
+        }
+
         # Renderer mutation/audio ingestion is internal-only. Public viewers
         # may watch the FLV stream and list looks, but cannot change the shared
         # avatar or inject/interrupt its audio with a handcrafted request.

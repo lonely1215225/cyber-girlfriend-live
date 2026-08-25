@@ -31,6 +31,10 @@ apt-get update -qq
 apt-get install -y -qq build-essential cmake git curl ffmpeg libsndfile1 pkg-config \
   nginx openssl ca-certificates python3 python3-venv python3-pip unzip iproute2 procps
 
+# Pinned, checksum-verified WebRTC/WHEP media edge. The binary is ignored by
+# git and is reproducibly installed on every new server.
+MEDIAMTX_VERSION="${MEDIAMTX_VERSION:-1.20.0}" "$ROOT/scripts/install_mediamtx.sh"
+
 PUBLIC_IP="${PUBLIC_IP:-$(curl -4 -fsS --max-time 8 ifconfig.me 2>/dev/null || true)}"
 PUBLIC_IP="${PUBLIC_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 PUBLIC_IP="${PUBLIC_IP:-127.0.0.1}"
