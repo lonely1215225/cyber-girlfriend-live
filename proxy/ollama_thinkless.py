@@ -225,6 +225,26 @@ def _is_fast_conversation_followup(payload: dict) -> bool:
     return False
 
 
+def _is_fast_external_planning(payload: dict) -> bool:
+    """Use the local model for the first concrete tool selection.
+
+    The browser plays its single progress sentence while the tool runs, and the
+    remote reasoning model is still used after evidence returns. Keeping this
+    bounded planning hop local avoids a network/model round trip before search.
+    """
+    tools = [tool for tool in payload.get("tools") or [] if isinstance(tool, dict)]
+    if not tools or {str(tool.get("name") or "") for tool in tools} == {"request_external_capabilities"}:
+        return False
+    for item in reversed(payload.get("input") or []):
+        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+            continue
+        output = item.get("output")
+        if not isinstance(output, str):
+            output = json.dumps(output or {}, ensure_ascii=False)
+        return '"route": "external_research"' in output or '"route":"external_research"' in output
+    return False
+
+
 def local_compaction(messages: list[dict]) -> str:
     """Compatibility wrapper used by tests and the Responses API handler."""
     return _local_compaction(messages, COMPACTION_MAX_CHARS)
@@ -399,6 +419,7 @@ class Handler(BaseHTTPRequestHandler):
         want_stream = bool(req.get("stream"))
         fast_discovery = _is_fast_discovery_turn(req)
         fast_conversation = _is_fast_conversation_followup(req)
+        fast_external_planning = _is_fast_external_planning(req)
         if fast_discovery:
             # Routing must not see old prices/news from memory: that made an
             # ordinary "I'm back" continuation request web access.  The full
@@ -419,6 +440,17 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 {"role": "user", "content": current},
             ]
+        elif fast_external_planning:
+            messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": (
+                        "Fast tool planning only. Call the best available tool immediately. "
+                        "Do not answer or claim a result before tool output."
+                    ),
+                },
+            )
 
         if COMPACTION_MODE == "local" and _is_compaction_request(messages):
             text = local_compaction(messages)
@@ -434,6 +466,7 @@ class Handler(BaseHTTPRequestHandler):
             and not _is_exact_speech_request(messages)
             and not fast_discovery
             and not fast_conversation
+            and not fast_external_planning
         ):
             try:
                 upstream = grok_response(req)

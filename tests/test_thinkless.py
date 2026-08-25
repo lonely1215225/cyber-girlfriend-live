@@ -12,6 +12,7 @@ from ollama_thinkless import (  # noqa: E402
     _is_exact_speech_request,
     _is_fast_conversation_followup,
     _is_fast_discovery_turn,
+    _is_fast_external_planning,
     clean_model_output,
     completed_response,
     local_compaction,
@@ -43,6 +44,18 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         self.assertTrue(_is_fast_conversation_followup(payload))
         payload["tools"] = [{"type": "function", "name": "smart_web_search"}]
         self.assertFalse(_is_fast_conversation_followup(payload))
+
+    def test_external_first_tool_planning_stays_local(self):
+        payload = {
+            "tools": [{"type": "function", "name": "smart_web_search"}],
+            "input": [{
+                "type": "function_call_output",
+                "output": '{"route":"external_research","enabled":["web"]}',
+            }],
+        }
+        self.assertTrue(_is_fast_external_planning(payload))
+        payload["input"][-1]["output"] = "search evidence"
+        self.assertFalse(_is_fast_external_planning(payload))
 
     def test_fixed_tts_readout_stays_on_local_provider(self):
         messages = [

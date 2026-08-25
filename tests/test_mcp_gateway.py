@@ -14,6 +14,10 @@ from mcp_gateway import McpGateway, _parse_rpc_response, _tool_output  # noqa: E
 
 
 class McpGatewayTests(unittest.TestCase):
+    def test_discovery_tool_includes_voice_only_vision_capability(self):
+        capabilities = McpGateway.discovery_tool()["parameters"]["properties"]["capabilities"]
+        self.assertIn("vision", capabilities["items"]["enum"])
+
     def test_parses_streamable_http_sse_response(self):
         payload = {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "search"}]}}
         response = httpx.Response(

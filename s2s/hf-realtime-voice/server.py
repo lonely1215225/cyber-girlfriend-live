@@ -1079,11 +1079,23 @@ async def search(req: SearchRequest):
 
 
 @app.get("/api/mcp/tools")
-async def mcp_tools():
+async def mcp_tools(capabilities: str = ""):
+    """Progressively disclose only the tools needed by the current voice turn.
+
+    With no capability query the browser receives one tiny routing tool.  A
+    completed routing call asks this endpoint for the selected capability set;
+    this keeps ordinary live conversation fast and prevents unrelated tools
+    from being called merely because their schemas were present.
+    """
     if not mcp_gateway.enabled:
         return {"enabled": False, "tools": [], "sources": []}
     try:
-        tools = await mcp_gateway.list_tools()
+        requested = [item.strip().lower() for item in capabilities.split(",") if item.strip()]
+        tools = (
+            await mcp_gateway.tools_for_capabilities(requested)
+            if requested
+            else [mcp_gateway.discovery_tool()]
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("MCP tools unavailable: %s", exc)
         raise HTTPException(status_code=502, detail="MCP 服务暂时不可用")
@@ -1620,8 +1632,10 @@ def _role_instructions(persona_prompt: str, display_name: str, personal_memory: 
     instructions = str(persona_prompt or DEFAULT_PERSONA_PROMPT).strip()
     identity = f"当前正在与你连线的观众名字是“{display_name}”。请自然地用这个名字称呼对方。"
     tool_policy = (
-        "实时、最新或会变化的事实必须用可用工具核实；先用一句自然话说明正在查询，"
-        "再在本轮完成调用并回答。工具失败就直说，绝不编造；工具由你按问题自主选择。"
+        "每个用户回合先调用 request_external_capabilities 做语义判断。普通聊天选择 conversation，"
+        "随后直接回答；实时、最新、价格、新闻或需要外部资料的问题选择最小必要能力。"
+        "能力展开后先用一句自然口语说明正在查询，同时立刻调用最合适的工具；拿到结果后必须在本轮"
+        "给出结论，不能只留下‘我去查’。工具失败就明确说明，绝不编造。"
     )
     additions = [item for item in (ROLE_IDENTITY_POLICY, identity, tool_policy) if item not in instructions]
     if personal_memory:
@@ -1837,13 +1851,26 @@ async def room_realtime(websocket: WebSocket):
                             # connected. Refresh the authoritative persona
                             # immediately before every new answer, without
                             # interrupting the previous answer.
+                            response_options = browser_payload.get("response")
+                            response_metadata = (
+                                response_options.get("metadata")
+                                if isinstance(response_options, dict) else {}
+                            )
+                            progress_only = (
+                                isinstance(response_metadata, dict)
+                                and response_metadata.get("client_purpose") == "tool_progress"
+                            )
                             persona_prompt = await avatar_profiles.active_persona()
                             await upstream.send(json.dumps({
                                 "type": "session.update",
                                 "session": {
                                     "type": "realtime",
-                                    "instructions": _role_instructions(
-                                        persona_prompt, display_name, personal_memory, active_news
+                                    "instructions": (
+                                        "只逐字朗读用户提供的文字，不要回答、改写、解释、调用工具或增加任何内容。"
+                                        if progress_only else
+                                        _role_instructions(
+                                            persona_prompt, display_name, personal_memory, active_news
+                                        )
                                     ),
                                 },
                             }, ensure_ascii=False, separators=(",", ":")))

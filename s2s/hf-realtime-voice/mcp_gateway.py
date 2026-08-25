@@ -224,12 +224,15 @@ class McpGateway:
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["conversation", "web", "news", "market", "page", "knowledge"],
+                            "enum": ["conversation", "web", "news", "market", "page", "knowledge", "vision"],
                         },
                         "minItems": 1,
                         "maxItems": 3,
                         "description": (
-                            "Use conversation when external data is unnecessary."
+                            "conversation=ordinary chat with no external facts; "
+                            "web=current products, vehicles, people, facts or general internet lookup; "
+                            "news=recent events/articles; market=cryptocurrency price only; "
+                            "page=read a known URL; knowledge=private MCP/documents; vision=webcam."
                         ),
                     }
                 },
