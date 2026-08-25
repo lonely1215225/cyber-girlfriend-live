@@ -16,7 +16,7 @@
  * @typedef {"idle" | "connecting" | "queued" | "your-turn" | "listening" | "user-speaking" | "processing" | "ai-speaking" | "error"} AppState
  */
 
-import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js?v=20260820p";
+import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js?v=20260825a";
 import { ToolCallBatcher } from "./tool-call-batcher.js";
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js?v=20260819c";
@@ -48,7 +48,7 @@ const LEGACY_DEFAULT_INSTRUCTIONS = `你叫小雅，是他的女朋友。你不�
 const ROLE_IDENTITY_POLICY =
   "始终按当前角色档案交流；不要自称或暗示自己是AI、数字人、机器人、程序或助手。";
 const TOOL_AGENT_POLICY =
-  "实时或外部事实必须用工具核实；先用当前角色口吻简短说明进度，再完成查询并在本轮给出结论。";
+  "每个用户回合先调用 request_external_capabilities 判断是否需要外部能力。普通聊天选择 conversation 后直接回答；实时、最新、价格、新闻或外部资料选择最小必要能力。能力展开后先用当前角色口吻说一句简短进度，同时立刻调用工具；拿到结果后必须在本轮给出结论，不能只说去查。";
 
 function effectiveInstructions(persona) {
   const value = String(persona || DEFAULT_INSTRUCTIONS).trim();
@@ -382,6 +382,10 @@ let serverSearchKey = false;
 let mcpToolDefs = [];
 /** @type {string[]} */
 let mcpSources = [];
+/** Capabilities unlocked only for the current connected-voice turn. */
+let voiceCapabilities = new Set();
+let voiceProgressSpoken = false;
+let voiceRoutePending = false;
 // A user-supplied key (fallback when the deploy has none). localStorage only.
 let userSearchKey = localStorage.getItem(STORAGE_KEYS.searchKey) || "";
 /** @type {MediaStream | null} */
@@ -395,8 +399,12 @@ function searchAvailable() {
 /** Tool definitions for the currently-enabled (and usable) tools. */
 function activeToolDefs() {
   const defs = [];
-  if (toolsEnabled.web_search && searchAvailable()) defs.push(TOOL_DEFS.web_search);
-  if (toolsEnabled.camera_snapshot) defs.push(TOOL_DEFS.camera_snapshot);
+  const hasSmartSearch = mcpToolDefs.some((tool) => tool.name === "smart_web_search");
+  if ((voiceCapabilities.has("web") || voiceCapabilities.has("news")) &&
+      !hasSmartSearch && toolsEnabled.web_search && searchAvailable()) {
+    defs.push(TOOL_DEFS.web_search);
+  }
+  if (voiceCapabilities.has("vision") && toolsEnabled.camera_snapshot) defs.push(TOOL_DEFS.camera_snapshot);
   defs.push(...mcpToolDefs);
   return defs;
 }
@@ -1413,7 +1421,32 @@ async function runTool(name, argsJson, callId) {
   /** @type {{ output: string, image?: string }} */
   let result = { output: "" };
   try {
-    if (name === "local_rss_news" || name.startsWith("mcp_")) {
+    if (name === "request_external_capabilities") {
+      voiceRoutePending = true;
+      const requested = Array.isArray(args.capabilities)
+        ? args.capabilities.map((item) => String(item).trim().toLowerCase()).filter(Boolean)
+        : [];
+      const external = [...new Set(requested.filter((item) => item !== "conversation"))];
+      if (!external.length) {
+        voiceCapabilities = new Set();
+        mcpToolDefs = [];
+        mcpSources = [];
+        pushToolsToSession();
+        result.output = JSON.stringify({
+          route: "conversation_fast",
+          enabled: [],
+          instruction: "直接自然回答用户，不要提查询或工具。",
+        });
+      } else {
+        await fetchMcpTools(external);
+        result.output = JSON.stringify({
+          route: "external_research",
+          enabled: external,
+          tools: activeToolDefs().map((tool) => tool.name),
+          instruction: "先说一句简短自然的查询进度，同时立即调用最合适的工具；工具返回后给出最终答案。",
+        });
+      }
+    } else if (mcpToolDefs.some((tool) => tool.name === name)) {
       result.output = await execMcpTool(name, args);
     } else if (name === "web_search") {
       const query = typeof args.query === "string" ? args.query : "";
@@ -1481,9 +1514,13 @@ async function execWebSearch(query) {
   return lines.length > 1 ? lines.join("\n") : `${lines[0]}\nNo results found.`;
 }
 
-async function fetchMcpTools() {
+async function fetchMcpTools(capabilities = []) {
   try {
-    const response = await fetch("/api/mcp/tools", { cache: "no-store" });
+    voiceCapabilities = new Set(capabilities);
+    const query = capabilities.length
+      ? `?capabilities=${encodeURIComponent(capabilities.join(","))}`
+      : "";
+    const response = await fetch(`/api/mcp/tools${query}`, { cache: "no-store" });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || "MCP tools unavailable");
     const tools = Array.isArray(data.tools) ? data.tools : [];
@@ -1493,6 +1530,7 @@ async function fetchMcpTools() {
         type: "function",
         name: tool.name,
         description: String(tool.description || tool.name),
+        progressText: String(tool.progress_text || ""),
         parameters: tool.parameters && typeof tool.parameters === "object"
           ? tool.parameters
           : { type: "object", properties: {} },
@@ -1507,6 +1545,14 @@ async function fetchMcpTools() {
   }
   syncToolsUi();
   pushToolsToSession();
+}
+
+/** Restore the one-tool router after a completed connected-voice turn. */
+async function resetVoiceToolDiscovery() {
+  voiceCapabilities = new Set();
+  voiceProgressSpoken = false;
+  voiceRoutePending = false;
+  await fetchMcpTools();
 }
 
 /** Learn server config (search key + connection target), then refresh the UI. */
@@ -2029,8 +2075,11 @@ async function doStart(audioContext = null) {
   client = c;
   c.setMuted(micMuted || userAudioReplaying);
 
-  /** @param {{ callId: string; output: string; image?: string }[]} results */
-  const sendToolBatch = (results) => {
+  /** @param {{ callId: string; output: string; image?: string; progressGate?: Promise<void> }[]} results */
+  const sendToolBatch = async (results) => {
+    if (client !== c) return;
+    const gates = [...new Set(results.map((result) => result.progressGate).filter(Boolean))];
+    if (gates.length) await Promise.all(gates);
     if (client !== c) return;
     for (const result of results) c.sendToolOutput(result.callId, result.output);
     for (const result of results) {
@@ -2040,6 +2089,31 @@ async function doStart(audioContext = null) {
     c.requestResponse();
   };
   const toolBatches = new ToolCallBatcher(sendToolBatch);
+  const responsesWithToolCalls = new Set();
+  /** @type {Map<string, { promise: Promise<void>; resolve: () => void; phrase: string }>} */
+  const progressGates = new Map();
+  /** @type {{ resolve: () => void } | null} */
+  let activeProgressPlayback = null;
+
+  function startToolProgressPlayback(gate) {
+    if (activeProgressPlayback || client !== c) {
+      gate.resolve();
+      return;
+    }
+    activeProgressPlayback = gate;
+    voiceProgressSpoken = true;
+    // Research is already running. This isolated response only communicates
+    // progress; evidence remains withheld until the final-answer response.
+    c.setTools([]);
+    c.sendUserText(`逐字朗读：${gate.phrase}`);
+    c.requestResponse({ purpose: "tool_progress" });
+    window.setTimeout(() => {
+      if (activeProgressPlayback !== gate) return;
+      activeProgressPlayback = null;
+      c.setTools(activeToolDefs());
+      gate.resolve();
+    }, 8000);
+  }
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -2085,8 +2159,28 @@ async function doStart(audioContext = null) {
   c.addEventListener("response-finished", (e) => {
     const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string }>} */ (e).detail;
     chat.onResponseFinished(detail);
+    if (activeProgressPlayback && !responsesWithToolCalls.has(detail.responseId)) {
+      const playback = activeProgressPlayback;
+      activeProgressPlayback = null;
+      c.setTools(activeToolDefs());
+      playback.resolve();
+      return;
+    }
     const flush = toolBatches.finish(detail.responseId, detail.status);
     if (flush) void flush.catch((err) => onFatalError(err));
+    const progressGate = progressGates.get(detail.responseId);
+    progressGates.delete(detail.responseId);
+    if (progressGate) {
+      if (detail.status === "completed") startToolProgressPlayback(progressGate);
+      else progressGate.resolve();
+    }
+    const usedTool = responsesWithToolCalls.delete(detail.responseId);
+    // A tool response is followed by another model response, so retain the
+    // selected tools.  The first completed response without a tool call is the
+    // delivered final answer; the next user turn starts again with discovery.
+    if (!usedTool && voiceRoutePending && detail.status === "completed") {
+      void resetVoiceToolDiscovery();
+    }
   });
 
   c.addEventListener("toolcall", (e) => {
@@ -2095,12 +2189,26 @@ async function doStart(audioContext = null) {
       console.warn(`[tool] call ${callId || "<unknown>"} has no response_id; ignoring uncorrelated tool call`);
       return;
     }
+    responsesWithToolCalls.add(responseId);
     chat.onToolCall(name);
     // Execute the tool, then push it to the conversation once the result is in,
     // so the toggle shows both the call input and its output together.
+    let progressGate = progressGates.get(responseId);
+    if (name !== "request_external_capabilities" && voiceCapabilities.size && !voiceProgressSpoken && !progressGate) {
+      let resolve = () => {};
+      const promise = new Promise((done) => { resolve = done; });
+      const tool = mcpToolDefs.find((item) => item.name === name);
+      progressGate = {
+        promise,
+        resolve,
+        phrase: tool?.progressText || "这个我帮你认真查一下，等我一下呀。",
+      };
+      progressGates.set(responseId, progressGate);
+    }
+    const gatePromise = progressGate?.promise;
     const execution = runTool(name, args, callId).then(({ output, image }) => {
       if (client === c) chat.onToolResult(name, args, output, image);
-      return { callId, output, ...(image ? { image } : {}) };
+      return { callId, output, ...(image ? { image } : {}), ...(gatePromise ? { progressGate: gatePromise } : {}) };
     });
     toolBatches.add(responseId, execution);
   });

@@ -87,6 +87,7 @@
  * @property {string} name
  * @property {string} description
  * @property {object} parameters JSON Schema for the call arguments.
+ * @property {string} [progressText] Short verified-safe waiting phrase.
  *
  * @typedef {Object} TranscriptEvent
  * @property {"user" | "assistant"} role
@@ -1098,6 +1099,19 @@ export class S2sWsRealtimeClient extends EventTarget {
     });
   }
 
+  /** Add hidden text input used for an exact, short progress readout. */
+  sendUserText(text) {
+    if (!text) return;
+    this._send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }],
+      },
+    });
+  }
+
   /**
    * Add an image to the conversation as user content, so the vision-language
    * model can see it (used by the camera tool). `dataUrl` is a
@@ -1197,7 +1211,7 @@ export class S2sWsRealtimeClient extends EventTarget {
    * replay it once the active response finishes, so we never trip the
    * backend's `conversation_already_has_active_response` guard.
    *
-   * @param {{ image?: string }} [opts] Optional `image` (a data URL) sent as a
+   * @param {{ image?: string; purpose?: string }} [opts] Optional `image` (a data URL) sent as a
    *   user `input_image` immediately before this response.create — so the frame
    *   travels with the create (and is deferred together with it if queued),
    *   rather than being added to the conversation eagerly. Used by the camera
@@ -1228,16 +1242,19 @@ export class S2sWsRealtimeClient extends EventTarget {
 
   /** Send a response.create immediately and arm the in-flight guard. Any image
    *  on the payload is added as user content right before the create.
-   *  @param {{ image?: string }} [opts] */
+   *  @param {{ image?: string; purpose?: string }} [opts] */
   _createResponseNow(opts = {}) {
     if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
     if (opts.image) this.sendUserImage(opts.image);
     const createId = `demo_create_${++this._nextCreateSequence}`;
     this._pendingCreateId = createId;
     this._pendingCreateSawResponse = false;
+    /** @type {Record<string, string>} */
+    const metadata = { [RESPONSE_CREATE_ID_METADATA_KEY]: createId };
+    if (opts.purpose) metadata.client_purpose = opts.purpose;
     this._send({
       type: "response.create",
-      response: { metadata: { [RESPONSE_CREATE_ID_METADATA_KEY]: createId } },
+      response: { metadata },
     });
   }
 

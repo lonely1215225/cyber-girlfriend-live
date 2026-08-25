@@ -5,6 +5,7 @@
  * @property {string} callId
  * @property {string} output
  * @property {string} [image]
+ * @property {Promise<void>} [progressGate]
  */
 
 /** Collect every tool execution from one response before requesting its follow-up. */
