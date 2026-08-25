@@ -3783,6 +3783,24 @@ body[data-room-status="calling"] .room-my-status {
 .room-live-line.voice .room-live-content { color: rgba(255, 255, 255, .96); }
 .room-live-line.is-me .room-live-content { color: rgba(216, 249, 255, .96); }
 
+.room-live-line.agent-status.partial .room-live-content {
+  color: rgba(202, 195, 255, .82);
+  font-style: italic;
+}
+
+.room-live-line.agent-status.partial .room-live-quote::after {
+  content: " · 查询进行中";
+  color: rgba(171, 160, 255, .7);
+}
+
+.room-live-line.agent-status[data-agent-phase="repairing"] .room-live-content {
+  color: rgba(255, 211, 154, .9);
+}
+
+.room-live-line.agent-status[data-agent-phase="failed"] .room-live-content {
+  color: rgba(255, 173, 173, .9);
+}
+
 .room-live-line.partial .room-live-content::after {
   content: "";
   display: inline-block;

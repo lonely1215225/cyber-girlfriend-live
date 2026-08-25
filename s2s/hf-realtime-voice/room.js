@@ -250,8 +250,11 @@ function renderTranscript(messages) {
     }
     node.querySelector(".room-live-content").textContent = `${item.text || ""}${item.interrupted ? "  · 已打断" : ""}`;
     node.classList.toggle("partial", !!item.partial);
+    node.classList.toggle("agent-status", item.kind === "agent_status" || !!item.agent_job_id);
     node.classList.toggle("is-me", !!current?.me?.id && item.participant_id === current.me.id);
     node.classList.toggle("voice", item.kind === "voice");
+    if (item.agent_phase) node.dataset.agentPhase = item.agent_phase;
+    else delete node.dataset.agentPhase;
   }
   for (const [index, item] of recent.entries()) {
     transcriptNodes.get(item.id)?.style.setProperty("--line-age", String(recent.length - index - 1));

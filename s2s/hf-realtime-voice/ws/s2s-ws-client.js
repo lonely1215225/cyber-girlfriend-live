@@ -188,7 +188,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._status = "idle";
     this._aiSpeaking = false;
     /** @type {Set<string>} response_ids that have actually played audio, so the
-     * UI can tell a barge-in cut (keep it) from a never-heard speculative
+     * UI can tell a barge-in cut (keep it) from a never-heard
      * response (drop it). */
     this._audibleResponses = new Set();
     /** @type {Map<string, string>} The in-progress assistant transcript per
@@ -826,7 +826,7 @@ export class S2sWsRealtimeClient extends EventTarget {
         if (status === "cancelled") this._assistantPlayoutUntil = 0;
         this._schedulePlayoutSettled(status);
         // Did this response ever play audio? Distinguishes a barge-in cut (the
-        // user heard part of it) from a speculative response that never played.
+        // user heard part of it) from a response that never played.
         const audible = responseId ? this._audibleResponses.has(responseId) : false;
         this._audibleResponses.delete(responseId);
         // Pull whatever transcript the response carries, falling back to the
@@ -870,7 +870,7 @@ export class S2sWsRealtimeClient extends EventTarget {
       case "conversation.item.input_audio_transcription.delta": {
         const delta = typeof event.delta === "string" ? event.delta : "";
         if (delta) {
-          // `itemId` is REUSED across a speculative continuation, so the UI
+          // `itemId` can be reused across a continuation, so the UI
           // groups both segments into one message. The delta carries the full
           // cumulative transcript so far (not an increment).
           this.dispatchEvent(
@@ -1115,78 +1115,6 @@ export class S2sWsRealtimeClient extends EventTarget {
     });
   }
 
-  /** Stop a speculative answer while the app fetches deterministic RSS evidence. */
-  cancelForGrounding() {
-    this._assistantPlayoutUntil = 0;
-    this._playbackNode?.port.postMessage({ kind: "clear" });
-    this._send({ type: "response.cancel" });
-    this._schedulePlayoutSettled("cancelled");
-  }
-
-  _waitUntilResponseIdle(timeoutMs = 15000) {
-    if (!this._responsePending()) return Promise.resolve();
-    return new Promise((resolve) => {
-      let timer = 0;
-      const check = () => {
-        if (!this._responsePending()) done();
-      };
-      const done = () => {
-        clearTimeout(timer);
-        this.removeEventListener("response-finished", check);
-        resolve();
-      };
-      timer = setTimeout(done, timeoutMs);
-      this.addEventListener("response-finished", check);
-    });
-  }
-
-  _waitForNextResponse(timeoutMs = 30000) {
-    return new Promise((resolve) => {
-      let timer = 0;
-      const done = () => {
-        clearTimeout(timer);
-        this.removeEventListener("response-finished", done);
-        resolve();
-      };
-      timer = setTimeout(done, timeoutMs);
-      this.addEventListener("response-finished", done, { once: true });
-    });
-  }
-
-  /** Speak one short acknowledgement before the grounded final answer. */
-  async speakGroundingAcknowledgement(phrase) {
-    if (!phrase || this._closed) return;
-    await this._waitUntilResponseIdle();
-    if (this._closed) return;
-    this._send({
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [{
-          type: "input_text",
-          text: `查询需要一点时间。现在只说这一句，不要添加任何内容：${phrase}`,
-        }],
-      },
-    });
-    const finished = this._waitForNextResponse();
-    this.requestResponse();
-    await finished;
-  }
-
-  /** Add server-fetched evidence as hidden conversation context and answer it. */
-  sendGroundingContext(text) {
-    if (!text || this._closed) return;
-    this._send({
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text }],
-      },
-    });
-    this.requestResponse();
-  }
 
   /**
    * Ask the model to open the conversation exactly once. The synthetic user

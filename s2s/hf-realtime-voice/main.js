@@ -46,11 +46,18 @@ const LEGACY_DEFAULT_INSTRUCTIONS = `你叫小雅，是他的女朋友。你不�
 /no_think`;
 
 const ROLE_IDENTITY_POLICY =
-  "始终按照当前角色档案中的身份和个性交流。不要主动说自己是数字人、AI、人工智能、语言模型、程序、机器人或助手，也不要用这些技术身份作自我介绍；只以当前角色的口吻自然回应。";
+  "始终按当前角色档案交流；不要自称或暗示自己是AI、数字人、机器人、程序或助手。";
+const TOOL_AGENT_POLICY =
+  "实时或外部事实必须用工具核实；先用当前角色口吻简短说明进度，再完成查询并在本轮给出结论。";
 
 function effectiveInstructions(persona) {
   const value = String(persona || DEFAULT_INSTRUCTIONS).trim();
-  return value.includes(ROLE_IDENTITY_POLICY) ? value : `${value}\n${ROLE_IDENTITY_POLICY}`;
+  const base = value.includes(ROLE_IDENTITY_POLICY) ? value : `${value}\n${ROLE_IDENTITY_POLICY}`;
+  const now = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+    weekday: "long", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  }).format(new Date());
+  return `${base}\n${TOOL_AGENT_POLICY}\n当前北京时间：${now}。涉及今天、当前、最新等问题时以此为准。`;
 }
 
 const STORAGE_KEYS = {
@@ -1443,33 +1450,6 @@ async function execMcpTool(name, args) {
   return typeof data.output === "string" ? data.output : JSON.stringify(data.output ?? {});
 }
 
-function needsRssGrounding(text) {
-  return /(?:新闻|资讯|热点|时事|科技动态|科技新闻|知识日报|知乎日报|人民日报|人民网|澎湃|极客公园|cn\s*beta|it之家|i\s*daily|中新网|中国新闻网)/i.test(text || "");
-}
-
-const TOOL_WAIT_PHRASES = [
-  "好呀，我先帮你查一下最新消息，稍等我一下哦。",
-  "没问题，我这就看看最新资料，很快告诉你。",
-  "好，我先认真查一下，你稍等一小会儿呀。",
-  "收到，我去看看刚更新的消息，马上回来告诉你。",
-];
-
-function randomToolWaitPhrase() {
-  return TOOL_WAIT_PHRASES[Math.floor(Math.random() * TOOL_WAIT_PHRASES.length)];
-}
-
-async function fetchRssGrounding(query) {
-  const response = await fetch("/api/rss/query", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify({ query, limit: 5 }),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || `RSS query failed (${response.status})`);
-  return String(data.output || "").trim();
-}
-
 /** @param {string} query @returns {Promise<string>} */
 async function execWebSearch(query) {
   if (!query) return "No query provided.";
@@ -2060,7 +2040,6 @@ async function doStart(audioContext = null) {
     c.requestResponse();
   };
   const toolBatches = new ToolCallBatcher(sendToolBatch);
-  const groundedNewsItems = new Set();
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -2089,35 +2068,6 @@ async function doStart(audioContext = null) {
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
-    if (d.role === "user" && !d.partial && needsRssGrounding(d.text)) {
-      const identity = d.itemId || d.text;
-      if (!groundedNewsItems.has(identity)) {
-        groundedNewsItems.add(identity);
-        c.cancelForGrounding();
-        const evidenceRequest = fetchRssGrounding(d.text).then(
-          (evidence) => ({ evidence, error: null }),
-          (error) => ({ evidence: "", error }),
-        );
-        void c.speakGroundingAcknowledgement(randomToolWaitPhrase())
-          .then(() => evidenceRequest)
-          .then(({ evidence, error }) => {
-            if (client !== c) return;
-            if (error) throw error;
-            c.sendGroundingContext(
-              `这是后端刚刚取得的 RSS 实时资料，用来回答用户上一句“${d.text}”。` +
-              "请直接依据资料用自然中文回答，不要说正在查询，不要重复调用新闻工具；资料不足就明确说明。\n\n" +
-              evidence,
-            );
-          })
-          .catch((error) => {
-            if (client !== c) return;
-            c.sendGroundingContext(
-              `用户上一句“${d.text}”需要实时 RSS 资料，但后端查询失败：${error.message}。` +
-              "请直接坦诚说明暂时无法取得该来源，不要编造最新内容。",
-            );
-          });
-      }
-    }
   });
   c.addEventListener("user-turn-started", (e) => {
     const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
