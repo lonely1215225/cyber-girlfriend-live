@@ -83,9 +83,13 @@ fi
 
 stop_pidfile web "$RUN/web.pid"
 stop_pidfile s2s "$RUN/s2s.pid"
+stop_pidfile webrtc_music "$RUN/webrtc_music.pid"
+stop_pidfile webrtc_voice "$RUN/webrtc_voice.pid"
+stop_pidfile mediamtx "$RUN/mediamtx.pid"
 stop_pidfile avatar_gw "$RUN/avatar_gw.pid"
 stop_pidfile avtr1_renderer "$RUN/avtr1_renderer.pid"
 stop_pidfile thinkless "$RUN/thinkless.pid"
+stop_pidfile grok_proxy "$RUN/grok_proxy.pid"
 stop_pidfile log_guard "$RUN/log_guard.pid"
 
 # PID files can be lost after a crash or manual cleanup. These root-scoped
@@ -93,9 +97,12 @@ stop_pidfile log_guard "$RUN/log_guard.pid"
 # belonging to another checkout.
 stop_matching s2s "$ROOT/proxy/s2s_with_avatar_tee.py"
 stop_matching frontend "uvicorn server:app --app-dir $ROOT/s2s/hf-realtime-voice"
+stop_matching webrtc-publisher "ffmpeg.*127.0.0.1:.*livestream.flv.*rtsp://127.0.0.1:.*/avatar_"
+stop_matching mediamtx "$ROOT/third_party/mediamtx/mediamtx $ROOT/run/mediamtx.yml"
 stop_matching avtr1-renderer "$ROOT/third_party/avtr-1/.pixi/.*/bin/python -m uvicorn avtr1_renderer.api.app:app"
 stop_matching avtr1-gateway "$ROOT/proxy/avtr1_gateway.py"
 stop_matching thinkless "$ROOT/proxy/ollama_thinkless.py"
+stop_matching grok-proxy "/usr/local/bin/grok-reverse-proxy"
 stop_matching log-guard "$ROOT/scripts/log_guard.sh $ROOT/logs"
 
 # Ollama itself may be shared by other applications, so do not stop its daemon.

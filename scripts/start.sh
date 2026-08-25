@@ -173,9 +173,15 @@ export MCP_EXA_URL="${MCP_EXA_URL:-https://mcp.exa.ai/mcp}"
 export MCP_GDELT_URL="${MCP_GDELT_URL:-https://gdelt.caseyjhand.com/mcp}"
 export MCP_TAVILY_URL="${MCP_TAVILY_URL:-}"
 export MCP_MAX_OUTPUT_CHARS="${MCP_MAX_OUTPUT_CHARS:-6000}"
-export MENTION_RESEARCH_TIMEOUT="${MENTION_RESEARCH_TIMEOUT:-20}"
-export MENTION_PRICE_CACHE_SECONDS="${MENTION_PRICE_CACHE_SECONDS:-30}"
-export MENTION_NEWS_CACHE_SECONDS="${MENTION_NEWS_CACHE_SECONDS:-180}"
+export TAVILY_API_KEY="${TAVILY_API_KEY:-}"
+export EXA_API_KEY="${EXA_API_KEY:-}"
+export JINA_API_KEY="${JINA_API_KEY:-}"
+export SEARXNG_URL="${SEARXNG_URL:-}"
+export JINA_READER_ENABLED="${JINA_READER_ENABLED:-1}"
+export SMART_SEARCH_TIMEOUT_SECONDS="${SMART_SEARCH_TIMEOUT_SECONDS:-5}"
+export SMART_SEARCH_EVIDENCE_BUDGET_SECONDS="${SMART_SEARCH_EVIDENCE_BUDGET_SECONDS:-3.5}"
+export SMART_SEARCH_CACHE_SECONDS="${SMART_SEARCH_CACHE_SECONDS:-180}"
+export SMART_SEARCH_COOLDOWN_SECONDS="${SMART_SEARCH_COOLDOWN_SECONDS:-60}"
 export NEWS_RSS_ENABLED="${NEWS_RSS_ENABLED:-1}"
 export NEWS_GOOGLE_RSS_ENABLED="${NEWS_GOOGLE_RSS_ENABLED:-1}"
 export NEWS_RSS_TIMEOUT="${NEWS_RSS_TIMEOUT:-8}"
@@ -192,13 +198,37 @@ export TTS_TOP_K="${TTS_TOP_K:-30}"
 export TTS_TOP_P="${TTS_TOP_P:-0.85}"
 export TTS_DO_SAMPLE="${TTS_DO_SAMPLE:-1}"
 export TTS_REPETITION_PENALTY="${TTS_REPETITION_PENALTY:-1.05}"
-export AVATAR_TEE_PREROLL_MS="${AVATAR_TEE_PREROLL_MS:-480}"
+export AGENT_FOCUS_TTL_SECONDS="${AGENT_FOCUS_TTL_SECONDS:-1800}"
+export AGENT_PROACTIVE_COOLDOWN_SECONDS="${AGENT_PROACTIVE_COOLDOWN_SECONDS:-60}"
+export AGENT_TIMEZONE="${AGENT_TIMEZONE:-Asia/Shanghai}"
+export AVATAR_TEE_PREROLL_MS="${AVATAR_TEE_PREROLL_MS:-800}"
+export AVTR1_AUDIO_REBUFFER_STEP_MS="${AVTR1_AUDIO_REBUFFER_STEP_MS:-200}"
+export AVTR1_AUDIO_MAX_BUFFER_MS="${AVTR1_AUDIO_MAX_BUFFER_MS:-1400}"
+export AVTR1_OUTPUT_RESERVOIR_MS="${AVTR1_OUTPUT_RESERVOIR_MS:-480}"
+export AVTR1_MAX_SPEECH_SECONDS="${AVTR1_MAX_SPEECH_SECONDS:-90}"
+export WEBRTC_ENABLED="${WEBRTC_ENABLED:-1}"
+export WEBRTC_PUBLIC_HOST="${WEBRTC_PUBLIC_HOST:-${PUBLIC_IP}}"
+export WEBRTC_UDP_PORT="${WEBRTC_UDP_PORT:-8189}"
+export WEBRTC_TCP_PORT="${WEBRTC_TCP_PORT:-8190}"
+export MEDIAMTX_WHEP_PORT="${MEDIAMTX_WHEP_PORT:-18889}"
+export MEDIAMTX_RTSP_PORT="${MEDIAMTX_RTSP_PORT:-18554}"
+export MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT:-19997}"
+export MEDIAMTX_METRICS_PORT="${MEDIAMTX_METRICS_PORT:-19998}"
+export WEBRTC_OPUS_BITRATE="${WEBRTC_OPUS_BITRATE:-48000}"
+export WEBRTC_PACKET_LOSS_PERCENT="${WEBRTC_PACKET_LOSS_PERCENT:-5}"
 export STARTUP_GREETING="${STARTUP_GREETING:-}"
 export IDLE_PROMPT="${IDLE_PROMPT:-}"
 export IDLE_PROMPT_MIN_SECONDS="${IDLE_PROMPT_MIN_SECONDS:-35}"
 export IDLE_PROMPT_MAX_SECONDS="${IDLE_PROMPT_MAX_SECONDS:-55}"
 export PROACTIVE_NEWS_MIN_SECONDS="${PROACTIVE_NEWS_MIN_SECONDS:-90}"
 export PROACTIVE_NEWS_MAX_SECONDS="${PROACTIVE_NEWS_MAX_SECONDS:-150}"
+export GROK_ENABLED="${GROK_ENABLED:-0}"
+export GROK_PROXY_PORT="${GROK_PROXY_PORT:-18080}"
+export GROK_PROXY_BASE_URL="${GROK_PROXY_BASE_URL:-http://127.0.0.1:${GROK_PROXY_PORT}/v1}"
+export GROK_MODEL="${GROK_MODEL:-grok-4.6}"
+export GROK_REASONING_EFFORT="${GROK_REASONING_EFFORT:-low}"
+export GROK_TIMEOUT_SECONDS="${GROK_TIMEOUT_SECONDS:-45}"
+export GROK_MAX_CONCURRENCY_PER_ACCOUNT="${GROK_MAX_CONCURRENCY_PER_ACCOUNT:-2}"
 export OLLAMA_URL LLM_NAME THINKLESS_PORT LLM_NUM_CTX LLM_NUM_PREDICT LLM_KEEP_ALIVE LLM_PREWARM
 export LLM_CHAT_SIZE="${LLM_CHAT_SIZE:-12}"
 export LLM_STREAM_BATCH_SENTENCES="${LLM_STREAM_BATCH_SENTENCES:-1}"
@@ -213,6 +243,26 @@ export MEMORY_SEMANTIC_NUM_PREDICT="${MEMORY_SEMANTIC_NUM_PREDICT:-256}"
 # Keep every service log bounded while preserving one previous segment.
 start_bg log_guard "$RUN/log_guard.pid" "$LOG/log_guard.log" \
   bash "$ROOT/scripts/log_guard.sh" "$LOG"
+
+# Grok stays private on loopback.  The official CLI owns the OAuth file; the
+# proxy only reads it and persists refreshed credentials in an owner-only
+# runtime directory outside the Git checkout.
+if [[ "$GROK_ENABLED" == "1" ]]; then
+  [[ -x /usr/local/bin/grok-reverse-proxy ]] || die "Grok proxy binary is missing"
+  [[ -f /root/.grok/auth.json ]] || die "Grok is not logged in; run: grok login --device-auth"
+  mkdir -p /root/.local/share/grok-reverse-proxy
+  chmod 700 /root/.local/share/grok-reverse-proxy
+  start_bg grok_proxy "$RUN/grok_proxy.pid" "$LOG/grok_proxy.log" \
+    env GROK_LISTEN_ADDR="127.0.0.1:${GROK_PROXY_PORT}" \
+      GROK_AUTH_FILES=/root/.grok/auth.json \
+      GROK_STATE_FILE=/root/.local/share/grok-reverse-proxy/accounts.json \
+      GROK_REQUEST_TIMEOUT="${GROK_TIMEOUT_SECONDS}s" \
+      GROK_MAX_CONCURRENCY_PER_ACCOUNT="$GROK_MAX_CONCURRENCY_PER_ACCOUNT" \
+      /usr/local/bin/grok-reverse-proxy
+  wait_port "$GROK_PROXY_PORT" "grok-proxy" 20
+  curl -fsS "http://127.0.0.1:${GROK_PROXY_PORT}/healthz" >/dev/null \
+    || die "Grok proxy health check failed"
+fi
 
 # 0) Ollama think=false shim (Ollama /v1/responses ignores think and stalls 20s+)
 start_bg thinkless "$RUN/thinkless.pid" "$LOG/thinkless.log" \
@@ -314,6 +364,64 @@ start_bg avatar_gw "$RUN/avatar_gw.pid" "$LOG/avatar_gw.log" \
   "$AVTR1_PY" "$ROOT/proxy/avtr1_gateway.py"
 wait_port "${AVATAR_GW_PORT:-18011}" "avatar-gateway" 60
 
+# 2) Low-latency WebRTC edge. Video is copied bit-for-bit from AVTR's H.264
+# baseline stream. Only audio is encoded to Opus, so this adds no GPU load.
+if [[ "$WEBRTC_ENABLED" != "0" ]]; then
+  MEDIAMTX_BIN="$ROOT/third_party/mediamtx/mediamtx"
+  [[ -x "$MEDIAMTX_BIN" ]] \
+    || die "MediaMTX is missing; run ./scripts/install_mediamtx.sh"
+  for value_name in WEBRTC_UDP_PORT WEBRTC_TCP_PORT MEDIAMTX_WHEP_PORT \
+                    MEDIAMTX_RTSP_PORT MEDIAMTX_API_PORT MEDIAMTX_METRICS_PORT; do
+    value="${!value_name}"
+    [[ "$value" =~ ^[0-9]+$ ]] || die "$value_name must be an integer"
+  done
+  [[ "$WEBRTC_PUBLIC_HOST" =~ ^[A-Za-z0-9._:-]+$ ]] \
+    || die "WEBRTC_PUBLIC_HOST contains unsupported characters"
+  MEDIAMTX_CONF="$RUN/mediamtx.yml"
+  sed -e "s|__MEDIAMTX_WHEP_PORT__|$MEDIAMTX_WHEP_PORT|g" \
+      -e "s|__MEDIAMTX_RTSP_PORT__|$MEDIAMTX_RTSP_PORT|g" \
+      -e "s|__MEDIAMTX_API_PORT__|$MEDIAMTX_API_PORT|g" \
+      -e "s|__MEDIAMTX_METRICS_PORT__|$MEDIAMTX_METRICS_PORT|g" \
+      -e "s|__WEBRTC_UDP_PORT__|$WEBRTC_UDP_PORT|g" \
+      -e "s|__WEBRTC_TCP_PORT__|$WEBRTC_TCP_PORT|g" \
+      -e "s|__WEBRTC_PUBLIC_HOST__|$WEBRTC_PUBLIC_HOST|g" \
+    "$ROOT/proxy/mediamtx.yml.tpl" > "$MEDIAMTX_CONF"
+  start_bg mediamtx "$RUN/mediamtx.pid" "$LOG/mediamtx.log" \
+    "$MEDIAMTX_BIN" "$MEDIAMTX_CONF"
+  wait_port "$MEDIAMTX_WHEP_PORT" "MediaMTX WHEP" 30
+  wait_port "$MEDIAMTX_RTSP_PORT" "MediaMTX RTSP" 30
+
+  start_webrtc_publisher() {
+    local name="$1" music="$2" path="$3"
+    start_bg "$name" "$RUN/${name}.pid" "$LOG/${name}.log" \
+      ffmpeg -hide_banner -loglevel warning \
+        -fflags +genpts+nobuffer -flags low_delay \
+        -analyzeduration 1000000 -probesize 1000000 \
+        -i "http://127.0.0.1:${AVATAR_GW_PORT:-18011}/livestream.flv?music=$music" \
+        -map 0:v:0 -c:v copy \
+        -map 0:a:0 -af "aresample=async=1000:first_pts=0,asetpts=N/SR/TB" \
+        -c:a libopus -ar 48000 -ac 1 \
+        -b:a "$WEBRTC_OPUS_BITRATE" -application lowdelay -frame_duration 20 \
+        -fec 1 -packet_loss "$WEBRTC_PACKET_LOSS_PERCENT" \
+        -flush_packets 1 -muxdelay 0 -rtsp_transport tcp -f rtsp \
+        "rtsp://127.0.0.1:${MEDIAMTX_RTSP_PORT}/$path"
+  }
+  start_webrtc_publisher webrtc_music 1 avatar_music
+  start_webrtc_publisher webrtc_voice 0 avatar_voice
+  for _ in $(seq 1 40); do
+    paths_json="$(curl -fsS --max-time 2 "http://127.0.0.1:${MEDIAMTX_API_PORT}/v3/paths/list" 2>/dev/null || true)"
+    if grep -q '"name":"avatar_music"' <<<"$paths_json" \
+        && grep -q '"name":"avatar_voice"' <<<"$paths_json"; then
+      say "WebRTC H.264+Opus publishers ready"
+      break
+    fi
+    sleep 0.25
+  done
+  grep -q '"name":"avatar_music"' <<<"${paths_json:-}" \
+    && grep -q '"name":"avatar_voice"' <<<"${paths_json:-}" \
+    || die "WebRTC publishers are not ready; see $LOG/webrtc_*.log"
+fi
+
 # 4) speech-to-speech
 STT_BACKEND="${STT_BACKEND:-sensevoice}"
 case "$STT_BACKEND" in
@@ -398,6 +506,7 @@ sed -e "s|__ROOT__|$ROOT|g" \
     -e "s|__LISTEN_PORT__|${LISTEN_HTTP_PORT}|g" \
     -e "s|__NGINX_WORKERS__|${NGINX_WORKERS:-4}|g" \
     -e "s|__AVATAR_GW_PORT__|${AVATAR_GW_PORT:-18011}|g" \
+    -e "s|__MEDIAMTX_WHEP_PORT__|${MEDIAMTX_WHEP_PORT:-18889}|g" \
     -e "s|__S2S_PORT__|${S2S_PORT}|g" \
     -e "s|__WEB_PORT__|${WEB_PORT}|g" \
   "$ROOT/proxy/nginx.conf.tpl" > "$NGINX_CONF"
