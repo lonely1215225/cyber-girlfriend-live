@@ -17,6 +17,8 @@ class McpGatewayTests(unittest.TestCase):
     def test_discovery_tool_includes_voice_only_vision_capability(self):
         capabilities = McpGateway.discovery_tool()["parameters"]["properties"]["capabilities"]
         self.assertIn("vision", capabilities["items"]["enum"])
+        self.assertNotIn("conversation", capabilities["items"]["enum"])
+        self.assertIn("Never call it for greetings", McpGateway.discovery_tool()["description"])
 
     def test_parses_streamable_http_sse_response(self):
         payload = {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "search"}]}}

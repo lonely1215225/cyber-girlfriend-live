@@ -13,16 +13,42 @@ from ollama_thinkless import (  # noqa: E402
     _is_fast_conversation_followup,
     _is_fast_discovery_turn,
     _is_fast_external_planning,
+    _needs_reliable_external_route,
     _is_room_welcome_request,
     clean_model_output,
     completed_response,
     local_compaction,
+    request_messages,
     to_messages,
     to_ollama_tools,
 )
 
 
 class ModelOutputSanitizerTests(unittest.TestCase):
+    def test_responses_top_level_instructions_become_system_message(self):
+        messages = request_messages({
+            "instructions": "你叫小麻，只输出自然口语。",
+            "input": [{"role": "user", "content": "你是谁"}],
+        })
+        self.assertEqual(messages[0], {
+            "role": "system", "content": "你叫小麻，只输出自然口语。",
+        })
+        self.assertEqual(messages[1], {"role": "user", "content": "你是谁"})
+
+    def test_only_explicit_external_intent_forces_the_reliable_router(self):
+        self.assertFalse(_needs_reliable_external_route([
+            {"role": "user", "content": "喂，听得见我说话吗？"},
+        ]))
+        self.assertFalse(_needs_reliable_external_route([
+            {"role": "user", "content": "你为什么对我这么好呀？"},
+        ]))
+        self.assertTrue(_needs_reliable_external_route([
+            {"role": "user", "content": "帮我查一下现在比特币多少钱"},
+        ]))
+        self.assertTrue(_needs_reliable_external_route([
+            {"role": "user", "content": "为什么比特币最近涨这么多"},
+        ]))
+
     def test_only_the_initial_discovery_turn_uses_fast_local_model(self):
         payload = {
             "tools": [{"type": "function", "name": "request_external_capabilities"}],

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
@@ -30,7 +31,20 @@ GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4.6").strip() or "grok-4.6"
 GROK_API_KEY = os.environ.get("GROK_PROXY_API_KEY", "").strip()
 GROK_REASONING_EFFORT = os.environ.get("GROK_REASONING_EFFORT", "low").strip().lower() or "low"
 GROK_TIMEOUT_SECONDS = max(2.0, float(os.environ.get("GROK_TIMEOUT_SECONDS", "45")))
+LOCAL_READ_TIMEOUT_SECONDS = max(
+    2.0, float(os.environ.get("LLM_LOCAL_READ_TIMEOUT_SECONDS", "4.0"))
+)
+LOCAL_TIMEOUT_REPLY = "嗯？刚才没接稳，你再说一遍嘛。"
 _REASONING_TAGS = {"think", "analysis", "reasoning"}
+_EXTERNAL_INTENT_RE = re.compile(
+    r"(?:查(?:一下|下|查)?|搜索|搜一下|联网|核实|验证|最新|实时|新闻|热搜|行情|报价|汇率|"
+    r"现在.{0,12}(?:价格|多少钱|报价|行情|天气|汇率)|"
+    r"今天.{0,10}(?:新闻|天气|价格|发生)|"
+    r"最近.{0,14}(?:上涨|下跌|涨|跌|原因)|"
+    r"为什么.{0,14}(?:上涨|下跌|涨|跌)|"
+    r"\b(?:current|latest|today'?s?)\s+(?:price|news|weather|market)\b)",
+    re.IGNORECASE,
+)
 
 
 class ModelOutputSanitizer:
@@ -157,6 +171,16 @@ def to_messages(inp) -> list[dict]:
     return msgs or [{"role": "user", "content": "你好"}]
 
 
+def request_messages(payload: dict) -> list[dict]:
+    """Preserve Responses API top-level instructions as an Ollama system turn."""
+
+    messages = to_messages(payload.get("input"))
+    instructions = _extract_text(payload.get("instructions")).strip()
+    if instructions:
+        messages.insert(0, {"role": "system", "content": instructions})
+    return messages
+
+
 def to_ollama_tools(tools) -> list[dict]:
     """Translate flat Responses API function declarations to Ollama chat tools."""
     result = []
@@ -203,11 +227,12 @@ def _is_room_welcome_request(messages: list[dict]) -> bool:
 
 
 def _is_fast_discovery_turn(payload: dict) -> bool:
-    """Use the resident model for the lightweight first turn.
+    """Use the resident model for native bounded tool selection.
 
-    The first turn can either answer ordinary conversation immediately or ask
-    for external capabilities.  Once a capability result exists, subsequent
-    research and synthesis return to the stronger remote model.
+    Ordinary conversation is answered in this same turn. If external evidence
+    is genuinely needed, the model calls the single progressive-disclosure
+    tool. Once a capability result exists, research returns to the stronger
+    remote model.
     """
     tools = [tool for tool in payload.get("tools") or [] if isinstance(tool, dict)]
     names = {str(tool.get("name") or "") for tool in tools}
@@ -217,6 +242,25 @@ def _is_fast_discovery_turn(payload: dict) -> bool:
         isinstance(item, dict) and item.get("type") == "function_call_output"
         for item in payload.get("input") or []
     )
+
+
+def _needs_reliable_external_route(messages: list[dict]) -> bool:
+    """Recognize explicit freshness/lookup requests that must not be hallucinated.
+
+    This is a routing safety net, not an answer generator. The model still
+    chooses the concrete capability and tools, then writes from their evidence.
+    Ordinary conversation never pays this second planning hop.
+    """
+    current = next(
+        (
+            str(item.get("content") or "")
+            for item in reversed(messages)
+            if item.get("role") == "user"
+        ),
+        "",
+    )
+    current = current.split("\n\n【", 1)[0].strip()
+    return bool(_EXTERNAL_INTENT_RE.search(current))
 
 
 def _is_fast_conversation_followup(payload: dict) -> bool:
@@ -287,7 +331,10 @@ def ollama_chat(model: str, messages: list[dict], stream: bool, tools: list[dict
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    return urlopen(req, timeout=120)
+    # urllib applies this as a socket inactivity timeout. A healthy streaming
+    # model keeps producing data; a wedged GPU/request is cut off before the
+    # realtime pipeline's much slower 20-second outer timeout.
+    return urlopen(req, timeout=LOCAL_READ_TIMEOUT_SECONDS)
 
 
 def grok_response(payload: dict):
@@ -424,33 +471,37 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         req = json.loads(self.rfile.read(n) or b"{}")
         model = req.get("model") or os.environ.get("LLM_NAME", "llama3")
-        messages = to_messages(req.get("input"))
+        messages = request_messages(req)
         tools = to_ollama_tools(req.get("tools"))
         want_stream = bool(req.get("stream"))
         fast_discovery = _is_fast_discovery_turn(req)
         fast_conversation = _is_fast_conversation_followup(req)
         fast_external_planning = _is_fast_external_planning(req)
         fast_welcome = _is_room_welcome_request(messages)
-        if fast_discovery:
-            # Routing must not see old prices/news from memory: that made an
-            # ordinary "I'm back" continuation request web access.  The full
-            # history remains in the original request for the answer turn.
+        explicit_external_request = fast_discovery and _needs_reliable_external_route(messages)
+        if explicit_external_request:
             current = next(
                 (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
                 "",
-            )
-            current = current.split("\n\n【", 1)[0].strip()
+            ).split("\n\n【", 1)[0].strip()
             messages = [
                 {
                     "role": "system",
                     "content": (
-                        "Route only; do not answer. Call request_external_capabilities once. "
-                        "Use conversation for chat, roleplay, opinions or continuation. Use the smallest "
-                        "external set only for current facts, news, prices, lookup or verification."
+                        "External routing only. Call request_external_capabilities exactly once with "
+                        "the smallest required capability set. Do not answer, estimate, mention a tool, "
+                        "or claim a result before verified tool output."
                     ),
                 },
                 {"role": "user", "content": current},
             ]
+        elif fast_discovery:
+            # Tool schemas are intentionally absent for ordinary conversation.
+            # This makes the no-tool route an invariant instead of trusting a
+            # small model to obey a descriptive hint while a tool is present.
+            # The model still writes the answer; this guard only decides
+            # whether external I/O is permitted for the current user request.
+            tools = []
         elif fast_external_planning:
             messages.insert(
                 0,
@@ -513,8 +564,19 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"[thinkless] Grok unavailable, using local fallback: {type(exc).__name__}: {exc}", flush=True)
 
         if not want_stream:
-            with ollama_chat(model, messages, False, tools) as r:
-                data = json.loads(r.read())
+            started = time.monotonic()
+            try:
+                with ollama_chat(model, messages, False, tools) as r:
+                    data = json.loads(r.read())
+            except (TimeoutError, OSError, HTTPError, URLError, json.JSONDecodeError) as exc:
+                print(
+                    f"[thinkless] local response fallback after "
+                    f"{(time.monotonic() - started) * 1000:.0f}ms: {type(exc).__name__}",
+                    flush=True,
+                )
+                out = completed_response(model, LOCAL_TIMEOUT_REPLY, 0, 0)
+                self._send(200, json.dumps(out, ensure_ascii=False).encode(), "application/json")
+                return
             msg = data.get("message") or {}
             text = clean_model_output(msg.get("content") or "")
             out = completed_response(
@@ -542,6 +604,8 @@ class Handler(BaseHTTPRequestHandler):
         in_tok = 0
         out_tok = 0
         tool_calls: list[dict] = []
+        local_started = time.monotonic()
+        first_delta_at: float | None = None
 
         def sse(event: str, obj: dict):
             nonlocal seq
@@ -561,31 +625,52 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
-        with ollama_chat(model, messages, True, tools) as r:
-            for raw in r:
-                line = raw.decode("utf-8", "ignore").strip()
-                if not line:
-                    continue
-                data = json.loads(line)
-                in_tok = int(data.get("prompt_eval_count") or in_tok)
-                out_tok = int(data.get("eval_count") or out_tok)
-                raw_piece = ((data.get("message") or {}).get("content")) or ""
-                chunk_calls = ((data.get("message") or {}).get("tool_calls")) or []
-                if chunk_calls:
-                    tool_calls.extend(chunk_calls)
-                piece = sanitizer.feed(raw_piece)
-                if piece:
-                    full.append(piece)
-                    sse(
-                        "response.output_text.delta",
-                        {
-                            "type": "response.output_text.delta",
-                            "delta": piece,
-                            "content_index": 0,
-                            "item_id": mid,
-                            "output_index": 0,
-                        },
-                    )
+        try:
+            with ollama_chat(model, messages, True, tools) as r:
+                for raw in r:
+                    line = raw.decode("utf-8", "ignore").strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    in_tok = int(data.get("prompt_eval_count") or in_tok)
+                    out_tok = int(data.get("eval_count") or out_tok)
+                    raw_piece = ((data.get("message") or {}).get("content")) or ""
+                    chunk_calls = ((data.get("message") or {}).get("tool_calls")) or []
+                    if chunk_calls:
+                        if first_delta_at is None:
+                            first_delta_at = time.monotonic()
+                        tool_calls.extend(chunk_calls)
+                    piece = sanitizer.feed(raw_piece)
+                    if piece:
+                        if first_delta_at is None:
+                            first_delta_at = time.monotonic()
+                        full.append(piece)
+                        sse(
+                            "response.output_text.delta",
+                            {
+                                "type": "response.output_text.delta",
+                                "delta": piece,
+                                "content_index": 0,
+                                "item_id": mid,
+                                "output_index": 0,
+                            },
+                        )
+        except (TimeoutError, OSError, HTTPError, URLError, json.JSONDecodeError) as exc:
+            if not full and not tool_calls:
+                first_delta_at = time.monotonic()
+                full.append(LOCAL_TIMEOUT_REPLY)
+                sse(
+                    "response.output_text.delta",
+                    {
+                        "type": "response.output_text.delta", "delta": LOCAL_TIMEOUT_REPLY,
+                        "content_index": 0, "item_id": mid, "output_index": 0,
+                    },
+                )
+            print(
+                f"[thinkless] local stream fallback after "
+                f"{(time.monotonic() - local_started) * 1000:.0f}ms: {type(exc).__name__}",
+                flush=True,
+            )
 
         tail = sanitizer.feed("", final=True)
         if tail:
@@ -601,6 +686,16 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
         text = "".join(full).strip()
+        first_ms = (
+            (first_delta_at - local_started) * 1000.0
+            if first_delta_at is not None else -1.0
+        )
+        print(
+            f"[thinkless] local latency first={first_ms:.0f}ms "
+            f"total={(time.monotonic() - local_started) * 1000:.0f}ms "
+            f"tools={len(tool_calls)} chars={len(text)}",
+            flush=True,
+        )
         sse(
             "response.output_item.done",
             {

@@ -215,7 +215,9 @@ class McpGateway:
             "type": "function",
             "name": cls.DISCOVERY_TOOL_NAME,
             "description": (
-                "Classify this turn: conversation, or the smallest external capability set needed."
+                "Call this only when the user needs current, external, private-document, page, market, "
+                "news, or vision information. Never call it for greetings, casual conversation, "
+                "emotional support, roleplay, opinions, or questions answerable from conversation context."
             ),
             "parameters": {
                 "type": "object",
@@ -224,12 +226,11 @@ class McpGateway:
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["conversation", "web", "news", "market", "page", "knowledge", "vision"],
+                            "enum": ["web", "news", "market", "page", "knowledge", "vision"],
                         },
                         "minItems": 1,
                         "maxItems": 3,
                         "description": (
-                            "conversation=ordinary chat with no external facts; "
                             "web=current products, vehicles, people, facts or general internet lookup; "
                             "news=recent events/articles; market=cryptocurrency price only; "
                             "page=read a known URL; knowledge=private MCP/documents; vision=webcam."
