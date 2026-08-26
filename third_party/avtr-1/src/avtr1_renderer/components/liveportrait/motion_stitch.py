@@ -118,6 +118,31 @@ def _build_x_d_delta(motion: MotionFrame, kp_info: KPInfo) -> torch.Tensor:
     return delta.view(n, 21, 3)
 
 
+def _apply_semantic_expression(
+    delta: torch.Tensor,
+    motion: MotionFrame,
+    expression_delta: torch.Tensor | None,
+    expression_weights: torch.Tensor | None,
+    expression_mouth_strength: float,
+) -> torch.Tensor:
+    """Blend a calibrated full-face delta without sacrificing lip sync."""
+    if expression_delta is None or expression_weights is None:
+        return delta
+    n = motion.R.shape[0]
+    full = expression_delta.view(1, 63)
+    weights = expression_weights.view(n, 1)
+    flat = delta.view(n, 63)
+    # Non-mouth coordinates are not produced by AVTR and can take the full
+    # semantic expression. Predicted mouth coordinates get only a deliberately
+    # small residual, preserving phoneme articulation.
+    flat.add_(full * weights)
+    flat[:, _LIPSYNC_INDEX] = (
+        motion.exp
+        + full[:, _LIPSYNC_INDEX] * weights * expression_mouth_strength
+    )
+    return flat.view(n, 21, 3)
+
+
 def _transform_driving(
     x_d_delta: torch.Tensor,
     R_new: torch.Tensor,
@@ -143,6 +168,9 @@ def motion_stitch(
     motions: MotionFrame,
     *,
     stitch: StitchEngine,
+    expression_delta: torch.Tensor | None = None,
+    expression_weights: torch.Tensor | None = None,
+    expression_mouth_strength: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(x_s, x_d)`` keypoint pairs ready for the warp network.
 
@@ -172,6 +200,13 @@ def motion_stitch(
     ``_build_x_d_delta`` / ``_transform_driving`` directly.
     """
     x_d_delta = _build_x_d_delta(motions, kp_info)
+    x_d_delta = _apply_semantic_expression(
+        x_d_delta,
+        motions,
+        expression_delta,
+        expression_weights,
+        expression_mouth_strength,
+    )
     x_d_raw = _transform_driving(x_d_delta, motions.R, kp_info)
     x_s = _transform_source(kp_info)
 

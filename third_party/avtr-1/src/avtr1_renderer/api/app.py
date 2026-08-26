@@ -172,6 +172,41 @@ async def lifespan(app: FastAPI):
         portraits_dir=portraits_dir,
         out_size=(out_h, out_w),
     )
+    expression_bases: dict[str, tuple[float, ...]] = {}
+    expression_retarget_gain = max(
+        1.0, min(8.0, float(os.environ.get("AVTR1_EXPRESSION_RETARGET_GAIN", "4.0")))
+    )
+    expression_dir_raw = os.environ.get("AVTR1_EXPRESSION_DIR", "").strip()
+    if expression_dir_raw:
+        expression_dir = Path(expression_dir_raw)
+        neutral_path = expression_dir / "reference-neutral.png"
+        if neutral_path.is_file():
+            neutral = pipeline._avatar_loader.load(neutral_path, avatar_id="expression_neutral")
+            for reference in sorted(expression_dir.glob("reference-*.png")):
+                profile = reference.stem.removeprefix("reference-").replace("-", "_")
+                if profile == "neutral":
+                    expression_bases[profile] = (0.0,) * 63
+                    continue
+                candidate = pipeline._avatar_loader.load(
+                    reference, avatar_id=f"expression_{profile}"
+                )
+                delta = (candidate.kp_info.exp - neutral.kp_info.exp).flatten()
+                # Generated references are identity-preserving, but a hard
+                # coordinate bound protects arbitrary replacement files from
+                # producing broken geometry.
+                delta = (
+                    delta.clamp(-0.025, 0.025) * expression_retarget_gain
+                ).detach().cpu().tolist()
+                expression_bases[profile] = tuple(float(value) for value in delta)
+                del candidate
+            del neutral
+            LOG.info(
+                "Expression profiles: %s (retarget gain %.2f)",
+                ", ".join(sorted(expression_bases)),
+                expression_retarget_gain,
+            )
+        else:
+            LOG.warning("Expression neutral reference missing: %s", neutral_path)
     LOG.info("Avatars: %s", ", ".join(sorted(registry)))
     LOG.info(
         "Loaded engines + %d avatars + %d backgrounds in %.1fs",
@@ -184,6 +219,7 @@ async def lifespan(app: FastAPI):
     app.state.portraits_dir = portraits_dir
     app.state.avatar_loader = pipeline._avatar_loader
     app.state.avatar_load_lock = asyncio.Lock()
+    app.state.expression_bases = expression_bases
     mg = pipeline._motion_generator
     app.state.chunk_size = mg.chunk_size
     app.state.current_samples = mg.chunk_size * mg.frame_len
@@ -219,6 +255,10 @@ async def process_audio_v3(
     micro_pose_pitch_ratio: float = 1.0,
     micro_pose_yaw_ratio: float = 0.18,
     micro_pose_roll_ratio: float = -0.10,
+    expression: str = "neutral",
+    expression_strength: float = 0.0,
+    expression_weights: str = "",
+    expression_mouth_strength: float = 0.0,
 ) -> StreamingResponse:
     pipeline: Pipeline = request.app.state.pipeline
     registry: dict = request.app.state.registry
@@ -267,6 +307,14 @@ async def process_audio_v3(
             )
         return tuple(max(minimum, min(maximum, value)) for value in values)
 
+    expression_key = expression.strip().lower().replace("-", "_")
+    expression_delta = request.app.state.expression_bases.get(expression_key, ())
+    if expression_key != "neutral" and not expression_delta:
+        raise HTTPException(status_code=422, detail=f"unknown expression {expression!r}")
+    expression_curve = frame_weights(expression_weights, minimum=0.0, maximum=1.0)
+    expression_gain = max(0.0, min(1.0, expression_strength))
+    expression_curve = tuple(value * expression_gain for value in expression_curve)
+
     options = RenderOptions(
         pixel_format=pixel_format,
         bg_id=bg_id,
@@ -282,6 +330,9 @@ async def process_audio_v3(
         micro_pose_pitch_ratio=max(-1.0, min(1.0, micro_pose_pitch_ratio)),
         micro_pose_yaw_ratio=max(-1.0, min(1.0, micro_pose_yaw_ratio)),
         micro_pose_roll_ratio=max(-1.0, min(1.0, micro_pose_roll_ratio)),
+        expression_delta=expression_delta,
+        expression_weights=expression_curve,
+        expression_mouth_strength=max(0.0, min(0.45, expression_mouth_strength)),
     )
 
     loop = asyncio.get_running_loop()

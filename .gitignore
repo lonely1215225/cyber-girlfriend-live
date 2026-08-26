@@ -6,8 +6,12 @@
 /logs/
 /run/
 /data/*.sqlite3*
+/data/*.sqlite
+/data/*.db
 /data/*.json
 /data/voices/
+/assets/expressions/
+/docs/demos/avtr-expression-test/
 /.cache/
 
 # Downloaded models and generated environments

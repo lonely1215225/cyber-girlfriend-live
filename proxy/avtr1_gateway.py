@@ -22,6 +22,12 @@ RENDERER = os.environ.get("AVTR1_URL", "http://127.0.0.1:18012").rstrip("/")
 HOST = os.environ.get("AVATAR_GW_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AVATAR_GW_PORT", "18011"))
 AVATAR_ID = os.environ.get("AVTR1_AVATAR_ID", "xiaoya_locket")
+EXPRESSION_SOURCE_AVATAR = os.environ.get(
+    "AVTR1_EXPRESSION_SOURCE_AVATAR", "xiaoya_locket"
+).strip()
+EXPRESSION_SOURCE_PREFIX = os.environ.get(
+    "AVTR1_EXPRESSION_SOURCE_PREFIX", "xiaoya_locket_expr_"
+).strip()
 BG_ID = os.environ.get("AVTR1_BG_ID", "plain_white")
 H264_BITRATE = int(os.environ.get("AVTR1_H264_BITRATE", "1800000"))
 SPEECH_START_BUFFER_MS = max(
@@ -357,6 +363,86 @@ render_durations_ms: deque[float] = deque(maxlen=900)
 renderer_session: aiohttp.ClientSession | None = None
 flv_muxer_music: FlvMuxer | None = None
 flv_muxer_voice: FlvMuxer | None = None
+
+EXPRESSION_PROFILES = {
+    "neutral", "happy", "surprised", "serious", "pout", "one_brow",
+    "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",
+}
+expression_profile = "neutral"
+expression_gain = 0.0
+expression_target = 0.0
+expression_mouth_strength = 0.0
+expression_expires_at = 0.0
+expression_sequence = 0
+expression_pending: tuple[str, float, float, int] | None = None
+expression_render_avatar = AVATAR_ID
+expression_previous_frame: bytes | None = None
+expression_transition_frames = 0
+expression_transition_total_frames = 0
+EXPRESSION_SOURCE_MIN_INTENSITY = min(
+    0.9, max(0.2, float(os.environ.get("AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY", "0.55")))
+)
+EXPRESSION_ATTACK_FRAMES = max(
+    6, min(30, int(os.environ.get("AVTR1_EXPRESSION_ATTACK_FRAMES", "14")))
+)
+EXPRESSION_RELEASE_FRAMES = max(
+    8, min(40, int(os.environ.get("AVTR1_EXPRESSION_RELEASE_FRAMES", "18")))
+)
+EXPRESSION_ATTACK_STEP = min(
+    0.2, max(0.015, float(os.environ.get("AVTR1_EXPRESSION_ATTACK_STEP", "0.055")))
+)
+EXPRESSION_RELEASE_STEP = min(
+    0.2, max(0.01, float(os.environ.get("AVTR1_EXPRESSION_RELEASE_STEP", "0.04")))
+)
+
+
+def _render_avatar_for_expression(base_avatar_id: str) -> str:
+    """Choose a visible source pose when keypoint retargeting is too subtle.
+
+    AVTR's implicit keypoints preserve lip sync well, but do not reliably carry
+    asymmetric eyebrow/eyelid texture.  For the calibrated default portrait we
+    therefore animate against an identity-matched expression source while the
+    cue is active. Other portraits keep the conservative keypoint-only path.
+    """
+    if (
+        base_avatar_id == EXPRESSION_SOURCE_AVATAR
+        and expression_profile != "neutral"
+        and max(expression_gain, expression_target) >= EXPRESSION_SOURCE_MIN_INTENSITY
+    ):
+        return f"{EXPRESSION_SOURCE_PREFIX}{expression_profile}"
+    return base_avatar_id
+
+
+def _crossfade_expression_frame(raw: bytes, render_avatar_id: str) -> bytes:
+    global expression_render_avatar, expression_previous_frame
+    global expression_transition_frames, expression_transition_total_frames
+    if render_avatar_id != expression_render_avatar:
+        expression_render_avatar = render_avatar_id
+        expression_transition_total_frames = (
+            EXPRESSION_RELEASE_FRAMES
+            if render_avatar_id == AVATAR_ID
+            else EXPRESSION_ATTACK_FRAMES
+        )
+        expression_transition_frames = expression_transition_total_frames
+    if expression_transition_frames > 0 and expression_previous_frame:
+        old = np.frombuffer(expression_previous_frame, dtype=np.uint8)
+        new = np.frombuffer(raw, dtype=np.uint8)
+        if old.size == new.size:
+            step = expression_transition_total_frames - expression_transition_frames + 1
+            progress = _smoothstep(step / expression_transition_total_frames)
+            previous_progress = _smoothstep(
+                (step - 1) / expression_transition_total_frames
+            )
+            # Follow the new moving frame while respecting the cumulative ease
+            # curve; retaining a frozen first frame creates a visible ghost.
+            incremental = (progress - previous_progress) / max(
+                1e-6, 1.0 - previous_progress
+            )
+            blended = np.rint(old * (1.0 - incremental) + new * incremental).astype(np.uint8)
+            raw = blended.tobytes()
+        expression_transition_frames -= 1
+    expression_previous_frame = raw
+    return raw
 
 
 class BackgroundMusic:
@@ -930,6 +1016,38 @@ def _breath_weights(now: float, *, enabled: bool) -> list[float]:
     return ((slow * slow_mix + drift * IDLE_BREATH_DRIFT_MIX) * breath_mix).tolist()
 
 
+def _expression_frame_weights(now: float) -> list[float]:
+    """Advance the semantic expression with smooth frame-level envelopes."""
+    global expression_gain, expression_target, expression_profile
+    global expression_mouth_strength, expression_expires_at, expression_pending
+    values: list[float] = []
+    for index in range(CHUNK_SIZE):
+        frame_time = now + index / 25.0
+        if expression_expires_at and frame_time >= expression_expires_at:
+            expression_target = 0.0
+        step = (
+            EXPRESSION_ATTACK_STEP
+            if expression_target > expression_gain
+            else EXPRESSION_RELEASE_STEP
+        )
+        if expression_gain < expression_target:
+            expression_gain = min(expression_target, expression_gain + step)
+        elif expression_gain > expression_target:
+            expression_gain = max(expression_target, expression_gain - step)
+        if expression_pending is not None and expression_gain <= 0.02:
+            profile, intensity, mouth_strength, duration_ms = expression_pending
+            expression_pending = None
+            expression_profile = profile
+            expression_target = intensity
+            expression_mouth_strength = mouth_strength
+            expression_expires_at = frame_time + duration_ms / 1000.0
+        values.append(expression_gain)
+    if expression_gain <= 0.001 and expression_target <= 0.001 and expression_pending is None:
+        expression_profile = "neutral"
+        expression_mouth_strength = 0.0
+    return values
+
+
 async def render_loop() -> None:
     global \
         last_frame_at, \
@@ -967,6 +1085,8 @@ async def render_loop() -> None:
                 else min(1.0, breath_mix + IDLE_BREATH_FADE_IN_STEP)
             )
             micro_pose_weights = _breath_weights(now, enabled=IDLE_BREATH_ENABLED)
+            expression_weights = _expression_frame_weights(now)
+            render_avatar_id = _render_avatar_for_expression(avatar_id)
 
             if BLINK_ENABLED and not blink_frames and now >= next_blink_at:
                 blink_frames.extend(_new_blink_profile())
@@ -1016,7 +1136,7 @@ async def render_loop() -> None:
                     content_type="application/octet-stream",
                 )
             params = {
-                "avatar_id": avatar_id,
+                "avatar_id": render_avatar_id,
                 "bg_id": BG_ID,
                 "pixel_format": "yuv_i420",
                 "cfg_self_audio": str(CFG_SELF_AUDIO),
@@ -1033,6 +1153,18 @@ async def render_loop() -> None:
                 "micro_pose_pitch_ratio": str(IDLE_BREATH_PITCH_RATIO),
                 "micro_pose_yaw_ratio": str(IDLE_BREATH_YAW_RATIO),
                 "micro_pose_roll_ratio": str(IDLE_BREATH_ROLL_RATIO),
+                # The calibrated source portrait already contains the visible
+                # pose. Avoid applying the same delta twice in that mode.
+                "expression": (
+                    "neutral" if render_avatar_id != avatar_id else expression_profile
+                ),
+                "expression_strength": "1.0",
+                "expression_weights": (
+                    "" if render_avatar_id != avatar_id else ",".join(
+                        f"{value:.4f}" for value in expression_weights
+                    )
+                ),
+                "expression_mouth_strength": str(expression_mouth_strength),
             }
             if renderer_session is None:
                 raise RuntimeError("renderer HTTP session is not initialized")
@@ -1077,6 +1209,7 @@ async def render_loop() -> None:
                 raw = frames[i * frame_len : (i + 1) * frame_len]
                 if len(raw) != frame_len:
                     break
+                raw = _crossfade_expression_frame(raw, render_avatar_id)
                 last_frame_at = time.time()
                 connected = True
                 video_frames_rendered += 1
@@ -1302,6 +1435,18 @@ async def handle_status(_request):
                 "idle_breath_fade_in_step": IDLE_BREATH_FADE_IN_STEP,
                 "idle_breath_fade_out_step": IDLE_BREATH_FADE_OUT_STEP,
                 "idle_breath_mix": round(breath_mix, 3),
+                "expression": {
+                    "profile": expression_profile,
+                    "gain": round(expression_gain, 3),
+                    "target": round(expression_target, 3),
+                    "mouth_strength": round(expression_mouth_strength, 3),
+                    "pending": expression_pending[0] if expression_pending else None,
+                    "render_source": expression_render_avatar,
+                    "source_min_intensity": EXPRESSION_SOURCE_MIN_INTENSITY,
+                    "transition_frames_remaining": expression_transition_frames,
+                    "attack_ms": EXPRESSION_ATTACK_FRAMES * 40,
+                    "release_ms": EXPRESSION_RELEASE_FRAMES * 40,
+                },
             },
         }
     )
@@ -1327,6 +1472,8 @@ async def handle_avatars(_request):
 
 async def handle_set_avatar(request):
     global AVATAR_ID, state_blob, state_avatar_id, h264_encoder, next_blink_at
+    global expression_render_avatar, expression_previous_frame, expression_transition_frames
+    global expression_transition_total_frames
     global speech_finished, speech_turn_active, speech_playing, speech_rebuffering
     global speech_turn_underruns, speech_dynamic_buffer_bytes, speech_output_ready, video_epoch
     body = await request.json()
@@ -1352,6 +1499,10 @@ async def handle_set_avatar(request):
         state_blob = None
         state_avatar_id = None
         h264_encoder = None
+        expression_render_avatar = avatar_id
+        expression_previous_frame = None
+        expression_transition_frames = 0
+        expression_transition_total_frames = 0
         video_epoch += 1
         # Show the newly selected portrait is alive soon after switching,
         # without blinking immediately on the first generated frame.
@@ -1381,6 +1532,48 @@ async def handle_set_motion_config(request):
         return web.json_response({"ok": False, "error": str(exc)}, status=400)
     print("[avtr1-gw] motion config updated", flush=True)
     return web.json_response({"ok": True, "motion": values})
+
+
+async def handle_expression(request):
+    global expression_profile, expression_gain, expression_target
+    global expression_mouth_strength, expression_expires_at
+    global expression_sequence, expression_pending
+    try:
+        body = await request.json()
+        profile = str(body.get("profile") or "neutral").strip().lower().replace("-", "_")
+        if profile not in EXPRESSION_PROFILES:
+            raise ValueError("unknown expression profile")
+        intensity = min(1.0, max(0.0, float(body.get("intensity", 0.0))))
+        mouth_strength = min(0.45, max(0.0, float(body.get("mouth_strength", 0.0))))
+        duration_ms = min(6000, max(300, int(body.get("duration_ms", 1200))))
+        sequence = max(0, int(body.get("sequence", 0)))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
+    if sequence and sequence <= expression_sequence:
+        return web.json_response({"ok": True, "ignored": "stale", "sequence": expression_sequence})
+    expression_sequence = max(expression_sequence, sequence)
+    if profile == "neutral" or intensity <= 0.0:
+        expression_pending = None
+        expression_target = 0.0
+        expression_expires_at = 0.0
+    elif profile == expression_profile or expression_gain <= 0.02:
+        expression_pending = None
+        expression_profile = profile
+        expression_target = intensity
+        expression_mouth_strength = mouth_strength
+        expression_expires_at = time.monotonic() + duration_ms / 1000.0
+    else:
+        # Fade the previous basis out before changing basis, avoiding a one
+        # frame eyebrow/mouth jump at clause boundaries.
+        expression_pending = (profile, intensity, mouth_strength, duration_ms)
+        expression_target = 0.0
+    return web.json_response({
+        "ok": True,
+        "profile": profile,
+        "intensity": intensity,
+        "duration_ms": duration_ms,
+        "sequence": expression_sequence,
+    })
 
 
 async def handle_livestream(request):
@@ -1491,6 +1684,7 @@ async def handle_interrupt(_request):
     global state_blob, last_speech_input_at, speech_finished
     global speech_turn_active, speech_playing, speech_rebuffering, speech_turn_underruns
     global speech_output_ready
+    global expression_target, expression_pending, expression_expires_at
     async with buf_lock:
         speech_pcm.clear()
         speech_finished = False
@@ -1501,6 +1695,9 @@ async def handle_interrupt(_request):
         speech_output_ready = False
         state_blob = None
         last_speech_input_at = 0.0
+        expression_target = 0.0
+        expression_pending = None
+        expression_expires_at = 0.0
     while not av_pace_queue.empty():
         try:
             av_pace_queue.get_nowait()
@@ -1537,6 +1734,7 @@ def main():
     app.router.add_post("/avatar", handle_set_avatar)
     app.router.add_get("/motion-config", handle_motion_config)
     app.router.add_put("/motion-config", handle_set_motion_config)
+    app.router.add_post("/expression", handle_expression)
     app.router.add_get("/livestream.flv", handle_livestream)
     app.router.add_post("/audio", handle_audio)
     app.router.add_post("/audio-chunk", handle_audio_chunk)

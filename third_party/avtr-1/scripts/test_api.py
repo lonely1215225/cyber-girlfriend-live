@@ -96,6 +96,9 @@ def _post_chunk(
     state_blob: bytes | None,
     avatar_id: str,
     bg_id: str,
+    expression: str = "neutral",
+    expression_strength: float = 0.0,
+    expression_mouth_strength: float = 0.0,
 ) -> tuple[bytes, bytes, dict]:
     """POST one chunk; return (next_state_blob, raw_frames_bytes, headers)."""
     files: dict = {
@@ -107,7 +110,15 @@ def _post_chunk(
     if state_blob is not None:
         files["state"] = ("state.bin", state_blob, "application/octet-stream")
 
-    params = {"avatar_id": avatar_id, "bg_id": bg_id, "pixel_format": "yuv_i420"}
+    params = {
+        "avatar_id": avatar_id,
+        "bg_id": bg_id,
+        "pixel_format": "yuv_i420",
+        "expression": expression,
+        "expression_strength": expression_strength,
+        "expression_weights": ",".join(["1"] * CHUNK_SIZE),
+        "expression_mouth_strength": expression_mouth_strength,
+    }
     r = client.post(f"{url}/process-audio-v3", files=files, params=params, timeout=60.0)
     r.raise_for_status()
 
@@ -138,6 +149,9 @@ def main() -> None:
     parser.add_argument("--avatar", default="anya_03_studio")
     parser.add_argument("--bg", default="default")
     parser.add_argument("--out", type=Path, default=Path("api_test_output.mp4"))
+    parser.add_argument("--expression", default="neutral")
+    parser.add_argument("--expression-strength", type=float, default=0.0)
+    parser.add_argument("--expression-mouth-strength", type=float, default=0.0)
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
@@ -196,6 +210,8 @@ def main() -> None:
                     client, server_url,
                     cur_sp, fut_sp, cur_ls, fut_ls,
                     state_blob, args.avatar, args.bg,
+                    args.expression, args.expression_strength,
+                    args.expression_mouth_strength,
                 )
 
                 if writer is None:

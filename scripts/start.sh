@@ -294,7 +294,6 @@ for extra in "$AVTR1_ENV/lib" "$AVTR1_ENV/lib/python3.12/site-packages/tensorrt_
 done
 export LD_LIBRARY_PATH
 export AVTR1_LOCAL_STORAGE="$AVTR1_ROOT/artifacts"
-export AVTR1_AVATAR_IDS="${AVTR1_AVATAR_ID:-xiaoya_locket}"
 export AVTR1_AVATAR_ID="${AVTR1_AVATAR_ID:-xiaoya_locket}"
 export AVTR1_BG_ID="${AVTR1_BG_ID:-plain_white}"
 export AVTR1_OUT_H="${AVTR1_OUT_H:-1280}"
@@ -329,6 +328,15 @@ export AVTR1_IDLE_BREATH_DRIFT_MIX="${AVTR1_IDLE_BREATH_DRIFT_MIX:-0.30}"
 export AVTR1_IDLE_BREATH_FADE_IN_STEP="${AVTR1_IDLE_BREATH_FADE_IN_STEP:-0.08}"
 export AVTR1_IDLE_BREATH_FADE_OUT_STEP="${AVTR1_IDLE_BREATH_FADE_OUT_STEP:-0.18}"
 export AVTR1_URL="http://127.0.0.1:${AVTR1_PORT:-18012}"
+export AVTR1_EXPRESSION_DIR="${AVTR1_EXPRESSION_DIR:-$ROOT/assets/expressions/xiaoya_locket}"
+export AVTR1_EXPRESSION_RETARGET_GAIN="${AVTR1_EXPRESSION_RETARGET_GAIN:-4.0}"
+export AVTR1_EXPRESSION_SOURCE_AVATAR="${AVTR1_EXPRESSION_SOURCE_AVATAR:-xiaoya_locket}"
+export AVTR1_EXPRESSION_SOURCE_PREFIX="${AVTR1_EXPRESSION_SOURCE_PREFIX:-xiaoya_locket_expr_}"
+export AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY="${AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY:-0.55}"
+export AVTR1_EXPRESSION_ATTACK_FRAMES="${AVTR1_EXPRESSION_ATTACK_FRAMES:-14}"
+export AVTR1_EXPRESSION_RELEASE_FRAMES="${AVTR1_EXPRESSION_RELEASE_FRAMES:-18}"
+export AVTR1_EXPRESSION_ATTACK_STEP="${AVTR1_EXPRESSION_ATTACK_STEP:-0.055}"
+export AVTR1_EXPRESSION_RELEASE_STEP="${AVTR1_EXPRESSION_RELEASE_STEP:-0.04}"
 export AVTR1_LOCAL_TEE_URL="http://127.0.0.1:${AVATAR_GW_PORT:-18011}"
 export LOAD_BALANCER_URL=disabled
 # Keep bundled portraits in the renderer artifact directory on every start.
@@ -345,6 +353,27 @@ for avatar_id in xiaoya_locket xiaoya xiaoya_idle xiaoya_beach_close xiaoya_beac
     && cp -f "$ROOT/assets/looks/pasteback_mask_soft.png" \
       "$AVTR1_FRAMES/${avatar_id}.pbmask.png"
 done
+# Expression portraits are separate render sources, not selectable characters.
+# AVTR continues to drive their mouth from live audio; the gateway crossfades
+# into them briefly for facial details its implicit keypoints cannot retarget.
+expression_avatar_ids=()
+for expression_source in "$ROOT"/assets/expressions/xiaoya_locket/reference-*.png; do
+  [[ -f "$expression_source" ]] || continue
+  expression_profile="$(basename "$expression_source" .png)"
+  expression_profile="${expression_profile#reference-}"
+  expression_profile="${expression_profile//-/_}"
+  [[ "$expression_profile" == "neutral" ]] && continue
+  expression_avatar_id="xiaoya_locket_expr_${expression_profile}"
+  cp -f "$expression_source" "$AVTR1_FRAMES/${expression_avatar_id}.png"
+  [[ -f "$ROOT/assets/looks/pasteback_mask_soft.png" ]] \
+    && cp -f "$ROOT/assets/looks/pasteback_mask_soft.png" \
+      "$AVTR1_FRAMES/${expression_avatar_id}.pbmask.png"
+  expression_avatar_ids+=("$expression_avatar_id")
+done
+# Preload the expression sources so the first real conversation never stalls
+# while extracting its portrait features. They are hidden from the avatar UI.
+AVTR1_PRELOAD_IDS=("$AVTR1_AVATAR_ID" "${expression_avatar_ids[@]}")
+export AVTR1_AVATAR_IDS="$(IFS=,; echo "${AVTR1_PRELOAD_IDS[*]}")"
 if alive "$RUN/avtr1_renderer.pid"; then
   say "avtr1 renderer already running (pid $(cat "$RUN/avtr1_renderer.pid"))"
 else

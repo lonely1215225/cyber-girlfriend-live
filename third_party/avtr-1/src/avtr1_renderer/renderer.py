@@ -47,6 +47,9 @@ def render_chunk_streaming(
     warp: WarpEngine,
     decoder: DecoderEngine,
     matting: MODNetEngine,
+    expression_delta: torch.Tensor | None = None,
+    expression_weights: torch.Tensor | None = None,
+    expression_mouth_strength: float = 0.0,
 ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
     """Yield ``(rgb_1, alpha_1)`` per frame; warp once, everything else per frame.
 
@@ -58,7 +61,14 @@ def render_chunk_streaming(
     with a per-frame ``pack_frames`` + H2D copy.
     """
     n = len(motions)
-    x_s, x_d_all = motion_stitch(avatar.kp_info, motions, stitch=stitch)
+    x_s, x_d_all = motion_stitch(
+        avatar.kp_info,
+        motions,
+        stitch=stitch,
+        expression_delta=expression_delta,
+        expression_weights=expression_weights,
+        expression_mouth_strength=expression_mouth_strength,
+    )
     f_s_b = avatar.f_s.expand(n, -1, -1, -1, -1).contiguous()
     x_s_b = x_s.expand_as(x_d_all).contiguous()
     warped = warp(
@@ -81,6 +91,9 @@ def render_chunk(
     warp: WarpEngine,
     decoder: DecoderEngine,
     matting: MODNetEngine,
+    expression_delta: torch.Tensor | None = None,
+    expression_weights: torch.Tensor | None = None,
+    expression_mouth_strength: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Render an entire chunk in one batched pass.
 
@@ -113,7 +126,14 @@ def render_chunk(
     """
     n = len(motions)
     # Batched: x_s is (1, 21, 3), x_d_all is (N, 21, 3).
-    x_s, x_d_all = motion_stitch(avatar.kp_info, motions, stitch=stitch)
+    x_s, x_d_all = motion_stitch(
+        avatar.kp_info,
+        motions,
+        stitch=stitch,
+        expression_delta=expression_delta,
+        expression_weights=expression_weights,
+        expression_mouth_strength=expression_mouth_strength,
+    )
     f_s_b = avatar.f_s.expand(n, -1, -1, -1, -1).contiguous()
     x_s_b = x_s.expand_as(x_d_all).contiguous()
     warped = warp(

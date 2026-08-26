@@ -298,6 +298,15 @@ class Pipeline[StateT]:
         motions, next_state = self._motion_generator.generate_chunk(
             chunk, avatar, state, options
         )
+        expression_delta = None
+        expression_weights = None
+        if len(options.expression_delta) == 63 and options.expression_weights:
+            expression_delta = torch.tensor(
+                options.expression_delta, dtype=torch.float32, device="cuda"
+            )
+            expression_weights = torch.tensor(
+                options.expression_weights, dtype=torch.float32, device="cuda"
+            )
 
         def frames_streaming() -> FrameIterator:
             stream = render_chunk_streaming(
@@ -306,6 +315,9 @@ class Pipeline[StateT]:
                 warp=self._warp,
                 decoder=self._decoder,
                 matting=self._matting,
+                expression_delta=expression_delta,
+                expression_weights=expression_weights,
+                expression_mouth_strength=options.expression_mouth_strength,
             )
             for rgb, alpha in stream:
                 packed = pack_frames(rgb, alpha, pixel_format=options.pixel_format)
@@ -318,6 +330,9 @@ class Pipeline[StateT]:
                 warp=self._warp,
                 decoder=self._decoder,
                 matting=self._matting,
+                expression_delta=expression_delta,
+                expression_weights=expression_weights,
+                expression_mouth_strength=options.expression_mouth_strength,
             )
             yield from pack_frames(rgb, alpha, pixel_format=options.pixel_format)
 

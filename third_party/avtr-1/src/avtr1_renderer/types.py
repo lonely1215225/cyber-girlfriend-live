@@ -170,6 +170,14 @@ class RenderOptions:
     micro_pose_yaw_ratio: float = 0.18
     micro_pose_roll_ratio: float = -0.10
 
+    # Semantic facial expression retargeted from a calibrated reference. The
+    # full 63-d delta includes brows, eyes, cheeks and mouth. Per-frame weights
+    # provide smooth attack/release; mouth strength stays independently
+    # bounded so expressive poses never fight audio-driven lip sync.
+    expression_delta: tuple[float, ...] = ()
+    expression_weights: tuple[float, ...] = ()
+    expression_mouth_strength: float = 0.0
+
     stream_frames: bool = True
 
 

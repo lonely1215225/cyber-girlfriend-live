@@ -100,5 +100,53 @@ class FixedFrameEncoderTests(unittest.TestCase):
         self.assertEqual(encoder.pts, 2)
 
 
+class SemanticExpressionEnvelopeTests(unittest.TestCase):
+    def setUp(self):
+        gateway.expression_profile = "neutral"
+        gateway.expression_gain = 0.0
+        gateway.expression_target = 0.6
+        gateway.expression_mouth_strength = 0.2
+        gateway.expression_expires_at = 0.0
+        gateway.expression_pending = None
+
+    def test_expression_attacks_smoothly_over_five_frames(self):
+        values = gateway._expression_frame_weights(100.0)
+        self.assertEqual(len(values), gateway.CHUNK_SIZE)
+        self.assertGreater(values[-1], values[0])
+        self.assertLessEqual(values[-1], 0.6)
+
+    def test_default_avatar_uses_visible_expression_source(self):
+        gateway.expression_profile = "one_brow"
+        gateway.expression_gain = 0.4
+        gateway.expression_target = 0.7
+        self.assertEqual(
+            gateway._render_avatar_for_expression("xiaoya_locket"),
+            "xiaoya_locket_expr_one_brow",
+        )
+        self.assertEqual(gateway._render_avatar_for_expression("xiaoya"), "xiaoya")
+
+    def test_mild_everyday_expression_stays_on_base_portrait(self):
+        gateway.expression_profile = "happy"
+        gateway.expression_gain = 0.2
+        gateway.expression_target = 0.34
+        self.assertEqual(
+            gateway._render_avatar_for_expression("xiaoya_locket"),
+            "xiaoya_locket",
+        )
+
+    def test_profile_switch_uses_gradual_release_before_replacing_basis(self):
+        gateway.expression_profile = "happy"
+        gateway.expression_gain = 0.5
+        gateway.expression_target = 0.0
+        gateway.expression_pending = ("one_brow", 0.45, 0.08, 900)
+        gateway._expression_frame_weights(100.0)
+        self.assertEqual(gateway.expression_profile, "happy")
+        self.assertGreater(gateway.expression_gain, 0.0)
+        for _ in range(3):
+            gateway._expression_frame_weights(100.0)
+        self.assertEqual(gateway.expression_profile, "one_brow")
+        self.assertGreater(gateway.expression_target, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
