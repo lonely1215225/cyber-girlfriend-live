@@ -1225,6 +1225,13 @@ async def room_chat(body: RoomChatRequest, request: Request):
         participant, _ = await _room_identity(request, create=False)
         message = await live_room.publish_chat(participant.token, body.text)
         mention_position = mention_replies.enqueue(message)
+        if mention_position is not None:
+            try:
+                await mention_replies.publish_queued(message, mention_position)
+            except Exception as exc:  # noqa: BLE001
+                # The chat itself is already accepted. A transient status
+                # failure must not make the browser resend and duplicate it.
+                logger.warning("mention queue acknowledgement failed: %s", exc)
         return {"message": message, "mentionQueuePosition": mention_position}
     except RoomError as exc:
         return _room_error(exc)
@@ -1327,6 +1334,7 @@ async def session(request: Request):
             # A newly granted/queued live interaction always outranks an
             # audience mention response. This is a no-op unless the room bot is
             # currently using the speech pipeline.
+            mention_replies.drop_welcomes(participant.id)
             await mention_replies.interrupt()
             response = JSONResponse(_room_grant_payload(request, data))
             if is_new:
@@ -1637,8 +1645,8 @@ def _role_instructions(persona_prompt: str, display_name: str, personal_memory: 
     instructions = str(persona_prompt or DEFAULT_PERSONA_PROMPT).strip()
     identity = f"当前正在与你连线的观众名字是“{display_name}”。请自然地用这个名字称呼对方。"
     tool_policy = (
-        "每个用户回合先调用 request_external_capabilities 做语义判断。普通聊天选择 conversation，"
-        "随后直接回答；实时、最新、价格、新闻或需要外部资料的问题选择最小必要能力。"
+        "普通聊天、问候、情绪交流和上下文追问直接回答，禁止调用工具。只有确实需要实时、最新、"
+        "价格、新闻、网页、私有知识或视觉信息时，才调用 request_external_capabilities 请求最小必要能力。"
         "能力展开后先用一句自然口语说明正在查询，同时立刻调用最合适的工具；拿到结果后必须在本轮"
         "给出结论，不能只留下‘我去查’。工具失败就明确说明，绝不编造。"
     )

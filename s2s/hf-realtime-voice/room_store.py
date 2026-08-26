@@ -242,6 +242,23 @@ class RoomStore:
                 self._fts_enabled = True
             except sqlite3.OperationalError:
                 self._fts_enabled = False
+            # Welcome IDs have always contained the target participant. Older
+            # versions saved those public assistant messages without user_id,
+            # so backfill the owner once and make existing welcomes available
+            # to that participant's private conversational context.
+            db.execute(
+                "UPDATE chat_messages SET user_id=("
+                "SELECT users.id FROM users "
+                "WHERE chat_messages.id LIKE 'bot:welcome:' || users.id || ':%' LIMIT 1"
+                ") WHERE user_id IS NULL AND id LIKE 'bot:welcome:%'"
+            )
+            if self._fts_enabled:
+                db.execute(
+                    "UPDATE chat_messages_fts SET user_id=COALESCE(("
+                    "SELECT chat_messages.user_id FROM chat_messages "
+                    "WHERE chat_messages.id=chat_messages_fts.message_id"
+                    "),'') WHERE message_id LIKE 'bot:welcome:%'"
+                )
             db.execute("PRAGMA user_version=1")
         os.chmod(self.path, 0o600)
         self._initialized = True
@@ -729,14 +746,22 @@ class RoomStore:
                     relevant = db.execute(
                         "SELECT m.id,m.role,m.speaker_snapshot,m.content,m.created_at "
                         "FROM chat_messages_fts f JOIN chat_messages m ON m.id=f.message_id "
-                        "WHERE f.user_id=? AND chat_messages_fts MATCH ? ORDER BY bm25(chat_messages_fts) LIMIT 6",
+                        "LEFT JOIN agent_jobs j ON j.room_id=m.room_id AND j.message_id=m.reply_to_id "
+                        "WHERE f.user_id=? AND chat_messages_fts MATCH ? "
+                        "AND NOT (m.role='assistant' AND COALESCE(j.terminal,0)=1 "
+                        "AND COALESCE(j.phase,'')<>'completed') "
+                        "ORDER BY bm25(chat_messages_fts) LIMIT 6",
                         (user_id, fts_query),
                     ).fetchall()
                 except sqlite3.OperationalError:
                     relevant = []
             recent = db.execute(
-                "SELECT id,role,speaker_snapshot,content,created_at FROM chat_messages "
-                "WHERE user_id=? ORDER BY created_at DESC LIMIT 10",
+                "SELECT m.id,m.role,m.speaker_snapshot,m.content,m.created_at FROM chat_messages m "
+                "LEFT JOIN agent_jobs j ON j.room_id=m.room_id AND j.message_id=m.reply_to_id "
+                "WHERE m.user_id=? "
+                "AND NOT (m.role='assistant' AND COALESCE(j.terminal,0)=1 "
+                "AND COALESCE(j.phase,'')<>'completed') "
+                "ORDER BY m.created_at DESC LIMIT 10",
                 (user_id,),
             ).fetchall()
         lines = [f"用户固定身份：{user['display_name']}"]

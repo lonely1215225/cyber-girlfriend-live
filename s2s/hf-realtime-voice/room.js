@@ -140,7 +140,46 @@ function render(state) {
   };
   text(myStatus, labels[state.me.status] || "正在观看");
   document.body.dataset.roomStatus = state.me.status || "watching";
-  renderTranscript(Array.isArray(state.messages) ? state.messages : []);
+  const jobs = Array.isArray(state.agent_jobs) ? state.agent_jobs : [];
+  const jobsByMessage = new Map(jobs.map((job) => [job.message_id, job]));
+  const messages = (Array.isArray(state.messages) ? state.messages : []).filter((item) => {
+    // Lifecycle rows are rendered from agent_jobs below. Ignore copies left by
+    // older servers, and remove an obsolete partial progress line as soon as
+    // the corresponding task reaches a terminal result.
+    if (item.kind === "agent_status") return false;
+    const job = jobsByMessage.get(item.reply_to?.id);
+    return !(job?.terminal && item.partial && item.role === "assistant");
+  });
+  const messageById = new Map(messages.map((item) => [item.id, item]));
+  for (const job of jobs) {
+    const origin = messageById.get(job.message_id);
+    if (job.terminal || !job.id || !origin) continue;
+    const alreadyHasSpokenProgress = messages.some((item) => (
+      item.partial && item.role === "assistant" && item.reply_to?.id === job.message_id
+    ));
+    if (alreadyHasSpokenProgress) continue;
+    messages.push({
+      id: `agent-status:${job.id}`,
+      kind: "agent_status",
+      role: "assistant",
+      speaker: "小麻",
+      text: job.status_text || "已进入回复队列",
+      partial: true,
+      interrupted: false,
+      // Keep the status attached to its source comment. Using updated_at made
+      // the same row jump to the bottom on every phase update.
+      created_at: Number(origin.created_at || job.created_at || Date.now() / 1000) + 0.000001,
+      agent_job_id: job.id,
+      agent_phase: job.phase || "queued",
+      reply_to: {
+        id: job.message_id,
+        speaker: job.speaker || "观众",
+        text: `@小麻 ${job.prompt || ""}`.trim(),
+      },
+    });
+  }
+  messages.sort((left, right) => Number(left.created_at || 0) - Number(right.created_at || 0));
+  renderTranscript(messages);
 
   if (queueList) {
     queueList.replaceChildren();
@@ -255,6 +294,10 @@ function renderTranscript(messages) {
     node.classList.toggle("voice", item.kind === "voice");
     if (item.agent_phase) node.dataset.agentPhase = item.agent_phase;
     else delete node.dataset.agentPhase;
+    // Sorting an array does not move existing elements in the DOM. Re-appending
+    // each retained node is cheap at this bounded size and guarantees the
+    // visual order matches the canonical transcript order after every update.
+    liveTranscript.appendChild(node);
   }
   for (const [index, item] of recent.entries()) {
     transcriptNodes.get(item.id)?.style.setProperty("--line-age", String(recent.length - index - 1));

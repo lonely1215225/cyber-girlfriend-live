@@ -134,20 +134,9 @@ class LiveRoom:
         async with self._lock:
             self._messages = messages[-MESSAGE_LIMIT:]
             self._agent_jobs = {str(item["id"]): dict(item, type="agent_job") for item in jobs}
-            existing_ids = {item["id"] for item in self._messages}
-            for job in jobs:
-                message_id = f"bot:agent:{job['id']}"
-                if job.get("terminal") or message_id in existing_ids:
-                    continue
-                self._messages.append({
-                    "id": message_id, "kind": "agent_status", "role": "assistant", "speaker": "小麻",
-                    "text": job.get("status_text") or "正在继续查询…", "partial": True,
-                    "interrupted": False, "created_at": job.get("created_at") or time.time(),
-                    "reply_to": {"id": job.get("message_id") or "", "speaker": job.get("speaker") or "观众",
-                                 "text": job.get("prompt") or ""},
-                    "agent_job_id": job["id"], "agent_phase": job.get("phase") or "queued",
-                })
-            self._messages = self._messages[-MESSAGE_LIMIT:]
+            # Agent lifecycle data already travels in `agent_jobs`. Recreating
+            # it as a second transcript message caused duplicate/stale status
+            # rows after every process restart.
 
     async def stop(self) -> None:
         if self._sweeper_task:
@@ -552,6 +541,7 @@ class LiveRoom:
         reply_to: dict[str, Any] | None,
         partial: bool = False,
         interrupted: bool = False,
+        memory_user_id: str = "",
     ) -> dict[str, Any] | None:
         """Upsert a quoted comment reply or an unquoted proactive room message."""
         clean = _clean_public_text(text)[:2000]
@@ -585,7 +575,10 @@ class LiveRoom:
             self._messages = self._messages[-MESSAGE_LIMIT:]
             self._broadcast_locked()
             saved = dict(item)
-            user_id = str(reply_to.get("participant_id") or "") if reply_to else ""
+            user_id = (
+                str(reply_to.get("participant_id") or "") if reply_to
+                else str(memory_user_id or "")
+            )
         if self.store and not partial:
             await self.store.save_message(saved, user_id=user_id or None)
         return saved
@@ -605,6 +598,15 @@ class LiveRoom:
         job_id = str(saved_job.get("id") or job.get("id") or "")
         async with self._lock:
             self._agent_jobs[job_id] = saved_job
+            # Clean up status rows produced by older server versions. Current
+            # clients render lifecycle state directly from `_agent_jobs`.
+            self._messages = [
+                item for item in self._messages
+                if not (
+                    item.get("agent_job_id") == job_id
+                    or item.get("id") == f"bot:agent:{job_id}"
+                )
+            ]
             self._proactive_block_until = max(
                 self._proactive_block_until,
                 time.monotonic() + self._agent_proactive_cooldown_s,

@@ -101,6 +101,26 @@ class RoomStoreTests(unittest.IsolatedAsyncioTestCase):
         history = await self.store.load_recent_messages()
         self.assertIn("m-private-b", [item["id"] for item in history])
 
+    async def test_legacy_welcome_is_backfilled_into_its_users_context(self):
+        self.assertTrue(await self.store.create_user(
+            user_id="viewer-123", display_name="林清欢", name_zh="林清欢", name_en="",
+            token="welcome-owner-token",
+        ))
+        welcome = "林清欢，你一来，今晚的月亮都像偷偷调亮了一格呀。"
+        await self.store.save_message({
+            "id": "bot:welcome:viewer-123:1000:speech:1:0",
+            "kind": "mention_reply", "role": "assistant", "speaker": "小麻",
+            "text": welcome, "created_at": 1000.0,
+        })
+        before = await self.store.memory_context("viewer-123", "刚才怎么欢迎我的")
+        self.assertNotIn(welcome, before)
+
+        # Reopening the store runs the compatibility migration.
+        restored = RoomStore(self.store.path)
+        await restored.initialize()
+        after = await restored.memory_context("viewer-123", "刚才怎么欢迎我的")
+        self.assertIn(welcome, after)
+
     async def test_admin_sessions_are_independent_and_revocable(self):
         first = await self.store.create_admin_session(
             ip_address="203.0.113.10", user_agent="browser-a", ttl_seconds=1800
@@ -133,6 +153,29 @@ class RoomStoreTests(unittest.IsolatedAsyncioTestCase):
         context = await self.store.recent_agent_context("user-a")
         self.assertIn("比特币", context)
         self.assertIn("65,000美元", context)
+
+    async def test_failed_agent_output_is_not_reused_as_private_memory(self):
+        self.assertTrue(await self.store.create_user(
+            user_id="user-a", display_name="林知夏", name_zh="林知夏", name_en="",
+            token="failed-memory-token",
+        ))
+        await self.store.save_message({
+            "id": "chat-failed", "kind": "chat", "role": "viewer", "speaker": "林知夏",
+            "text": "@小麻 你是机器人吗", "created_at": 100.0,
+        }, user_id="user-a")
+        await self.store.save_message({
+            "id": "bot-failed", "kind": "mention_reply", "role": "assistant", "speaker": "小麻",
+            "text": "正在核对实时行情和币种。", "created_at": 101.0,
+            "reply_to": {"id": "chat-failed", "speaker": "林知夏", "text": "@小麻 你是机器人吗"},
+        }, user_id="user-a")
+        await self.store.save_agent_job({
+            "id": "aj-failed", "message_id": "chat-failed", "participant_id": "user-a",
+            "speaker": "林知夏", "prompt": "你是机器人吗", "phase": "failed",
+            "status_text": "本轮失败", "terminal": True, "error": "off-topic",
+        })
+        memory = await self.store.memory_context("user-a", "刚才机器人怎么回事")
+        self.assertNotIn("实时行情", memory)
+        self.assertIn("你是机器人吗", memory)
 
     async def test_conversation_focus_is_private_and_persistent(self):
         spec = {
