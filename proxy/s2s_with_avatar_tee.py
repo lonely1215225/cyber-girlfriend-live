@@ -24,6 +24,7 @@ import uvicorn
 from speech_to_speech.api.openai_realtime import websocket_router
 
 from tiered_memory import cancel_semantic_refinements, install_tiered_memory
+from expression_director import begin_delivery_response, clear_delivery_state, cues_after
 
 LOG = logging.getLogger("speech_to_speech.avatar_tee")
 LOG.setLevel(logging.INFO)
@@ -74,6 +75,8 @@ class LocalAvatarTee:
         self.audio_bytes = 0
         self.chunk_count = 0
         self.max_feed_gap_ms = 0.0
+        self.expression_sequence = 0
+        self.expression_claimed = False
 
     def _client(self) -> httpx.AsyncClient:
         if self.client is None:
@@ -105,6 +108,30 @@ class LocalAvatarTee:
         ):
             self._start_pump()
 
+    async def sync_expression(self) -> None:
+        """Bind at most one LLM cue to the current synthesized audio segment."""
+        if self.expression_claimed:
+            return
+        cues = cues_after(self.expression_sequence)
+        if not cues:
+            return
+        cue = cues[0]
+        self.expression_sequence = cue.sequence
+        self.expression_claimed = True
+        try:
+            await self._client().post(
+                f"{self.base_url}/expression",
+                json={
+                    "profile": cue.profile,
+                    "intensity": cue.intensity,
+                    "duration_ms": cue.duration_ms,
+                    "mouth_strength": cue.mouth_strength,
+                    "sequence": cue.sequence,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("AVTR-1 expression cue failed: %s", exc)
+
     def finish(self, *, complete: bool = False) -> None:
         self.done = True
         self.complete_flush = bool(complete)
@@ -113,10 +140,15 @@ class LocalAvatarTee:
         if self.pending and self.pump_task is None:
             self._start_pump()
 
+    def finish_expression_segment(self) -> None:
+        self.expression_claimed = False
+
     async def interrupt(self) -> None:
         self.generation += 1
         self.pending.clear()
         self.done = False
+        self.expression_claimed = False
+        clear_delivery_state()
         self._reset_metrics()
         task = self.pump_task
         self.pump_task = None
@@ -235,19 +267,23 @@ if TEE_URL:
             return
         for event in events:
             event_type = getattr(event, "type", "")
-            if event_type == "response.created" and complete_audio:
-                # Clear a cancelled/incomplete prior buffered turn before
-                # accepting the new one. The room permits only one bot speaker.
-                await tee.interrupt()
-                tee.complete_flush = True
+            if event_type == "response.created":
+                begin_delivery_response()
+                if complete_audio:
+                    # Clear a cancelled/incomplete prior buffered turn before
+                    # accepting the new one. The room permits only one bot speaker.
+                    await tee.interrupt()
+                    tee.complete_flush = True
             elif event_type in ("response.audio.delta", "response.output_audio.delta"):
                 delta = getattr(event, "delta", "")
                 if delta:
                     try:
+                        await tee.sync_expression()
                         tee.feed(base64.b64decode(delta))
                     except Exception as exc:  # noqa: BLE001
                         LOG.warning("Invalid realtime PCM delta: %s", exc)
             elif event_type in ("response.audio.done", "response.output_audio.done"):
+                tee.finish_expression_segment()
                 # Realtime mode finishes each sentence promptly. Completeness
                 # mode waits for response.done so every sentence is present.
                 if not complete_audio:

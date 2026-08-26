@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,16 @@ from sensevoice_stt import SenseVoiceMetadata, get_turn_context
 from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
-LOG = logging.getLogger(__name__)
+from expression_director import (
+    DELIVERY_CONTROL_PROMPT,
+    DeliveryControlFilter,
+    publish_expression,
+)
+
+# Reuse the handler logger, which the service explicitly keeps at INFO. The
+# module's former top-level logger stayed at WARNING, hiding the exact text and
+# pause hints that reached TTS and making punctuation regressions hard to audit.
+LOG = logging.getLogger("speech_to_speech.TTS.qwen3_tts_handler")
 
 _STYLE_INSTRUCTIONS = {
     "neutral": "像和熟人面对面聊天一样自然地说。按语义短句呼吸和停顿，有轻重音与语调变化，不要一口气念完，也不要像播报或朗诵。",
@@ -30,40 +40,23 @@ _VOICE_IDENTITY_LOCK = (
     "情绪只改变语气和节奏，不要改变声线，不要变成低沉或男性音色。"
 )
 
-_GENTLE_WORDS = (
-    "别怕",
-    "没事",
-    "我在",
-    "抱抱",
-    "辛苦",
-    "难过",
-    "委屈",
-    "慢慢",
-    "陪你",
-    "心疼",
-)
-_CHEERFUL_WORDS = ("欢迎", "开心", "太好了", "恭喜", "哈哈", "嘿", "哇", "真棒", "好耶")
-_SERIOUS_WORDS = (
-    "新闻",
-    "报道",
-    "风险",
-    "提醒",
-    "目前",
-    "数据显示",
-    "需要注意",
-    "局势",
-    "发生",
-)
 _SPEECHABLE_WITH_CJK_PUNCTUATION = re.compile(
     r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–，。！？；：、（）【】《》“”‘’￥]",
     flags=re.UNICODE,
 )
 
+_delivery_filter_local = threading.local()
+
 
 def remove_unspeechable_preserving_cjk(text: str) -> str:
-    """Remove emoji/control glyphs without deleting the model's CJK punctuation."""
+    """Hide LLM delivery controls and preserve the model's CJK punctuation."""
 
-    return _SPEECHABLE_WITH_CJK_PUNCTUATION.sub("", text)
+    delivery_filter = getattr(_delivery_filter_local, "value", None)
+    if delivery_filter is None:
+        delivery_filter = DeliveryControlFilter()
+        _delivery_filter_local.value = delivery_filter
+    visible_text = delivery_filter.feed(text)
+    return _SPEECHABLE_WITH_CJK_PUNCTUATION.sub("", visible_text)
 
 
 def split_streaming_sentences(text: str) -> list[str]:
@@ -76,30 +69,47 @@ def split_streaming_sentences(text: str) -> list[str]:
     sentence immediately when its closing punctuation arrives.
     """
     if re.search(r"[\u3400-\u9fff]", text):
-        return re.split(r"(?<=[。！？!?])", text)
+        # Besides sentence endings, emit a short leading address/discourse
+        # marker as soon as its Chinese comma arrives. Qwen otherwise receives
+        # e.g. "三丰，小米……" as one long synthesis request and can flatten the
+        # vocative pause into "三丰小米". Keeping the comma at the end of its own
+        # early chunk lets the model's normal appended silence make the pause
+        # audible without splitting every comma in the paragraph.
+        boundaries: list[int] = []
+        clause_start = 0
+        for index, char in enumerate(text):
+            if char in "。！？!?；：":
+                boundaries.append(index + 1)
+                clause_start = index + 1
+            elif char == "…" and (index + 1 == len(text) or text[index + 1] != "…"):
+                # A completed ellipsis is a punctuation boundary regardless of
+                # the words around it; no semantic phrase list is involved.
+                boundaries.append(index + 1)
+                clause_start = index + 1
+            elif char == "，":
+                prefix = text[clause_start:index].strip()
+                if 1 <= len(prefix) <= 8 and re.fullmatch(r"[\u3400-\u9fff]+", prefix):
+                    boundaries.append(index + 1)
+                    clause_start = index + 1
+        if not boundaries:
+            return [text]
+        output: list[str] = []
+        start = 0
+        for end in sorted(set(boundaries)):
+            if end <= start:
+                continue
+            output.append(text[start:end])
+            start = end
+        output.append(text[start:])
+        return output
     from nltk import sent_tokenize as nltk_sent_tokenize
 
     return nltk_sent_tokenize(text)
 
 
 def choose_tts_style(text: str, metadata: SenseVoiceMetadata | None = None) -> str:
-    """Choose the reply delivery style from user acoustics and reply semantics."""
+    """Non-semantic fallback used only when the model omits its delivery plan."""
 
-    if metadata:
-        if metadata.emotion in {"难过", "害怕", "厌恶"} or metadata.event == "哭声":
-            return "gentle"
-        if metadata.emotion == "生气":
-            return "calm"
-        if metadata.emotion in {"开心", "惊讶"} or metadata.event in {"笑声", "掌声"}:
-            return "cheerful"
-
-    compact = re.sub(r"\s+", "", text)
-    if any(word in compact for word in _GENTLE_WORDS):
-        return "gentle"
-    if any(word in compact for word in _CHEERFUL_WORDS):
-        return "cheerful"
-    if any(word in compact for word in _SERIOUS_WORDS):
-        return "serious"
     return "neutral"
 
 
@@ -122,6 +132,38 @@ def prepare_tts_text(
         value,
     )
     value = re.sub(r"[ \t]+", " ", value).strip()
+    if prosody_enabled:
+        # Newlines are model-native whitespace, not SSML or invented spoken
+        # punctuation. They strengthen existing semantic boundaries for the
+        # Base voice-clone model while leaving transcript text untouched.
+        # A short opening comma covers names such as "三丰，"; long clauses are
+        # allowed to breathe at their own comma. ASCII commas remain untouched
+        # so prices and identifiers such as 1,280.50 stay continuous.
+        hinted: list[str] = []
+        clause_chars = 0
+        for index, char in enumerate(value):
+            hinted.append(char)
+            if char in "。！？!?；：":
+                if index + 1 < len(value) and value[index + 1] != "\n":
+                    hinted.append("\n")
+                clause_chars = 0
+                continue
+            if char == "，":
+                should_pause = clause_chars <= 8 or clause_chars >= max(12, max_clause_chars)
+                if index + 1 < len(value) and not value[index + 1].isspace():
+                    # Every Chinese comma receives at least a short whitespace
+                    # cue. Vocatives and long clauses receive a stronger line
+                    # boundary, while remaining a single synthesis request.
+                    hinted.append("\n" if should_pause else " ")
+                clause_chars = 0
+                continue
+            if char == "、":
+                if index + 1 < len(value) and not value[index + 1].isspace():
+                    hinted.append(" ")
+                continue
+            if not char.isspace():
+                clause_chars += 1
+        value = "".join(hinted)
     return value
 
 
@@ -158,15 +200,10 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
     def _coalesce_pending_tts_input(
         self, current_input: TTSInput
     ) -> tuple[str, str | None, bool]:
-        text, language_code, saw_end = super()._coalesce_pending_tts_input(
-            current_input
-        )
+        text, language_code, saw_end = super()._coalesce_pending_tts_input(current_input)
         metadata = get_turn_context(current_input.turn_id, current_input.turn_revision)
-        self._active_style = (
-            choose_tts_style(text, metadata)
-            if self.emotion_control_enabled
-            else "neutral"
-        )
+        cue = publish_expression(text, metadata=metadata)
+        self._active_style = cue.style if self.emotion_control_enabled else "neutral"
         spoken_text = prepare_tts_text(
             text,
             self._active_style,
@@ -174,8 +211,12 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
             max_clause_chars=self.prosody_max_clause_chars,
         )
         LOG.info(
-            "TTS delivery style=%s user_emotion=%s event=%s text=%s",
+            "TTS delivery source=%s style=%s expression=%s intensity=%.2f "
+            "user_emotion=%s event=%s text=%r",
+            cue.source,
             self._active_style,
+            cue.profile,
+            cue.intensity,
             metadata.emotion if metadata else None,
             metadata.event if metadata else None,
             spoken_text,
@@ -262,6 +303,18 @@ def install_emotion_aware_tts() -> None:
     import speech_to_speech.TTS.qwen3_tts_handler as handler_module
 
     handler_module.Qwen3TTSHandler = EmotionAwareQwen3TTSHandler
+    handler_class = responses_module.ResponsesApiModelHandler
+    if not getattr(handler_class, "_delivery_control_installed", False):
+        original_apply_config = handler_class._apply_config
+
+        def apply_config_with_delivery_control(self, chat, instructions):
+            value = str(instructions or "")
+            if "只逐字朗读用户提供的文字" not in value:
+                value = f"{value}\n{DELIVERY_CONTROL_PROMPT}".strip()
+            return original_apply_config(self, chat, value)
+
+        handler_class._apply_config = apply_config_with_delivery_control
+        handler_class._delivery_control_installed = True
     llm_utils_module.remove_unspeechable = remove_unspeechable_preserving_cjk
     # responses_api_language_model imports the helper into its module scope,
     # so patch that reference too. This fixes the actual punctuation loss
