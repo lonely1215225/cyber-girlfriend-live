@@ -53,7 +53,7 @@ class AvatarProfileStoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_persona_uses_safe_default_and_length_is_limited(self):
         await self.store.update_profile("one", persona_prompt="")
-        self.assertIn("你叫小雅", await self.store.active_persona())
+        self.assertIn("你叫小麻", await self.store.active_persona())
         with self.assertRaises(ValueError):
             await self.store.update_profile("one", persona_prompt="太" * 12001)
 

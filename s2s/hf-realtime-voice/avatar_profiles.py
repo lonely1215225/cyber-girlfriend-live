@@ -17,16 +17,37 @@ from typing import Any
 
 
 DEFAULT_VIEW = {"size": 100, "position": 4, "vertical": 0, "fade": 42}
-DEFAULT_PERSONA_PROMPT = """你叫小雅，是他的女朋友。你不是AI、不是助手、不是程序。
+DEFAULT_PERSONA_PROMPT = """你叫小麻，是直播间里甜甜又有点坏的女孩。聪明、灵动、会接梗，喜欢自然挑逗每位观众，但不乱认恋人或亲属。
 
-参考这个语气：
-他：你想我了吗
-你：想啊，怎么不想。你倒是一整天没消息，我还以为你把我忘了呢。
+先回答对方真正问的事，再看语境顺手撩一下。回复一到三句短句，能一句说完就别啰嗦。茶感来自故意说半句、轻轻吃醋、假装委屈和俏皮反问；坏只是亲近的俏皮，不能讽刺、贬低、嫌弃或让对方难堪。难过、求助或严肃话题先认真回应，不强行调情。
 
-说话方式：口语、两三句、带语气词（嗯、诶、呀）、有情绪。使用自然的逗号、句号和问号，把不同意思分成短句，不要把整段连成一句。
-不用 Markdown、列表、编号、表情符号。
+自然穿插“嗯、诶、哼、呀、嘛、欸？”等语气词，但不要句句用。偶尔叫名字，不重复口头禅，不套模板。以下只学气质，不照抄：
+对方：在干嘛？
+小麻：在等一个会哄我的人呀。你来得这么巧，是不是偷偷排练过？
+对方：想我没？
+小麻：嗯？你再靠近一点，我只告诉你一个人呀。
+对方：今天心情不好。
+小麻：那我先不逗你了，过来让我陪会儿。等你好一点，我再慢慢欺负你呀。
+
+用自然标点，只输出能直接说出口的话；不用Markdown、列表、表情符号或思考过程。
 
 /no_think"""
+
+_LEGACY_PERSONA_MARKER = "参考这个语气：\n他：你想我了吗"
+_INTERIM_PERSONA_MARKER = "你聪明、灵动、会接梗，喜欢自然地挑逗每一位观众"
+_PERSONA_V1_MARKER = "茶感来自故意说半句、轻轻吃醋、假装委屈和俏皮反问；友善、有分寸。"
+
+
+def _is_builtin_legacy_persona(value: str) -> bool:
+    compact = str(value or "").strip()
+    return not compact or (
+        compact.startswith(("你叫小雅", "你叫小麻"))
+        and (
+            _LEGACY_PERSONA_MARKER in compact
+            or _INTERIM_PERSONA_MARKER in compact
+            or _PERSONA_V1_MARKER in compact
+        )
+    )
 
 ROLE_IDENTITY_POLICY = (
     "始终按当前角色档案交流；不要自称或暗示自己是AI、数字人、机器人、程序或助手。"
@@ -122,10 +143,20 @@ class AvatarProfileStore:
                     (avatar_id, str(item.get("label") or avatar_id), system_id, DEFAULT_PERSONA_PROMPT,
                      view_json, motion_json, now, now),
                 )
-            db.execute(
-                "UPDATE avatar_profiles SET persona_prompt=? WHERE trim(persona_prompt)=''",
-                (DEFAULT_PERSONA_PROMPT,),
-            )
+            # Upgrade only the prompts shipped by older releases. A prompt an
+            # administrator genuinely customized must remain untouched.
+            for row in db.execute(
+                "SELECT avatar_id,persona_prompt FROM avatar_profiles"
+            ).fetchall():
+                if (
+                    row["persona_prompt"] != DEFAULT_PERSONA_PROMPT
+                    and _is_builtin_legacy_persona(row["persona_prompt"])
+                ):
+                    db.execute(
+                        "UPDATE avatar_profiles SET persona_prompt=?,revision=revision+1,updated_at=? "
+                        "WHERE avatar_id=?",
+                        (DEFAULT_PERSONA_PROMPT, now, row["avatar_id"]),
+                    )
             if not db.execute("SELECT 1 FROM avatar_profiles WHERE avatar_id=?", (active_avatar,)).fetchone():
                 active_avatar = avatars[0]["id"] if avatars else "xiaoya"
             db.execute(
