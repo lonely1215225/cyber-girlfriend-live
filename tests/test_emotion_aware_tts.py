@@ -18,9 +18,11 @@ from emotion_aware_tts import (  # noqa: E402
 from sensevoice_stt import SenseVoiceMetadata  # noqa: E402
 from expression_director import (  # noqa: E402
     DeliveryControlFilter,
+    begin_delivery_generation,
     begin_delivery_response,
     clear_delivery_state,
     cue_duration_ms,
+    cues_after,
     publish_expression,
 )
 
@@ -28,6 +30,7 @@ from expression_director import (  # noqa: E402
 class EmotionAwareTTSTests(unittest.TestCase):
     def setUp(self) -> None:
         clear_delivery_state()
+        begin_delivery_generation()
 
     def test_chinese_streaming_split_emits_completed_sentence_immediately(self) -> None:
         self.assertEqual(split_streaming_sentences("你好呀。你今天"), ["你好呀。", "你今天"])
@@ -129,6 +132,50 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(cue.source, "llm")
         self.assertEqual(cue.profile, "happy")
         self.assertAlmostEqual(cue.intensity, 0.68)
+
+    def test_bare_control_line_never_leaks_to_chat_or_tts(self) -> None:
+        control = DeliveryControlFilter()
+        chunks = ["wi", "nk 0.75 cheer", "ful\n\n欢迎你呀。"]
+        visible = "".join(control.feed(chunk) for chunk in chunks)
+        self.assertEqual(visible, "欢迎你呀。")
+        cue = publish_expression(visible)
+        self.assertEqual(cue.profile, "wink")
+        self.assertEqual(cue.style, "cheerful")
+
+    def test_multiple_bare_controls_are_removed_from_any_text_position(self) -> None:
+        control = DeliveryControlFilter()
+        chunks = [
+            "smirk 0.6 cheer", "ful\n哟，敢不敢比？ ha",
+            "ppy 0.75 gentle\n输了可别跑。",
+        ]
+        visible = "".join(control.feed(chunk) for chunk in chunks)
+        self.assertEqual(visible, "哟，敢不敢比？ 输了可别跑。")
+        first = publish_expression(visible)
+        timeline = cues_after(first.sequence - 1)
+        self.assertEqual([cue.profile for cue in timeline], ["smirk", "happy"])
+
+    def test_inline_controls_advance_each_spoken_segment(self) -> None:
+        control = DeliveryControlFilter()
+        first = control.feed("<e shy 0.62 gentle>刚看到你，我还有点害羞。")
+        second = control.feed("<e smirk 0.74 cheerful>不过你别得意得太早呀。")
+        first_cue = publish_expression(first + second)
+        timeline = cues_after(first_cue.sequence - 1)
+        self.assertEqual([cue.profile for cue in timeline], ["shy", "smirk"])
+        self.assertEqual(timeline[0].delay_ms, 0)
+        self.assertGreater(timeline[1].delay_ms, 0)
+
+    def test_later_tts_segment_keeps_absolute_response_timing(self) -> None:
+        control = DeliveryControlFilter()
+        first_text = control.feed("<e happy 0.65 cheerful>第一句先开心地说完。")
+        first_cue = publish_expression(first_text)
+        second_text = control.feed("<e shy 0.60 gentle>第二句再慢慢害羞。")
+        second_cue = publish_expression(second_text)
+        self.assertEqual(first_cue.delay_ms, 0)
+        self.assertGreater(second_cue.delay_ms, 0)
+
+    def test_natural_text_starting_with_profile_word_is_preserved(self) -> None:
+        control = DeliveryControlFilter()
+        self.assertEqual(control.feed("wink at the camera。"), "wink at the camera。")
 
     def test_visual_hold_is_based_on_length_not_phrase_matching(self) -> None:
         self.assertEqual(cue_duration_ms("甲乙丙丁", "happy"), cue_duration_ms("春夏秋冬", "happy"))

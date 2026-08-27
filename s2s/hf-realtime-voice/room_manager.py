@@ -38,17 +38,61 @@ _REASONING_BLOCK_RE = re.compile(
 )
 _REASONING_OPEN_RE = re.compile(r"<(?:think|analysis|reasoning)\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
 _REASONING_CLOSE_RE = re.compile(r"</(?:think|analysis|reasoning)\s*>", re.IGNORECASE)
+_DELIVERY_PROFILES = (
+    "neutral", "happy", "surprised", "serious", "pout", "one_brow",
+    "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",
+)
+_DELIVERY_STYLES = ("neutral", "gentle", "calm", "cheerful", "serious")
+_DELIVERY_TAG_RE = re.compile(r"</?e(?:\s+[^>]*)?>", re.IGNORECASE)
+_DELIVERY_BARE_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])(?:{'|'.join(sorted(_DELIVERY_PROFILES, key=len, reverse=True))})"
+    rf"\s+(?:0(?:\.\d+)?|1(?:\.0+)?)"
+    rf"\s+(?:{'|'.join(sorted(_DELIVERY_STYLES, key=len, reverse=True))})"
+    rf"(?:\s+(?:0(?:\.\d+)?|1(?:\.0+)?))?"
+    r"(?=$|[\s，。！？、；：,.!?;:])",
+    re.IGNORECASE,
+)
+_DELIVERY_PROFILE_SET = frozenset(_DELIVERY_PROFILES)
+_DELIVERY_STYLE_SET = frozenset(_DELIVERY_STYLES)
 MESSAGE_LIMIT = 80
 CHAT_WINDOW_SECONDS = 10.0
 CHAT_WINDOW_MESSAGES = 5
 
 
-def _clean_public_text(value: str) -> str:
+def _clean_public_text(value: str, *, assistant: bool = False) -> str:
     """Remove provider reasoning markup before it reaches the public room."""
     text = str(value or "")
     text = _REASONING_BLOCK_RE.sub("", text)
     text = _REASONING_OPEN_RE.sub("", text)
     text = _REASONING_CLOSE_RE.sub("", text)
+    if assistant:
+        text = _DELIVERY_TAG_RE.sub("", text)
+        text = _DELIVERY_BARE_RE.sub("", text)
+        # Partial transcript events can arrive token by token. Hide an exact
+        # protocol prefix at the tail until it either becomes a complete
+        # record (removed above) or proves to be ordinary prose.
+        search_start = max(0, len(text) - 96)
+        for token in re.finditer(r"(?<![A-Za-z0-9_])[A-Za-z_]", text[search_start:]):
+            index = search_start + token.start()
+            candidate = text[index:].strip()
+            parts = candidate.split()
+            if not parts:
+                continue
+            profile = parts[0].lower()
+            possible = False
+            if len(parts) == 1:
+                possible = any(item.startswith(profile) for item in _DELIVERY_PROFILE_SET)
+            elif profile in _DELIVERY_PROFILE_SET and re.fullmatch(r"[01](?:\.\d*)?", parts[1]):
+                if len(parts) == 2:
+                    possible = True
+                elif re.fullmatch(r"(?:0(?:\.\d+)?|1(?:\.0+)?)", parts[1]):
+                    style = parts[2].lower()
+                    possible = len(parts) == 3 and any(
+                        item.startswith(style) for item in _DELIVERY_STYLE_SET
+                    )
+            if possible:
+                text = text[:index]
+                break
     return _SPACE_RE.sub(" ", text).strip()
 
 
@@ -132,6 +176,11 @@ class LiveRoom:
         messages = await self.store.load_recent_messages(MESSAGE_LIMIT)
         jobs = await self.store.load_agent_jobs(limit=30)
         async with self._lock:
+            for message in messages:
+                if message.get("role") == "assistant":
+                    message["text"] = _clean_public_text(
+                        str(message.get("text") or ""), assistant=True
+                    )
             self._messages = messages[-MESSAGE_LIMIT:]
             self._agent_jobs = {str(item["id"]): dict(item, type="agent_job") for item in jobs}
             # Agent lifecycle data already travels in `agent_jobs`. Recreating
@@ -434,7 +483,7 @@ class LiveRoom:
         interrupted: bool = False,
     ) -> None:
         """Upsert a recent public-room transcript line and notify all viewers."""
-        clean = _clean_public_text(text)[:2000]
+        clean = _clean_public_text(text, assistant=role == "assistant")[:2000]
         if not clean or role not in {"user", "assistant"}:
             return
         message_id = f"{session_id}:{role}:{event_id or 'unknown'}"
@@ -544,7 +593,7 @@ class LiveRoom:
         memory_user_id: str = "",
     ) -> dict[str, Any] | None:
         """Upsert a quoted comment reply or an unquoted proactive room message."""
-        clean = _clean_public_text(text)[:2000]
+        clean = _clean_public_text(text, assistant=True)[:2000]
         if not clean:
             return None
         quote = None

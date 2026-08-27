@@ -20,6 +20,7 @@ from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 from expression_director import (
     DELIVERY_CONTROL_PROMPT,
     DeliveryControlFilter,
+    begin_delivery_generation,
     publish_expression,
 )
 
@@ -306,6 +307,7 @@ def install_emotion_aware_tts() -> None:
     handler_class = responses_module.ResponsesApiModelHandler
     if not getattr(handler_class, "_delivery_control_installed", False):
         original_apply_config = handler_class._apply_config
+        original_generate = handler_class._generate
 
         def apply_config_with_delivery_control(self, chat, instructions):
             value = str(instructions or "")
@@ -314,6 +316,15 @@ def install_emotion_aware_tts() -> None:
             return original_apply_config(self, chat, value)
 
         handler_class._apply_config = apply_config_with_delivery_control
+
+        def generate_with_delivery_control(self, *args, **kwargs):
+            # This runs in the same worker and immediately before the first
+            # model delta, unlike the later outbound response.created event.
+            begin_delivery_generation()
+            _delivery_filter_local.value = DeliveryControlFilter()
+            yield from original_generate(self, *args, **kwargs)
+
+        handler_class._generate = generate_with_delivery_control
         handler_class._delivery_control_installed = True
     llm_utils_module.remove_unspeechable = remove_unspeechable_preserving_cjk
     # responses_api_language_model imports the helper into its module scope,

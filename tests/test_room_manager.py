@@ -174,6 +174,39 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
         state = await self.room.snapshot(self.alice.token)
         self.assertEqual(len(state["messages"]), before)
 
+    async def test_assistant_delivery_controls_never_reach_public_messages(self):
+        await self.room.publish_transcript(
+            session_id="call-expression",
+            event_id="answer",
+            role="assistant",
+            speaker="小麻",
+            text=(
+                "smirk 0.6 cheerful 哟，敢不敢比？ "
+                "happy 0.75 gentle 输了可别跑。"
+            ),
+        )
+        state = await self.room.snapshot(self.alice.token)
+        self.assertEqual(state["messages"][-1]["text"], "哟，敢不敢比？ 输了可别跑。")
+
+        before = len(state["messages"])
+        await self.room.publish_transcript(
+            session_id="call-expression",
+            event_id="partial-control",
+            role="assistant",
+            speaker="小麻",
+            text="smirk 0.6 cheer",
+            partial=True,
+        )
+        state = await self.room.snapshot(self.alice.token)
+        self.assertEqual(len(state["messages"]), before)
+
+        reply = await self.room.publish_bot_reply(
+            message_id="expression-reply",
+            text="<e profile=wink intensity=0.7 style=cheerful>欢迎你呀。",
+            reply_to=None,
+        )
+        self.assertEqual(reply["text"], "欢迎你呀。")
+
     async def test_viewers_can_chat_and_are_rate_limited(self):
         message = await self.room.publish_chat(self.alice.token, "  大家 好  ")
         self.assertEqual(message["text"], "大家 好")
