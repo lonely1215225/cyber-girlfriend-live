@@ -620,6 +620,26 @@ def avatar_config():
     }
 
 
+@app.get("/api/avatar-stream-health")
+async def avatar_stream_health():
+    """Expose publisher readiness so a working FLV client can return to WebRTC."""
+    if not WEBRTC_ENABLED:
+        return {"ready": False, "paths": {"music": False, "voice": False}}
+    api_port = int(os.environ.get("MEDIAMTX_API_PORT", "19997"))
+    readiness = {}
+    async with httpx.AsyncClient(timeout=1.5) as client:
+        for public_name, path_name in (("music", "avatar_music"), ("voice", "avatar_voice")):
+            try:
+                response = await client.get(
+                    f"http://127.0.0.1:{api_port}/v3/paths/get/{path_name}"
+                )
+                payload = response.json() if response.status_code == 200 else {}
+                readiness[public_name] = bool(payload.get("ready") and payload.get("available"))
+            except (httpx.HTTPError, ValueError):
+                readiness[public_name] = False
+    return {"ready": all(readiness.values()), "paths": readiness}
+
+
 @app.get("/api/config")
 def config(request: Request):
     """Client bootstrap: whether web search is available, whether the deploy runs

@@ -1,4 +1,5 @@
 import sys
+import asyncio
 import unittest
 from pathlib import Path
 
@@ -100,6 +101,77 @@ class FixedFrameEncoderTests(unittest.TestCase):
         self.assertEqual(encoder.pts, 2)
 
 
+class AuthoritativeAudioClockTests(unittest.TestCase):
+    def setUp(self):
+        gateway.clear_av_frames()
+        gateway.speech_pcm.clear()
+        gateway.speech_output_pcm.clear()
+        gateway.speech_turn_active = False
+        gateway.speech_playing = False
+        gateway.speech_finished = False
+        gateway.speech_output_active = False
+        gateway.speech_output_finished = False
+        gateway.speech_output_ready = False
+        gateway.speech_output_rebuffering = False
+        gateway.speech_output_target_frames = gateway.OUTPUT_AV_TARGET_FRAMES
+        gateway.audio_output_underruns = 0
+
+    def test_pcm_continues_even_when_no_rendered_video_frame_exists(self):
+        pcm = bytes(range(256)) * 5
+        self.assertEqual(len(pcm), 2 * gateway.PCM_PACKET_BYTES)
+        gateway.speech_output_pcm.extend(pcm)
+        gateway.speech_output_active = True
+        gateway.speech_output_ready = True
+
+        chunks, had_speech = gateway._take_output_audio()
+
+        self.assertTrue(had_speech)
+        self.assertEqual(b"".join(chunks), pcm)
+        self.assertFalse(gateway.speech_output_pcm)
+        self.assertEqual(gateway.audio_output_underruns, 0)
+
+    def test_real_pcm_starvation_reenters_buffering_only_once(self):
+        gateway.speech_output_active = True
+        gateway.speech_output_ready = True
+
+        chunks, had_speech = gateway._take_output_audio()
+
+        self.assertFalse(had_speech)
+        self.assertEqual(set(b"".join(chunks)), {0})
+        self.assertFalse(gateway.speech_output_ready)
+        self.assertTrue(gateway.speech_output_rebuffering)
+        self.assertEqual(gateway.audio_output_underruns, 1)
+        gateway._take_output_audio()
+        self.assertEqual(gateway.audio_output_underruns, 1)
+
+    def test_proactive_turn_uses_deeper_video_reservoir_and_copies_pcm(self):
+        pcm = b"\x01\x00" * gateway.SAMPLE_RATE
+
+        asyncio.run(gateway.append_speech(pcm, mode="proactive"))
+
+        self.assertEqual(gateway.speech_output_mode, "proactive")
+        self.assertEqual(
+            gateway.speech_output_target_frames,
+            gateway.PROACTIVE_OUTPUT_TARGET_FRAMES,
+        )
+        self.assertEqual(bytes(gateway.speech_output_pcm), pcm)
+        self.assertEqual(bytes(gateway.speech_pcm), pcm)
+
+    def test_speech_frame_counter_excludes_idle_frames(self):
+        legacy_audio = (bytes(gateway.PCM_PACKET_BYTES),) * 2
+        idle = (0, b"frame", 1, 1, legacy_audio, False)
+        speech = (0, b"frame", 1, 1, legacy_audio, True)
+
+        gateway.enqueue_av_frame(idle)
+        gateway.enqueue_av_frame(speech)
+
+        self.assertEqual(gateway.speech_frames_queued, 1)
+        gateway.dequeue_av_frame()
+        self.assertEqual(gateway.speech_frames_queued, 1)
+        gateway.dequeue_av_frame()
+        self.assertEqual(gateway.speech_frames_queued, 0)
+
+
 class SemanticExpressionEnvelopeTests(unittest.TestCase):
     def setUp(self):
         gateway.expression_profile = "neutral"
@@ -108,6 +180,9 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
         gateway.expression_mouth_strength = 0.2
         gateway.expression_expires_at = 0.0
         gateway.expression_pending = None
+        gateway.expression_owner = "none"
+        gateway.idle_expression_actions.clear()
+        gateway.expression_timeline.clear()
 
     def test_expression_attacks_smoothly_over_five_frames(self):
         values = gateway._expression_frame_weights(100.0)
@@ -138,7 +213,7 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
         gateway.expression_profile = "happy"
         gateway.expression_gain = 0.5
         gateway.expression_target = 0.0
-        gateway.expression_pending = ("one_brow", 0.45, 0.08, 900)
+        gateway.expression_pending = ("one_brow", 0.45, 0.08, 900, "dialogue")
         gateway._expression_frame_weights(100.0)
         self.assertEqual(gateway.expression_profile, "happy")
         self.assertGreater(gateway.expression_gain, 0.0)
@@ -146,6 +221,61 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
             gateway._expression_frame_weights(100.0)
         self.assertEqual(gateway.expression_profile, "one_brow")
         self.assertGreater(gateway.expression_target, 0.0)
+
+    def test_expression_timeline_follows_pcm_elapsed_time(self):
+        gateway.expression_timeline.extend([
+            (0, "shy", 0.62, 0.08, 1800, 1),
+            (1200, "smirk", 0.74, 0.12, 1800, 2),
+        ])
+        gateway._apply_due_expressions(0)
+        self.assertEqual(gateway.expression_profile, "shy")
+        self.assertEqual(len(gateway.expression_timeline), 1)
+        gateway.expression_gain = 0.0
+        gateway._apply_due_expressions(1199)
+        self.assertEqual(gateway.expression_profile, "shy")
+        gateway._apply_due_expressions(1200)
+        self.assertEqual(gateway.expression_profile, "smirk")
+        self.assertFalse(gateway.expression_timeline)
+
+    def test_idle_expression_schedules_only_while_quiet(self):
+        gateway.IDLE_EXPRESSION_ENABLED = True
+        gateway.idle_expression_next_at = 99.0
+        gateway.last_speech_input_at = 0.0
+        gateway.last_user_voice_at = 0.0
+        gateway.last_motion_audio_at = 0.0
+
+        gateway._update_idle_expression(100.0, idle_allowed=True)
+
+        self.assertGreater(gateway.idle_expression_sequences, 0)
+        self.assertTrue(
+            gateway.idle_expression_actions or gateway.expression_owner == "ambient"
+        )
+
+    def test_dialogue_expression_preempts_idle_choreography(self):
+        gateway.expression_owner = "ambient"
+        gateway.expression_profile = "pout"
+        gateway.expression_gain = 0.4
+        gateway.expression_target = 0.5
+        gateway.idle_expression_actions.append(
+            (100.0, "blink", "neutral", 0.0, 0.0, 0)
+        )
+
+        gateway._apply_expression("happy", 0.6, 0.05, 1200)
+
+        self.assertFalse(gateway.idle_expression_actions)
+        self.assertEqual(gateway.expression_pending[-1], "dialogue")
+        self.assertEqual(gateway.expression_target, 0.0)
+
+    def test_expression_source_switch_never_alpha_blends_video_pixels(self):
+        gateway.expression_render_avatar = "xiaoya_locket"
+        gateway.expression_previous_frame = bytes([10, 20, 30, 40])
+        gateway.expression_transition_frames = 12
+        new_frame = bytes([200, 180, 160, 140])
+        output = gateway._crossfade_expression_frame(
+            new_frame, "xiaoya_locket_expr_smirk"
+        )
+        self.assertEqual(output, new_frame)
+        self.assertEqual(gateway.expression_transition_frames, 0)
 
 
 if __name__ == "__main__":

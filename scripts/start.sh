@@ -100,7 +100,7 @@ curl -sf "$OLLAMA_URL/api/tags" >/dev/null 2>&1 || die "Ollama is not reachable 
 # Load the configured model now instead of making the first viewer wait for
 # Ollama to allocate GPU memory. The stop script unloads this exact model while
 # deliberately leaving a possibly shared Ollama daemon running.
-if [[ "${LLM_PREWARM:-1}" != "0" ]]; then
+if [[ "${SKIP_LLM_PREWARM:-0}" != "1" && "${LLM_PREWARM:-1}" != "0" ]]; then
   [[ "$LLM_NAME" =~ ^[A-Za-z0-9._:/-]+$ ]] || die "LLM_NAME contains unsupported characters"
   [[ "${LLM_NUM_CTX:-4096}" =~ ^[0-9]+$ ]] || die "LLM_NUM_CTX must be an integer"
   [[ "${LLM_KEEP_ALIVE:--1}" =~ ^-?[0-9]+$ ]] || die "LLM_KEEP_ALIVE must be an integer"
@@ -205,6 +205,7 @@ export AVATAR_TEE_PREROLL_MS="${AVATAR_TEE_PREROLL_MS:-800}"
 export AVTR1_AUDIO_REBUFFER_STEP_MS="${AVTR1_AUDIO_REBUFFER_STEP_MS:-200}"
 export AVTR1_AUDIO_MAX_BUFFER_MS="${AVTR1_AUDIO_MAX_BUFFER_MS:-1400}"
 export AVTR1_OUTPUT_RESERVOIR_MS="${AVTR1_OUTPUT_RESERVOIR_MS:-480}"
+export AVTR1_PROACTIVE_OUTPUT_RESERVOIR_MS="${AVTR1_PROACTIVE_OUTPUT_RESERVOIR_MS:-1200}"
 export AVTR1_MAX_SPEECH_SECONDS="${AVTR1_MAX_SPEECH_SECONDS:-90}"
 export WEBRTC_ENABLED="${WEBRTC_ENABLED:-1}"
 export WEBRTC_PUBLIC_HOST="${WEBRTC_PUBLIC_HOST:-${PUBLIC_IP}}"
@@ -230,6 +231,7 @@ export GROK_REASONING_EFFORT="${GROK_REASONING_EFFORT:-low}"
 export GROK_TIMEOUT_SECONDS="${GROK_TIMEOUT_SECONDS:-45}"
 export GROK_MAX_CONCURRENCY_PER_ACCOUNT="${GROK_MAX_CONCURRENCY_PER_ACCOUNT:-2}"
 export OLLAMA_URL LLM_NAME THINKLESS_PORT LLM_NUM_CTX LLM_NUM_PREDICT LLM_KEEP_ALIVE LLM_PREWARM
+export LLM_LOCAL_READ_TIMEOUT_SECONDS="${LLM_LOCAL_READ_TIMEOUT_SECONDS:-12}"
 export LLM_CHAT_SIZE="${LLM_CHAT_SIZE:-12}"
 export LLM_STREAM_BATCH_SENTENCES="${LLM_STREAM_BATCH_SENTENCES:-1}"
 export LLM_COMPACTION_NUM_PREDICT="${LLM_COMPACTION_NUM_PREDICT:-256}"
@@ -327,16 +329,21 @@ export AVTR1_IDLE_BREATH_DRIFT_SECONDS="${AVTR1_IDLE_BREATH_DRIFT_SECONDS:-9.1}"
 export AVTR1_IDLE_BREATH_DRIFT_MIX="${AVTR1_IDLE_BREATH_DRIFT_MIX:-0.30}"
 export AVTR1_IDLE_BREATH_FADE_IN_STEP="${AVTR1_IDLE_BREATH_FADE_IN_STEP:-0.08}"
 export AVTR1_IDLE_BREATH_FADE_OUT_STEP="${AVTR1_IDLE_BREATH_FADE_OUT_STEP:-0.18}"
+export AVTR1_IDLE_EXPRESSION_ENABLED="${AVTR1_IDLE_EXPRESSION_ENABLED:-1}"
+export AVTR1_IDLE_EXPRESSION_MIN_SECONDS="${AVTR1_IDLE_EXPRESSION_MIN_SECONDS:-10}"
+export AVTR1_IDLE_EXPRESSION_MAX_SECONDS="${AVTR1_IDLE_EXPRESSION_MAX_SECONDS:-24}"
+export AVTR1_IDLE_EXPRESSION_INTENSITY="${AVTR1_IDLE_EXPRESSION_INTENSITY:-0.58}"
+export AVTR1_IDLE_EXPRESSION_QUIET_SECONDS="${AVTR1_IDLE_EXPRESSION_QUIET_SECONDS:-3.0}"
 export AVTR1_URL="http://127.0.0.1:${AVTR1_PORT:-18012}"
 export AVTR1_EXPRESSION_DIR="${AVTR1_EXPRESSION_DIR:-$ROOT/assets/expressions/xiaoya_locket}"
 export AVTR1_EXPRESSION_RETARGET_GAIN="${AVTR1_EXPRESSION_RETARGET_GAIN:-4.0}"
 export AVTR1_EXPRESSION_SOURCE_AVATAR="${AVTR1_EXPRESSION_SOURCE_AVATAR:-xiaoya_locket}"
 export AVTR1_EXPRESSION_SOURCE_PREFIX="${AVTR1_EXPRESSION_SOURCE_PREFIX:-xiaoya_locket_expr_}"
-export AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY="${AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY:-0.55}"
-export AVTR1_EXPRESSION_ATTACK_FRAMES="${AVTR1_EXPRESSION_ATTACK_FRAMES:-14}"
-export AVTR1_EXPRESSION_RELEASE_FRAMES="${AVTR1_EXPRESSION_RELEASE_FRAMES:-18}"
-export AVTR1_EXPRESSION_ATTACK_STEP="${AVTR1_EXPRESSION_ATTACK_STEP:-0.055}"
-export AVTR1_EXPRESSION_RELEASE_STEP="${AVTR1_EXPRESSION_RELEASE_STEP:-0.04}"
+export AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY="${AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY:-0.48}"
+export AVTR1_EXPRESSION_ATTACK_FRAMES="${AVTR1_EXPRESSION_ATTACK_FRAMES:-24}"
+export AVTR1_EXPRESSION_RELEASE_FRAMES="${AVTR1_EXPRESSION_RELEASE_FRAMES:-28}"
+export AVTR1_EXPRESSION_ATTACK_STEP="${AVTR1_EXPRESSION_ATTACK_STEP:-0.035}"
+export AVTR1_EXPRESSION_RELEASE_STEP="${AVTR1_EXPRESSION_RELEASE_STEP:-0.025}"
 export AVTR1_LOCAL_TEE_URL="http://127.0.0.1:${AVATAR_GW_PORT:-18011}"
 export LOAD_BALANCER_URL=disabled
 # Keep bundled portraits in the renderer artifact directory on every start.
@@ -423,31 +430,21 @@ if [[ "$WEBRTC_ENABLED" != "0" ]]; then
   start_webrtc_publisher() {
     local name="$1" music="$2" path="$3"
     start_bg "$name" "$RUN/${name}.pid" "$LOG/${name}.log" \
-      ffmpeg -hide_banner -loglevel warning \
-        -fflags +genpts+nobuffer -flags low_delay \
-        -analyzeduration 1000000 -probesize 1000000 \
-        -i "http://127.0.0.1:${AVATAR_GW_PORT:-18011}/livestream.flv?music=$music" \
-        -map 0:v:0 -c:v copy \
-        -map 0:a:0 -af "aresample=async=1000:first_pts=0,asetpts=N/SR/TB" \
-        -c:a libopus -ar 48000 -ac 1 \
-        -b:a "$WEBRTC_OPUS_BITRATE" -application lowdelay -frame_duration 20 \
-        -fec 1 -packet_loss "$WEBRTC_PACKET_LOSS_PERCENT" \
-        -flush_packets 1 -muxdelay 0 -rtsp_transport tcp -f rtsp \
-        "rtsp://127.0.0.1:${MEDIAMTX_RTSP_PORT}/$path"
+      "$ROOT/scripts/webrtc_publisher.sh" "$music" "$path"
   }
   start_webrtc_publisher webrtc_music 1 avatar_music
   start_webrtc_publisher webrtc_voice 0 avatar_voice
   for _ in $(seq 1 40); do
     paths_json="$(curl -fsS --max-time 2 "http://127.0.0.1:${MEDIAMTX_API_PORT}/v3/paths/list" 2>/dev/null || true)"
-    if grep -q '"name":"avatar_music"' <<<"$paths_json" \
-        && grep -q '"name":"avatar_voice"' <<<"$paths_json"; then
+    if grep -Eq '"name":"avatar_music"[^}]*"ready":true' <<<"$paths_json" \
+        && grep -Eq '"name":"avatar_voice"[^}]*"ready":true' <<<"$paths_json"; then
       say "WebRTC H.264+Opus publishers ready"
       break
     fi
     sleep 0.25
   done
-  grep -q '"name":"avatar_music"' <<<"${paths_json:-}" \
-    && grep -q '"name":"avatar_voice"' <<<"${paths_json:-}" \
+  grep -Eq '"name":"avatar_music"[^}]*"ready":true' <<<"${paths_json:-}" \
+    && grep -Eq '"name":"avatar_voice"[^}]*"ready":true' <<<"${paths_json:-}" \
     || die "WebRTC publishers are not ready; see $LOG/webrtc_*.log"
 fi
 

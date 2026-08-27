@@ -43,8 +43,9 @@ if [[ "${WEBRTC_ENABLED:-1}" != "0" ]]; then
   check "${MEDIAMTX_RTSP_PORT:-18554}" MediaMTX-RTSP
   check "${WEBRTC_TCP_PORT:-8190}" WebRTC-ICE
   check_udp "${WEBRTC_UDP_PORT:-8189}" WebRTC-ICE
-  if curl -fsS --max-time 2 "http://127.0.0.1:${MEDIAMTX_API_PORT:-19997}/v3/paths/list" \
-      | grep -q '"name":"avatar_music"'; then
+  paths_json="$(curl -fsS --max-time 2 "http://127.0.0.1:${MEDIAMTX_API_PORT:-19997}/v3/paths/list" 2>/dev/null || true)"
+  if grep -Eq '"name":"avatar_music"[^}]*"ready":true' <<<"$paths_json" \
+      && grep -Eq '"name":"avatar_voice"[^}]*"ready":true' <<<"$paths_json"; then
     echo "  media      H264+Opus publishers  OK"
   else
     echo "  media      H264+Opus publishers  DOWN"

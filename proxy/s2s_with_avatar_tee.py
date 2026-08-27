@@ -67,6 +67,7 @@ class LocalAvatarTee:
         self.generation = 0
         self.done = False
         self.complete_flush = False
+        self.playback_mode = "interactive"
         self.pump_task: asyncio.Task | None = None
         self.client: httpx.AsyncClient | None = None
         self.started_at: float | None = None
@@ -77,6 +78,8 @@ class LocalAvatarTee:
         self.max_feed_gap_ms = 0.0
         self.expression_sequence = 0
         self.expression_claimed = False
+        self.consecutive_post_failures = 0
+        self.active_connection_id: int | None = None
 
     def _client(self) -> httpx.AsyncClient:
         if self.client is None:
@@ -109,26 +112,30 @@ class LocalAvatarTee:
             self._start_pump()
 
     async def sync_expression(self) -> None:
-        """Bind at most one LLM cue to the current synthesized audio segment."""
+        """Bind the model's complete facial timeline to the PCM playback clock."""
         if self.expression_claimed:
             return
         cues = cues_after(self.expression_sequence)
         if not cues:
             return
-        cue = cues[0]
-        self.expression_sequence = cue.sequence
+        self.expression_sequence = cues[-1].sequence
         self.expression_claimed = True
         try:
-            await self._client().post(
-                f"{self.base_url}/expression",
-                json={
-                    "profile": cue.profile,
-                    "intensity": cue.intensity,
-                    "duration_ms": cue.duration_ms,
-                    "mouth_strength": cue.mouth_strength,
-                    "sequence": cue.sequence,
-                },
-            )
+            for cue in cues:
+                await self._client().post(
+                    f"{self.base_url}/expression",
+                    json={
+                        "profile": cue.profile,
+                        "intensity": cue.intensity,
+                        "duration_ms": cue.duration_ms,
+                        "mouth_strength": cue.mouth_strength,
+                        "sequence": cue.sequence,
+                        "delay_ms": cue.delay_ms,
+                    },
+                    # Visual direction is optional metadata. It must never hold
+                    # up the first spoken PCM packet during renderer recovery.
+                    timeout=0.35,
+                )
         except Exception as exc:  # noqa: BLE001
             LOG.warning("AVTR-1 expression cue failed: %s", exc)
 
@@ -161,7 +168,12 @@ class LocalAvatarTee:
 
     def _start_pump(self) -> None:
         generation = self.generation
-        self.pump_task = asyncio.create_task(self._pump(generation))
+        # Bind mode/completeness to this exact upload generation. A later
+        # response lifecycle event may update the shared tee before this task
+        # has drained, but it must not change an in-flight turn's reservoir.
+        self.pump_task = asyncio.create_task(
+            self._pump(generation, self.playback_mode, self.complete_flush)
+        )
 
     def _metrics(self) -> dict[str, float | int]:
         audio_ms = self.audio_bytes / (SAMPLE_RATE * BYTES_PER_SAMPLE) * 1000.0
@@ -184,7 +196,9 @@ class LocalAvatarTee:
         self.max_feed_gap_ms = 0.0
         self.complete_flush = False
 
-    async def _pump(self, generation: int) -> None:
+    async def _pump(
+        self, generation: int, playback_mode: str, complete_flush: bool
+    ) -> None:
         first = True
         try:
             while generation == self.generation:
@@ -196,22 +210,47 @@ class LocalAvatarTee:
                         # silently discard the beginning of the sentence.
                         size = (
                             len(self.pending)
-                            if self.complete_flush and self.done
+                            if complete_flush and self.done
                             else min(PREROLL_BYTES, len(self.pending))
                         )
                         first = False
                     else:
                         size = min(PACE_BYTES, len(self.pending))
                     payload = bytes(self.pending[:size])
-                    del self.pending[:size]
                     try:
-                        await self._client().post(
+                        if first is False and self.audio_bytes == len(self.pending):
+                            LOG.info(
+                                "AVTR playback upload mode=%s complete=%s bytes=%d",
+                                playback_mode,
+                                complete_flush,
+                                len(self.pending),
+                            )
+                        response = await self._client().post(
                             f"{self.base_url}/audio-chunk",
                             content=payload,
+                            params={"mode": playback_mode},
                             headers={"Content-Type": "application/octet-stream"},
                         )
+                        response.raise_for_status()
+                        # Commit removal only after the gateway acknowledged
+                        # this exact packet. Previously it was deleted before
+                        # POST, so one transient timeout permanently removed a
+                        # sentence from the avatar playback.
+                        del self.pending[:size]
+                        self.consecutive_post_failures = 0
                     except Exception as exc:  # noqa: BLE001
-                        LOG.warning("AVTR-1 local audio tee failed: %s", exc)
+                        self.consecutive_post_failures += 1
+                        # Keep the packet at the head of the queue and retry it.
+                        # Log the exception class as timeout messages often have
+                        # an empty string representation.
+                        if self.consecutive_post_failures == 1 or self.consecutive_post_failures % 10 == 0:
+                            LOG.warning(
+                                "AVTR-1 local audio tee retry=%d error=%s: %s",
+                                self.consecutive_post_failures,
+                                type(exc).__name__,
+                                exc,
+                            )
+                        await asyncio.sleep(min(0.5, 0.05 * self.consecutive_post_failures))
 
                     # Do not sleep for the audio duration here. AVTR's FLV pacer
                     # already plays at realtime speed; sending ahead builds a
@@ -225,7 +264,10 @@ class LocalAvatarTee:
                     try:
                         await self._client().post(
                             f"{self.base_url}/audio-finish",
-                            params={key: str(value) for key, value in metrics.items()},
+                            params={
+                                **{key: str(value) for key, value in metrics.items()},
+                                "mode": playback_mode,
+                            },
                         )
                         LOG.info(
                             "TTS turn audio=%.0fms generation=%.0fms realtime=%.2fx "
@@ -262,18 +304,41 @@ if TEE_URL:
             str(query_params.get("complete_audio", "")) == "1"
             if hasattr(query_params, "get") else False
         )
+        playback_mode = (
+            str(query_params.get("playback_mode", "interactive"))
+            if hasattr(query_params, "get")
+            else "interactive"
+        )
         if is_preview:
             await original_send_events(ws, events)
             return
+        connection_id = id(ws)
+        if tee.active_connection_id != connection_id:
+            # Some realtime backends begin directly with audio deltas and do
+            # not emit response.created. Initialize completeness and playback
+            # policy from the WebSocket itself so proactive news cannot
+            # silently fall back to the interactive 480ms reservoir.
+            if complete_audio:
+                await tee.interrupt()
+            tee.active_connection_id = connection_id
+            tee.complete_flush = complete_audio
+            tee.playback_mode = (
+                "proactive" if playback_mode == "proactive" else "interactive"
+            )
+            LOG.info(
+                "AVTR playback connection mode=%s complete=%s",
+                tee.playback_mode,
+                complete_audio,
+            )
         for event in events:
             event_type = getattr(event, "type", "")
             if event_type == "response.created":
                 begin_delivery_response()
-                if complete_audio:
-                    # Clear a cancelled/incomplete prior buffered turn before
-                    # accepting the new one. The room permits only one bot speaker.
-                    await tee.interrupt()
-                    tee.complete_flush = True
+                LOG.info(
+                    "AVTR playback request mode=%s complete=%s",
+                    tee.playback_mode,
+                    complete_audio,
+                )
             elif event_type in ("response.audio.delta", "response.output_audio.delta"):
                 delta = getattr(event, "delta", "")
                 if delta:

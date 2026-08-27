@@ -110,6 +110,7 @@
   let audioUnlocked = false;
   let connecting = false;
   let retryHandle = null;
+  let webrtcUpgradeHandle = null;
   let watchdogHandle = null;
   let lastProgressAt = 0;
   let lastMediaTime = -1;
@@ -248,6 +249,10 @@
   }
 
   function destroyPlayer() {
+    if (webrtcUpgradeHandle) {
+      clearTimeout(webrtcUpgradeHandle);
+      webrtcUpgradeHandle = null;
+    }
     if (webrtcStatsHandle) {
       clearInterval(webrtcStatsHandle);
       webrtcStatsHandle = null;
@@ -276,6 +281,26 @@
       liveVideo.srcObject = null;
       try { liveVideo.load(); } catch (_) { /* ignore */ }
     }
+  }
+
+  function scheduleWebRTCUpgrade() {
+    if (webrtcUpgradeHandle || !flvPlayer || document.hidden) return;
+    const delay = Math.max(5000, webrtcRetryAfter - Date.now());
+    webrtcUpgradeHandle = setTimeout(async () => {
+      webrtcUpgradeHandle = null;
+      if (!flvPlayer || connecting || document.hidden) return;
+      try {
+        const response = await fetch('/api/avatar-stream-health', { cache: 'no-store' });
+        const health = response.ok ? await response.json() : {};
+        const selectedReady = musicEnabled ? health?.paths?.music : health?.paths?.voice;
+        if (selectedReady) {
+          webrtcRetryAfter = 0;
+          reconnectLive();
+          return;
+        }
+      } catch (_) { /* keep the working FLV stream and probe again later */ }
+      scheduleWebRTCUpgrade();
+    }, delay);
   }
 
   function scheduleReconnect(delayMs = 1200) {
@@ -519,6 +544,7 @@
         statusEl.title = '';
         statusEl.removeAttribute('aria-label');
       }
+      if (label.includes('FLV') && config.transport === 'webrtc') scheduleWebRTCUpgrade();
       startWatchdog();
     } catch (err) {
       destroyPlayer();
@@ -751,6 +777,9 @@
       events.addEventListener('profile', () => void refreshActiveProfile(true));
     }
     setInterval(() => void refreshActiveProfile(true), 2000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && flvPlayer) scheduleWebRTCUpgrade();
+    });
     void connect();
   }
 

@@ -43,6 +43,10 @@ SPEECH_MAX_BUFFER_MS = max(
 AV_OUTPUT_RESERVOIR_MS = max(
     200, int(os.environ.get("AVTR1_OUTPUT_RESERVOIR_MS", "480"))
 )
+PROACTIVE_OUTPUT_RESERVOIR_MS = max(
+    AV_OUTPUT_RESERVOIR_MS,
+    int(os.environ.get("AVTR1_PROACTIVE_OUTPUT_RESERVOIR_MS", "1200")),
+)
 CFG_SELF_AUDIO = float(os.environ.get("AVTR1_CFG_SELF_AUDIO", "2.3"))
 CFG_OTHER_AUDIO = float(os.environ.get("AVTR1_CFG_OTHER_AUDIO", "2.0"))
 CFG_KP = float(os.environ.get("AVTR1_CFG_KP", "3.0"))
@@ -136,6 +140,25 @@ IDLE_BREATH_FADE_IN_STEP = min(
 IDLE_BREATH_FADE_OUT_STEP = min(
     1.0, max(0.01, float(os.environ.get("AVTR1_IDLE_BREATH_FADE_OUT_STEP", "0.18")))
 )
+IDLE_EXPRESSION_ENABLED = os.environ.get(
+    "AVTR1_IDLE_EXPRESSION_ENABLED", "1"
+).lower() not in {"0", "false", "off", "no"}
+IDLE_EXPRESSION_MIN_SECONDS = min(
+    60.0, max(6.0, float(os.environ.get("AVTR1_IDLE_EXPRESSION_MIN_SECONDS", "10")))
+)
+IDLE_EXPRESSION_MAX_SECONDS = min(
+    90.0,
+    max(
+        IDLE_EXPRESSION_MIN_SECONDS,
+        float(os.environ.get("AVTR1_IDLE_EXPRESSION_MAX_SECONDS", "24")),
+    ),
+)
+IDLE_EXPRESSION_INTENSITY = min(
+    0.9, max(0.2, float(os.environ.get("AVTR1_IDLE_EXPRESSION_INTENSITY", "0.58")))
+)
+IDLE_EXPRESSION_QUIET_SECONDS = max(
+    1.5, float(os.environ.get("AVTR1_IDLE_EXPRESSION_QUIET_SECONDS", "3.0"))
+)
 MOTION_CONFIG_PATH = os.path.realpath(
     os.environ.get(
         "AVTR1_MOTION_CONFIG_PATH",
@@ -162,6 +185,10 @@ MOTION_FIELDS = {
     "idle_roll_ratio": ("float", -1.0, 1.0),
     "idle_noise_alpha": ("float", 0.0, 4.0),
     "idle_noise_trunc_z": ("float", 0.0, 2.0),
+    "idle_expression_enabled": ("bool", None, None),
+    "idle_expression_min_seconds": ("float", 6.0, 60.0),
+    "idle_expression_max_seconds": ("float", 8.0, 90.0),
+    "idle_expression_intensity": ("float", 0.2, 0.9),
     "speaking_blink_interval_scale": ("float", 0.35, 1.2),
     "speaking_blink_strength": ("float", 0.0, 1.5),
     "speaking_motion_strength": ("float", 0.0, 5.0),
@@ -190,6 +217,10 @@ def _motion_config() -> dict[str, bool | float]:
         "idle_roll_ratio": IDLE_BREATH_ROLL_RATIO,
         "idle_noise_alpha": IDLE_NOISE_ALPHA,
         "idle_noise_trunc_z": IDLE_NOISE_TRUNC_Z,
+        "idle_expression_enabled": IDLE_EXPRESSION_ENABLED,
+        "idle_expression_min_seconds": IDLE_EXPRESSION_MIN_SECONDS,
+        "idle_expression_max_seconds": IDLE_EXPRESSION_MAX_SECONDS,
+        "idle_expression_intensity": IDLE_EXPRESSION_INTENSITY,
         "speaking_blink_interval_scale": BLINK_SPEECH_INTERVAL_SCALE,
         "speaking_blink_strength": SPEECH_BLINK_STRENGTH,
         "speaking_motion_strength": CFG_SELF_AUDIO,
@@ -225,6 +256,8 @@ def _validated_motion_config(payload: object) -> dict[str, bool | float]:
         values[key] = value
     if values["idle_blink_max_seconds"] < values["idle_blink_min_seconds"]:
         raise ValueError("idle blink maximum must not be less than minimum")
+    if values["idle_expression_max_seconds"] < values["idle_expression_min_seconds"]:
+        raise ValueError("idle expression maximum must not be less than minimum")
     return values
 
 
@@ -239,6 +272,9 @@ def _apply_motion_config(values: dict[str, bool | float]) -> None:
     global IDLE_NOISE_ALPHA, IDLE_NOISE_TRUNC_Z
     global CFG_SELF_AUDIO, CFG_OTHER_AUDIO, NOISE_ALPHA, NOISE_TRUNC_Z
     global MOTION_ACTIVE_HOLD_SECONDS, next_blink_at
+    global IDLE_EXPRESSION_ENABLED, IDLE_EXPRESSION_MIN_SECONDS
+    global IDLE_EXPRESSION_MAX_SECONDS, IDLE_EXPRESSION_INTENSITY
+    global idle_expression_next_at
     BLINK_ENABLED = bool(values["blink_enabled"])
     BLINK_MIN_SECONDS = float(values["idle_blink_min_seconds"])
     BLINK_MAX_SECONDS = float(values["idle_blink_max_seconds"])
@@ -255,6 +291,10 @@ def _apply_motion_config(values: dict[str, bool | float]) -> None:
     IDLE_BREATH_ROLL_RATIO = float(values["idle_roll_ratio"])
     IDLE_NOISE_ALPHA = float(values["idle_noise_alpha"])
     IDLE_NOISE_TRUNC_Z = float(values["idle_noise_trunc_z"])
+    IDLE_EXPRESSION_ENABLED = bool(values["idle_expression_enabled"])
+    IDLE_EXPRESSION_MIN_SECONDS = float(values["idle_expression_min_seconds"])
+    IDLE_EXPRESSION_MAX_SECONDS = float(values["idle_expression_max_seconds"])
+    IDLE_EXPRESSION_INTENSITY = float(values["idle_expression_intensity"])
     BLINK_SPEECH_INTERVAL_SCALE = float(values["speaking_blink_interval_scale"])
     SPEECH_BLINK_STRENGTH = float(values["speaking_blink_strength"])
     CFG_SELF_AUDIO = float(values["speaking_motion_strength"])
@@ -264,6 +304,7 @@ def _apply_motion_config(values: dict[str, bool | float]) -> None:
     MOTION_ACTIVE_HOLD_SECONDS = float(values["speaking_motion_hold_seconds"])
     blink_frames.clear()
     next_blink_at = time.monotonic() + random.uniform(BLINK_MIN_SECONDS, BLINK_MAX_SECONDS)
+    idle_expression_next_at = _next_idle_expression_at(time.monotonic())
 
 
 def _save_motion_config(values: dict[str, bool | float]) -> None:
@@ -314,6 +355,9 @@ SPEECH_START_BUFFER_BYTES = SAMPLE_RATE * 2 * SPEECH_START_BUFFER_MS // 1000
 SPEECH_MAX_BUFFER_BYTES = SAMPLE_RATE * 2 * SPEECH_MAX_BUFFER_MS // 1000
 SPEECH_REBUFFER_STEP_BYTES = SAMPLE_RATE * 2 * SPEECH_REBUFFER_STEP_MS // 1000
 OUTPUT_AV_TARGET_FRAMES = max(CHUNK_SIZE, AV_OUTPUT_RESERVOIR_MS // 40)
+PROACTIVE_OUTPUT_TARGET_FRAMES = max(
+    OUTPUT_AV_TARGET_FRAMES, PROACTIVE_OUTPUT_RESERVOIR_MS // 40
+)
 
 last_frame_at = 0.0
 last_speech_input_at = 0.0
@@ -332,6 +376,12 @@ speech_turn_active = False
 speech_playing = False
 speech_rebuffering = False
 speech_output_ready = False
+speech_output_pcm = bytearray()
+speech_output_active = False
+speech_output_finished = False
+speech_output_rebuffering = False
+speech_output_mode = "interactive"
+speech_output_target_frames = OUTPUT_AV_TARGET_FRAMES
 speech_dynamic_buffer_bytes = SPEECH_START_BUFFER_BYTES
 speech_turn_underruns = 0
 speech_buffer_underruns = 0
@@ -343,10 +393,15 @@ listen_pcm = bytearray()
 buf_lock = asyncio.Lock()
 # Queue -> whether this viewer requested the mixed background-music variant.
 flv_subscribers: dict[asyncio.Queue, bool] = {}
-# A single frame queue keeps the rendered face and its exact 40ms audio slice
-# inseparable. Separate video/audio queues can drift when either side drops.
-av_pace_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+# Rendered video is allowed to fall behind without holding up the authoritative
+# PCM clock. Frame metadata still records whether it belongs to speech so the
+# pacer can discard stale mouth frames after a temporary renderer miss.
+av_pace_queue: asyncio.Queue = asyncio.Queue(
+    maxsize=max(32, PROACTIVE_OUTPUT_TARGET_FRAMES + CHUNK_SIZE * 2)
+)
+speech_frames_queued = 0
 h264_encoder: H264Encoder | None = None
+video_encode_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
 h264_bytes = 0
 video_epoch = 0
 video_frames_rendered = 0
@@ -355,6 +410,9 @@ video_frames_held = 0
 video_queue_drops = 0
 publisher_late_ticks = 0
 audio_output_underruns = 0
+audio_continuity_holds = 0
+video_catchup_drops = 0
+video_encode_drops = 0
 render_batches = 0
 render_deadline_misses = 0
 render_errors = 0
@@ -374,25 +432,35 @@ expression_target = 0.0
 expression_mouth_strength = 0.0
 expression_expires_at = 0.0
 expression_sequence = 0
-expression_pending: tuple[str, float, float, int] | None = None
+expression_owner = "none"
+expression_pending: tuple[str, float, float, int, str] | None = None
+expression_timeline: deque[tuple[int, str, float, float, int, int]] = deque()
+idle_expression_actions: deque[tuple[float, str, str, float, float, int]] = deque()
+idle_expression_next_at = time.monotonic() + random.uniform(
+    IDLE_EXPRESSION_MIN_SECONDS, IDLE_EXPRESSION_MAX_SECONDS
+)
+idle_expression_last_name = ""
+idle_expression_sequences = 0
+speech_output_elapsed_ms = 0
 expression_render_avatar = AVATAR_ID
 expression_previous_frame: bytes | None = None
 expression_transition_frames = 0
 expression_transition_total_frames = 0
+expression_crisp_switches = 0
 EXPRESSION_SOURCE_MIN_INTENSITY = min(
-    0.9, max(0.2, float(os.environ.get("AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY", "0.55")))
+    0.9, max(0.2, float(os.environ.get("AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY", "0.48")))
 )
 EXPRESSION_ATTACK_FRAMES = max(
-    6, min(30, int(os.environ.get("AVTR1_EXPRESSION_ATTACK_FRAMES", "14")))
+    6, min(40, int(os.environ.get("AVTR1_EXPRESSION_ATTACK_FRAMES", "24")))
 )
 EXPRESSION_RELEASE_FRAMES = max(
-    8, min(40, int(os.environ.get("AVTR1_EXPRESSION_RELEASE_FRAMES", "18")))
+    8, min(50, int(os.environ.get("AVTR1_EXPRESSION_RELEASE_FRAMES", "28")))
 )
 EXPRESSION_ATTACK_STEP = min(
-    0.2, max(0.015, float(os.environ.get("AVTR1_EXPRESSION_ATTACK_STEP", "0.055")))
+    0.2, max(0.015, float(os.environ.get("AVTR1_EXPRESSION_ATTACK_STEP", "0.035")))
 )
 EXPRESSION_RELEASE_STEP = min(
-    0.2, max(0.01, float(os.environ.get("AVTR1_EXPRESSION_RELEASE_STEP", "0.04")))
+    0.2, max(0.01, float(os.environ.get("AVTR1_EXPRESSION_RELEASE_STEP", "0.025")))
 )
 
 
@@ -414,33 +482,24 @@ def _render_avatar_for_expression(base_avatar_id: str) -> str:
 
 
 def _crossfade_expression_frame(raw: bytes, render_avatar_id: str) -> bytes:
+    """Switch expression sources without blending two moving video frames.
+
+    The semantic expression envelope already ramps on the base portrait up to
+    ``EXPRESSION_SOURCE_MIN_INTENSITY`` and continues after the source switch.
+    Alpha-blending the old rendered frame into each subsequent moving frame
+    added a recursive temporal trail: eyes and lips looked out of focus and the
+    full-frame float conversion briefly stalled the event loop.  Preserve the
+    envelope, but publish the selected AVTR frame byte-for-byte.
+    """
+
     global expression_render_avatar, expression_previous_frame
     global expression_transition_frames, expression_transition_total_frames
+    global expression_crisp_switches
     if render_avatar_id != expression_render_avatar:
         expression_render_avatar = render_avatar_id
-        expression_transition_total_frames = (
-            EXPRESSION_RELEASE_FRAMES
-            if render_avatar_id == AVATAR_ID
-            else EXPRESSION_ATTACK_FRAMES
-        )
-        expression_transition_frames = expression_transition_total_frames
-    if expression_transition_frames > 0 and expression_previous_frame:
-        old = np.frombuffer(expression_previous_frame, dtype=np.uint8)
-        new = np.frombuffer(raw, dtype=np.uint8)
-        if old.size == new.size:
-            step = expression_transition_total_frames - expression_transition_frames + 1
-            progress = _smoothstep(step / expression_transition_total_frames)
-            previous_progress = _smoothstep(
-                (step - 1) / expression_transition_total_frames
-            )
-            # Follow the new moving frame while respecting the cumulative ease
-            # curve; retaining a frozen first frame creates a visible ghost.
-            incremental = (progress - previous_progress) / max(
-                1e-6, 1.0 - previous_progress
-            )
-            blended = np.rint(old * (1.0 - incremental) + new * incremental).astype(np.uint8)
-            raw = blended.tobytes()
-        expression_transition_frames -= 1
+        expression_transition_total_frames = 0
+        expression_transition_frames = 0
+        expression_crisp_switches += 1
     expression_previous_frame = raw
     return raw
 
@@ -673,7 +732,10 @@ class FlvMuxer:
             chunks.append(self.aac_header)
         return b"".join(chunks)
 
-    def video_tags(self, annexb: bytes, keyframe: bool) -> list[bytes]:
+    def video_tags(
+        self, annexb: bytes, keyframe: bool, *, timestamp_ms: int | None = None
+    ) -> list[bytes]:
+        timestamp = self.timestamp_ms if timestamp_ms is None else max(0, timestamp_ms)
         nalus = _split_annexb(annexb)
         if not nalus:
             return []
@@ -685,7 +747,7 @@ class FlvMuxer:
             record += len(sps).to_bytes(2, "big") + sps + bytes((0x01,))
             record += len(pps).to_bytes(2, "big") + pps
             header = self._tag(
-                9, bytes((0x17, 0x00, 0x00, 0x00, 0x00)) + record, self.timestamp_ms
+                9, bytes((0x17, 0x00, 0x00, 0x00, 0x00)) + record, timestamp
             )
             self.avc_header = header
             tags.append(header)
@@ -697,7 +759,7 @@ class FlvMuxer:
             self._tag(
                 9,
                 bytes((frame_type, 0x01, 0x00, 0x00, 0x00)) + _avcc_payload(framed),
-                self.timestamp_ms,
+                timestamp,
             )
         )
         return tags
@@ -742,17 +804,145 @@ def publish_flv(data: bytes, *, music: bool) -> None:
 
 
 def enqueue_av_frame(data) -> None:
-    global video_queue_drops
+    global video_queue_drops, speech_frames_queued
     if av_pace_queue.full():
         try:
-            av_pace_queue.get_nowait()
+            dropped = av_pace_queue.get_nowait()
+            if dropped[-1]:
+                speech_frames_queued = max(0, speech_frames_queued - 1)
             video_queue_drops += 1
         except asyncio.QueueEmpty:
             pass
     try:
         av_pace_queue.put_nowait(data)
+        if data[-1]:
+            speech_frames_queued += 1
     except asyncio.QueueFull:
         video_queue_drops += 1
+
+
+def dequeue_av_frame():
+    global speech_frames_queued
+    try:
+        item = av_pace_queue.get_nowait()
+    except asyncio.QueueEmpty:
+        return None
+    if item[-1]:
+        speech_frames_queued = max(0, speech_frames_queued - 1)
+    return item
+
+
+def clear_av_frames() -> None:
+    global speech_frames_queued
+    while not av_pace_queue.empty():
+        try:
+            av_pace_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+    speech_frames_queued = 0
+
+
+def enqueue_video_encode(data) -> None:
+    """Keep only frames the encoder can publish without delaying audio."""
+    global video_encode_drops
+    if video_encode_queue.full():
+        try:
+            video_encode_queue.get_nowait()
+            video_encode_drops += 1
+        except asyncio.QueueEmpty:
+            pass
+    try:
+        video_encode_queue.put_nowait(data)
+    except asyncio.QueueFull:
+        video_encode_drops += 1
+
+
+def _output_required_frames() -> int:
+    if not speech_output_finished:
+        return speech_output_target_frames
+    audio_frames = max(
+        1, (len(speech_output_pcm) + 2 * PCM_PACKET_BYTES - 1) // (2 * PCM_PACKET_BYTES)
+    )
+    return min(speech_output_target_frames, audio_frames)
+
+
+def _take_output_audio() -> tuple[tuple[bytes, bytes], bool]:
+    """Advance the authoritative 16-kHz PCM clock by exactly 40ms."""
+    global speech_output_active, speech_output_finished, speech_output_ready
+    global speech_output_rebuffering, audio_output_underruns
+    global speech_output_elapsed_ms
+    packet = bytes(PCM_PACKET_BYTES)
+    if not speech_output_active or not speech_output_ready:
+        return (packet, packet), False
+    need = 2 * PCM_PACKET_BYTES
+    if len(speech_output_pcm) >= need:
+        _apply_due_expressions(speech_output_elapsed_ms)
+        chunk = bytes(speech_output_pcm[:need])
+        del speech_output_pcm[:need]
+        speech_output_elapsed_ms += 40
+        return (chunk[:PCM_PACKET_BYTES], chunk[PCM_PACKET_BYTES:]), True
+    if speech_output_finished and speech_output_pcm:
+        _apply_due_expressions(speech_output_elapsed_ms)
+        chunk = bytes(speech_output_pcm) + bytes(need - len(speech_output_pcm))
+        speech_output_pcm.clear()
+        speech_output_elapsed_ms += 40
+        return (chunk[:PCM_PACKET_BYTES], chunk[PCM_PACKET_BYTES:]), True
+    if speech_output_finished:
+        speech_output_active = False
+        speech_output_finished = False
+        speech_output_ready = False
+        speech_output_rebuffering = False
+        expression_timeline.clear()
+        return (packet, packet), False
+
+    # A genuine upstream PCM starvation is the only remaining reason to emit
+    # silence. Re-enter buffering once, rather than alternating speech/silence
+    # every renderer tick; rendered-video misses never take this branch.
+    audio_output_underruns += 1
+    speech_output_ready = False
+    speech_output_rebuffering = True
+    return (packet, packet), False
+
+
+async def encode_video_loop() -> None:
+    """Encode H.264 independently so x264 latency cannot stall PCM delivery."""
+    global h264_encoder, h264_bytes, video_frames_published
+    active_epoch = -1
+    while True:
+        epoch, raw, width, height, timestamp_ms = await video_encode_queue.get()
+        if epoch != video_epoch:
+            continue
+        if epoch != active_epoch:
+            active_epoch = epoch
+            h264_encoder = None
+        if h264_encoder is None or (h264_encoder.width, h264_encoder.height) != (
+            width,
+            height,
+        ):
+            h264_encoder = H264Encoder(width, height)
+            print(
+                f"[avtr1-gw] H.264 {width}x{height} 25fps bitrate={H264_BITRATE}",
+                flush=True,
+            )
+        packets = await asyncio.to_thread(h264_encoder.encode, raw)
+        h264_bytes += sum(len(packet) for packet, _ in packets)
+        video_frames_published += 1
+        if flv_muxer_music is not None and flv_muxer_voice is not None:
+            # Audio may have advanced while x264 was working. Never append an
+            # older video timestamp behind already-published audio tags; stamp
+            # the held/caught-up picture at the current media-clock position.
+            publish_timestamp_ms = max(
+                timestamp_ms, flv_muxer_voice.timestamp_ms - 40
+            )
+            for packet_data, keyframe in packets:
+                for tag in flv_muxer_music.video_tags(
+                    packet_data, keyframe, timestamp_ms=publish_timestamp_ms
+                ):
+                    publish_flv(tag, music=True)
+                for tag in flv_muxer_voice.video_tags(
+                    packet_data, keyframe, timestamp_ms=publish_timestamp_ms
+                ):
+                    publish_flv(tag, music=False)
 
 
 def wav_to_pcm16(raw: bytes) -> bytes:
@@ -777,13 +967,15 @@ def wav_to_pcm16(raw: bytes) -> bytes:
 
 
 async def pace_av() -> None:
-    global h264_encoder, h264_bytes
-    global video_frames_published, video_frames_held, publisher_late_ticks
-    global audio_output_underruns, speech_output_ready
+    global video_frames_held, publisher_late_ticks, speech_output_ready
+    global speech_output_rebuffering, audio_continuity_holds, video_catchup_drops
+    global speech_finished, speech_turn_active, speech_playing, speech_rebuffering
+    global video_epoch
     loop = asyncio.get_running_loop()
     deadline = loop.time()
     last_video: tuple[int, bytes, int, int] | None = None
     active_epoch = -1
+    stale_speech_frames = 0
     while True:
         now = loop.time()
         if now - deadline > 0.06:
@@ -792,57 +984,59 @@ async def pace_av() -> None:
             # preserving FLV/RTP timestamps at an exact 40ms cadence.
             deadline = now
         # Rendering owns 200ms batches while publishing owns a strict 40ms
-        # clock. Hold the previous silent/idle frame until enough synchronized
-        # speech frames are ready; then transient >200ms inference spikes are
-        # absorbed without putting silence between spoken words.
-        if speech_playing and not speech_output_ready:
-            if av_pace_queue.qsize() >= OUTPUT_AV_TARGET_FRAMES:
+        # audio clock. Speech starts only after enough *speech* frames exist;
+        # in-flight idle frames are excluded from this watermark.
+        fresh = None
+        if speech_output_active and not speech_output_ready:
+            if (
+                len(speech_output_pcm) >= SPEECH_START_BUFFER_BYTES
+                or speech_output_finished
+            ) and speech_frames_queued >= _output_required_frames():
                 speech_output_ready = True
-            else:
-                fresh = None
-        if not speech_playing or speech_output_ready:
-            try:
-                fresh = av_pace_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                fresh = None
+                speech_output_rebuffering = False
+        if not speech_output_active or speech_output_ready:
+            while True:
+                candidate = dequeue_av_frame()
+                if candidate is None:
+                    break
+                is_speech_frame = bool(candidate[-1])
+                if speech_output_active and speech_output_ready:
+                    if not is_speech_frame:
+                        continue
+                    if stale_speech_frames > 0:
+                        stale_speech_frames -= 1
+                        video_catchup_drops += 1
+                        continue
+                fresh = candidate
+                break
 
-        audio_chunks = (bytes(PCM_PACKET_BYTES), bytes(PCM_PACKET_BYTES))
         if fresh is not None:
-            epoch, raw, width, height, audio_chunks = fresh
-            if epoch != active_epoch:
-                active_epoch = epoch
-                h264_encoder = None
-                last_video = None
-            last_video = (epoch, raw, width, height)
-        elif last_video is not None:
+            epoch, raw, width, height, _legacy_audio, _is_speech = fresh
+            if epoch != video_epoch:
+                fresh = None
+            else:
+                if epoch != active_epoch:
+                    active_epoch = epoch
+                    last_video = None
+                last_video = (epoch, raw, width, height)
+        if fresh is None and last_video is not None:
             video_frames_held += 1
-            if speech_playing and speech_output_ready:
-                audio_output_underruns += 1
+            if speech_output_active and speech_output_ready:
+                stale_speech_frames += 1
+                audio_continuity_holds += 1
 
         if last_video is not None:
             _epoch, raw, width, height = last_video
-            if h264_encoder is None or (
-                h264_encoder.width,
-                h264_encoder.height,
-            ) != (width, height):
-                h264_encoder = H264Encoder(width, height)
-                print(
-                    f"[avtr1-gw] H.264 {width}x{height} 25fps bitrate={H264_BITRATE}",
-                    flush=True,
-                )
-            packets = h264_encoder.encode(raw)
-            h264_bytes += sum(len(packet) for packet, _ in packets)
-            video_frames_published += 1
-            if flv_muxer_music is not None and flv_muxer_voice is not None:
-                for packet, keyframe in packets:
-                    for tag in flv_muxer_music.video_tags(packet, keyframe):
-                        publish_flv(tag, music=True)
-                    for tag in flv_muxer_voice.video_tags(packet, keyframe):
-                        publish_flv(tag, music=False)
+            timestamp_ms = flv_muxer_voice.timestamp_ms if flv_muxer_voice else 0
+            enqueue_video_encode((_epoch, raw, width, height, timestamp_ms))
+
+        output_was_active = speech_output_active
+        audio_chunks, output_had_speech = _take_output_audio()
         for last_audio in audio_chunks:
             now = time.monotonic()
             ducked = (
-                bool(speech_pcm)
+                output_had_speech
+                or speech_output_active
                 or now - last_speech_input_at < 1.6
                 or now - last_user_voice_at < 0.8
             )
@@ -852,6 +1046,18 @@ async def pace_av() -> None:
                     publish_flv(tag, music=True)
                 for tag in flv_muxer_voice.audio_tags(last_audio):
                     publish_flv(tag, music=False)
+        if output_was_active and not speech_output_active:
+            # Any renderer work that arrives after the authoritative audio has
+            # completed is stale. Drop it rather than showing delayed mouth
+            # motion after the voice has stopped.
+            stale_speech_frames = 0
+            clear_av_frames()
+            speech_pcm.clear()
+            speech_finished = False
+            speech_turn_active = False
+            speech_playing = False
+            speech_rebuffering = False
+            video_epoch += 1
         if flv_muxer_music is not None and flv_muxer_voice is not None:
             flv_muxer_music.advance(40)
             flv_muxer_voice.advance(40)
@@ -1003,6 +1209,113 @@ def _next_blink_delay(*, speaking: bool) -> float:
     return delay * (BLINK_SPEECH_INTERVAL_SCALE if speaking else 1.0)
 
 
+def _next_idle_expression_at(now: float) -> float:
+    """Choose a non-metronomic delay after the previous idle performance."""
+    span = IDLE_EXPRESSION_MAX_SECONDS - IDLE_EXPRESSION_MIN_SECONDS
+    delay = IDLE_EXPRESSION_MIN_SECONDS + span * random.betavariate(1.8, 2.0)
+    return now + delay
+
+
+def _queue_forced_blink(*, double: bool = False) -> None:
+    """Queue an intentional cute blink without changing normal blink cadence."""
+    global last_blink_at, next_blink_at
+    blink_frames.clear()
+    blink_frames.extend(_single_blink_profile(partial=False))
+    if double:
+        blink_frames.extend([0.0] * random.choice((2, 3)))
+        blink_frames.extend(_single_blink_profile(partial=False))
+    now = time.monotonic()
+    last_blink_at = now
+    next_blink_at = now + len(blink_frames) / 25.0 + _next_blink_delay(speaking=False)
+
+
+def _schedule_idle_expression(now: float) -> None:
+    """Build one short, randomized idle choreography from calibrated poses."""
+    global idle_expression_last_name, idle_expression_sequences, idle_expression_next_at
+    strength = IDLE_EXPRESSION_INTENSITY * random.uniform(0.88, 1.08)
+    duration = lambda low, high: random.randint(low, high)
+    choices: tuple[tuple[str, tuple[tuple[float, str, str, float, float, int], ...]], ...] = (
+        (
+            "thinking_pout",
+            (
+                (0.0, "expression", "one_brow", 0.72, 0.04, duration(1500, 2100)),
+                (2.4, "expression", "pout", 0.84, 0.12, duration(1500, 2100)),
+            ),
+        ),
+        (
+            "cute_double_blink",
+            (
+                (0.0, "blink_double", "neutral", 0.0, 0.0, 0),
+                (0.55, "expression", "shy", 0.76, 0.05, duration(1600, 2200)),
+            ),
+        ),
+        (
+            "cheeky_puff",
+            (
+                (0.0, "expression", "cheek_puff", 0.88, 0.15, duration(1700, 2300)),
+                (2.5, "blink", "neutral", 0.0, 0.0, 0),
+                (2.85, "expression", "smirk", 0.62, 0.06, duration(1200, 1700)),
+            ),
+        ),
+        (
+            "sleepy_cute",
+            (
+                (0.0, "blink", "neutral", 0.0, 0.0, 0),
+                (0.4, "expression", "pout", 0.68, 0.10, duration(1300, 1900)),
+                (2.25, "blink_double", "neutral", 0.0, 0.0, 0),
+            ),
+        ),
+    )
+    name, actions = random.choice(choices)
+    idle_expression_actions.clear()
+    for offset, kind, profile, scale, mouth, duration_ms in actions:
+        idle_expression_actions.append(
+            (now + offset, kind, profile, min(0.9, strength * scale), mouth, duration_ms)
+        )
+    idle_expression_last_name = name
+    idle_expression_sequences += 1
+    sequence_end = max(
+        offset + duration_ms / 1000.0
+        for offset, _kind, _profile, _scale, _mouth, duration_ms in actions
+    )
+    idle_expression_next_at = _next_idle_expression_at(now + sequence_end)
+
+
+def _cancel_idle_expression(now: float | None = None) -> None:
+    """Yield ambient control immediately when speech or dialogue needs the face."""
+    global expression_target, expression_pending, expression_expires_at
+    global expression_owner, idle_expression_next_at
+    now = time.monotonic() if now is None else now
+    idle_expression_actions.clear()
+    if expression_owner == "ambient":
+        expression_target = 0.0
+        expression_pending = None
+        expression_expires_at = 0.0
+    idle_expression_next_at = _next_idle_expression_at(now)
+
+
+def _update_idle_expression(now: float, *, idle_allowed: bool) -> None:
+    """Advance ambient actions only while both sides of the call are quiet."""
+    global idle_expression_next_at
+    if not IDLE_EXPRESSION_ENABLED or not idle_allowed:
+        if idle_expression_actions or expression_owner == "ambient":
+            _cancel_idle_expression(now)
+        return
+    quiet_since = max(last_speech_input_at, last_user_voice_at, last_motion_audio_at)
+    if quiet_since and now - quiet_since < IDLE_EXPRESSION_QUIET_SECONDS:
+        return
+    if not idle_expression_actions and expression_owner == "none" and now >= idle_expression_next_at:
+        _schedule_idle_expression(now)
+    while idle_expression_actions and idle_expression_actions[0][0] <= now:
+        _due, kind, profile, intensity, mouth, duration_ms = idle_expression_actions.popleft()
+        if kind == "blink":
+            _queue_forced_blink(double=False)
+        elif kind == "blink_double":
+            _queue_forced_blink(double=True)
+        else:
+            _apply_expression(profile, intensity, mouth, duration_ms, owner="ambient")
+
+
 def _breath_weights(now: float, *, enabled: bool) -> list[float]:
     """Five continuous low-frequency samples; two periods prevent a loop feel."""
     if not enabled or IDLE_BREATH_POSE_DEGREES <= 0.0:
@@ -1020,6 +1333,7 @@ def _expression_frame_weights(now: float) -> list[float]:
     """Advance the semantic expression with smooth frame-level envelopes."""
     global expression_gain, expression_target, expression_profile
     global expression_mouth_strength, expression_expires_at, expression_pending
+    global expression_owner
     values: list[float] = []
     for index in range(CHUNK_SIZE):
         frame_time = now + index / 25.0
@@ -1035,9 +1349,10 @@ def _expression_frame_weights(now: float) -> list[float]:
         elif expression_gain > expression_target:
             expression_gain = max(expression_target, expression_gain - step)
         if expression_pending is not None and expression_gain <= 0.02:
-            profile, intensity, mouth_strength, duration_ms = expression_pending
+            profile, intensity, mouth_strength, duration_ms, owner = expression_pending
             expression_pending = None
             expression_profile = profile
+            expression_owner = owner
             expression_target = intensity
             expression_mouth_strength = mouth_strength
             expression_expires_at = frame_time + duration_ms / 1000.0
@@ -1045,6 +1360,7 @@ def _expression_frame_weights(now: float) -> list[float]:
     if expression_gain <= 0.001 and expression_target <= 0.001 and expression_pending is None:
         expression_profile = "neutral"
         expression_mouth_strength = 0.0
+        expression_owner = "none"
     return values
 
 
@@ -1075,6 +1391,18 @@ async def render_loop() -> None:
             if speech_active or listen_active:
                 last_motion_audio_at = now
             motion_active = now - last_motion_audio_at <= MOTION_ACTIVE_HOLD_SECONDS
+            _update_idle_expression(
+                now,
+                idle_allowed=(
+                    not motion_active
+                    and not speech_active
+                    and not listen_active
+                    and not speech_turn_active
+                    and not speech_output_active
+                    and not expression_timeline
+                    and expression_owner in {"none", "ambient"}
+                ),
+            )
             noise_alpha = NOISE_ALPHA if motion_active else IDLE_NOISE_ALPHA
             noise_trunc_z = NOISE_TRUNC_Z if motion_active else IDLE_NOISE_TRUNC_Z
             # Ease breathing out during speech and back in during quiet instead
@@ -1234,12 +1562,16 @@ async def render_loop() -> None:
                             first_audio or bytes(PCM_PACKET_BYTES),
                             second_audio or bytes(PCM_PACKET_BYTES),
                         ),
+                        rendered_speech,
                     )
                 )
             # While a response is playing, use spare renderer capacity to keep
             # a bounded synchronized A/V reservoir. TTS can synthesize the next
             # sentence while the current sentence drains from this queue.
-            fill_reservoir = rendered_speech and av_pace_queue.qsize() < OUTPUT_AV_TARGET_FRAMES
+            fill_reservoir = (
+                rendered_speech
+                and speech_frames_queued < speech_output_target_frames
+            )
             await asyncio.sleep(0 if fill_reservoir else max(0.0, 0.2 - elapsed))
         except Exception as exc:
             connected = False
@@ -1251,13 +1583,16 @@ async def render_loop() -> None:
             await asyncio.sleep(0.5)
 
 
-async def append_speech(pcm: bytes) -> None:
+async def append_speech(pcm: bytes, *, mode: str = "interactive") -> None:
     global last_speech_input_at, speech_finished
     global speech_turn_active, speech_playing, speech_rebuffering, speech_turn_underruns
-    global speech_output_ready
+    global speech_output_ready, speech_output_active, speech_output_finished
+    global speech_output_rebuffering, speech_output_mode, speech_output_target_frames
+    global speech_output_elapsed_ms
     if not pcm:
         return
     last_speech_input_at = time.monotonic()
+    _cancel_idle_expression(last_speech_input_at)
     async with buf_lock:
         if not speech_turn_active:
             speech_turn_active = True
@@ -1265,16 +1600,28 @@ async def append_speech(pcm: bytes) -> None:
             speech_rebuffering = False
             speech_turn_underruns = 0
             speech_output_ready = False
-            while not av_pace_queue.empty():
-                try:
-                    av_pace_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+            speech_output_active = True
+            speech_output_finished = False
+            speech_output_rebuffering = False
+            speech_output_mode = "proactive" if mode == "proactive" else "interactive"
+            speech_output_elapsed_ms = 0
+            speech_output_target_frames = (
+                PROACTIVE_OUTPUT_TARGET_FRAMES
+                if speech_output_mode == "proactive"
+                else OUTPUT_AV_TARGET_FRAMES
+            )
+            print(
+                f"[avtr1-gw] speech turn mode={speech_output_mode} "
+                f"render_reservoir={speech_output_target_frames * 40}ms",
+                flush=True,
+            )
+            speech_output_pcm.clear()
+            clear_av_frames()
         speech_finished = False
-        speech_pcm.extend(pcm)
-        overflow = len(speech_pcm) - MAX_SPEECH_BYTES
-        if overflow > 0:
-            del speech_pcm[: overflow - (overflow % 2)]
+        capacity = max(0, MAX_SPEECH_BYTES - len(speech_output_pcm))
+        accepted = pcm[: capacity - (capacity % 2)]
+        speech_pcm.extend(accepted)
+        speech_output_pcm.extend(accepted)
 
 
 async def append_listen(pcm: bytes) -> None:
@@ -1286,6 +1633,7 @@ async def append_listen(pcm: bytes) -> None:
         rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
         if rms >= BACKGROUND_MUSIC_USER_RMS:
             last_user_voice_at = time.monotonic()
+            _cancel_idle_expression(last_user_voice_at)
     async with buf_lock:
         listen_pcm.extend(pcm)
         overflow = len(listen_pcm) - MAX_SPEECH_BYTES
@@ -1339,7 +1687,11 @@ async def handle_status(_request):
             return None
         return round(float(np.percentile(np.asarray(values), value)), 2)
 
-    speaking = speech_turn_active or time.monotonic() - last_speech_input_at < 1.6
+    speaking = (
+        speech_turn_active
+        or speech_output_active
+        or time.monotonic() - last_speech_input_at < 1.6
+    )
     music_ducked = speaking or time.monotonic() - last_user_voice_at < 0.8
     return web.json_response(
         {
@@ -1349,21 +1701,24 @@ async def handle_status(_request):
             "age_ms": int((time.time() - last_frame_at) * 1000)
             if last_frame_at
             else None,
-            "speech_ms": int(len(speech_pcm) / 2 / SAMPLE_RATE * 1000),
+            "speech_ms": int(len(speech_output_pcm) / 2 / SAMPLE_RATE * 1000),
             "speaking": speaking,
             "audio_buffer": {
                 "state": (
                     "playing"
-                    if speech_playing
+                    if speech_output_ready
                     else "rebuffering"
-                    if speech_rebuffering
+                    if speech_rebuffering or speech_output_rebuffering
                     else "buffering"
-                    if speech_turn_active
+                    if speech_turn_active or speech_output_active
                     else "idle"
                 ),
-                "queued_ms": int(len(speech_pcm) / 2 / SAMPLE_RATE * 1000),
-                "output_reservoir_ms": av_pace_queue.qsize() * 40,
-                "output_buffering": speech_playing and not speech_output_ready,
+                "queued_ms": int(len(speech_output_pcm) / 2 / SAMPLE_RATE * 1000),
+                "render_reservoir_ms": speech_frames_queued * 40,
+                "output_reservoir_ms": speech_frames_queued * 40,
+                "output_buffering": speech_output_active and not speech_output_ready,
+                "output_mode": speech_output_mode,
+                "output_target_ms": speech_output_target_frames * 40,
                 "watermark_ms": int(
                     speech_dynamic_buffer_bytes / 2 / SAMPLE_RATE * 1000
                 ),
@@ -1371,6 +1726,7 @@ async def handle_status(_request):
                 "max_watermark_ms": SPEECH_MAX_BUFFER_MS,
                 "underruns": speech_buffer_underruns,
                 "output_underruns": audio_output_underruns,
+                "video_holds_with_continuous_audio": audio_continuity_holds,
                 "inserted_silence_ms": speech_silence_inserted_ms,
                 "turns_completed": speech_turns_completed,
                 "last_tts": last_tts_metrics,
@@ -1387,6 +1743,9 @@ async def handle_status(_request):
                 "frames_published": video_frames_published,
                 "held_frames": video_frames_held,
                 "queue_drops": video_queue_drops,
+                "catchup_drops": video_catchup_drops,
+                "encode_queue_drops": video_encode_drops,
+                "encode_queue_frames": video_encode_queue.qsize(),
                 "publisher_late_ticks": publisher_late_ticks,
                 "queue_frames": av_pace_queue.qsize(),
             },
@@ -1435,15 +1794,31 @@ async def handle_status(_request):
                 "idle_breath_fade_in_step": IDLE_BREATH_FADE_IN_STEP,
                 "idle_breath_fade_out_step": IDLE_BREATH_FADE_OUT_STEP,
                 "idle_breath_mix": round(breath_mix, 3),
+                "idle_expression": {
+                    "enabled": IDLE_EXPRESSION_ENABLED,
+                    "min_seconds": IDLE_EXPRESSION_MIN_SECONDS,
+                    "max_seconds": IDLE_EXPRESSION_MAX_SECONDS,
+                    "intensity": IDLE_EXPRESSION_INTENSITY,
+                    "active": expression_owner == "ambient" or bool(idle_expression_actions),
+                    "sequence": idle_expression_last_name or None,
+                    "queued_actions": len(idle_expression_actions),
+                    "sequences": idle_expression_sequences,
+                    "next_ms": max(
+                        0, int((idle_expression_next_at - time.monotonic()) * 1000)
+                    ),
+                },
                 "expression": {
                     "profile": expression_profile,
                     "gain": round(expression_gain, 3),
                     "target": round(expression_target, 3),
                     "mouth_strength": round(expression_mouth_strength, 3),
                     "pending": expression_pending[0] if expression_pending else None,
+                    "owner": expression_owner,
                     "render_source": expression_render_avatar,
                     "source_min_intensity": EXPRESSION_SOURCE_MIN_INTENSITY,
                     "transition_frames_remaining": expression_transition_frames,
+                    "transition_mode": "crisp_hybrid",
+                    "crisp_switches": expression_crisp_switches,
                     "attack_ms": EXPRESSION_ATTACK_FRAMES * 40,
                     "release_ms": EXPRESSION_RELEASE_FRAMES * 40,
                 },
@@ -1476,6 +1851,8 @@ async def handle_set_avatar(request):
     global expression_transition_total_frames
     global speech_finished, speech_turn_active, speech_playing, speech_rebuffering
     global speech_turn_underruns, speech_dynamic_buffer_bytes, speech_output_ready, video_epoch
+    global speech_output_active, speech_output_finished, speech_output_rebuffering
+    global speech_output_elapsed_ms
     body = await request.json()
     avatar_id = str(body.get("avatar_id") or "").strip()
     if not avatar_id or "/" in avatar_id or ".." in avatar_id:
@@ -1494,6 +1871,12 @@ async def handle_set_avatar(request):
         speech_rebuffering = False
         speech_turn_underruns = 0
         speech_output_ready = False
+        speech_output_pcm.clear()
+        speech_output_active = False
+        speech_output_finished = False
+        speech_output_rebuffering = False
+        speech_output_elapsed_ms = 0
+        expression_timeline.clear()
         speech_dynamic_buffer_bytes = SPEECH_START_BUFFER_BYTES
         listen_pcm.clear()
         state_blob = None
@@ -1508,11 +1891,7 @@ async def handle_set_avatar(request):
         # without blinking immediately on the first generated frame.
         blink_frames.clear()
         next_blink_at = time.monotonic() + random.uniform(1.2, 2.4)
-    while not av_pace_queue.empty():
-        try:
-            av_pace_queue.get_nowait()
-        except asyncio.QueueEmpty:
-            break
+    clear_av_frames()
     print(f"[avtr1-gw] avatar -> {AVATAR_ID}", flush=True)
     return web.json_response(
         {"ok": True, "avatar_id": AVATAR_ID, "label": _avatar_label(AVATAR_ID)}
@@ -1537,7 +1916,7 @@ async def handle_set_motion_config(request):
 async def handle_expression(request):
     global expression_profile, expression_gain, expression_target
     global expression_mouth_strength, expression_expires_at
-    global expression_sequence, expression_pending
+    global expression_sequence, expression_pending, expression_timeline
     try:
         body = await request.json()
         profile = str(body.get("profile") or "neutral").strip().lower().replace("-", "_")
@@ -1547,11 +1926,44 @@ async def handle_expression(request):
         mouth_strength = min(0.45, max(0.0, float(body.get("mouth_strength", 0.0))))
         duration_ms = min(6000, max(300, int(body.get("duration_ms", 1200))))
         sequence = max(0, int(body.get("sequence", 0)))
+        delay_ms = min(12_000, max(0, int(body.get("delay_ms", 0))))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=400)
     if sequence and sequence <= expression_sequence:
         return web.json_response({"ok": True, "ignored": "stale", "sequence": expression_sequence})
     expression_sequence = max(expression_sequence, sequence)
+    _cancel_idle_expression()
+    # Bind even the first cue to the authoritative PCM clock. Applying it at
+    # TTS-generation time lets the face finish its expression before buffered
+    # audio actually reaches viewers, especially in complete/proactive mode.
+    expression_timeline.append(
+        (delay_ms, profile, intensity, mouth_strength, duration_ms, sequence)
+    )
+    expression_timeline = deque(
+        sorted(expression_timeline, key=lambda item: (item[0], item[5]))
+    )
+    return web.json_response({
+        "ok": True,
+        "profile": profile,
+        "intensity": intensity,
+        "duration_ms": duration_ms,
+        "delay_ms": delay_ms,
+        "sequence": expression_sequence,
+    })
+
+
+def _apply_expression(
+    profile: str,
+    intensity: float,
+    mouth_strength: float,
+    duration_ms: int,
+    *,
+    owner: str = "dialogue",
+) -> None:
+    global expression_profile, expression_target, expression_pending
+    global expression_mouth_strength, expression_expires_at, expression_owner
+    if owner == "dialogue":
+        _cancel_idle_expression()
     if profile == "neutral" or intensity <= 0.0:
         expression_pending = None
         expression_target = 0.0
@@ -1559,21 +1971,23 @@ async def handle_expression(request):
     elif profile == expression_profile or expression_gain <= 0.02:
         expression_pending = None
         expression_profile = profile
+        expression_owner = owner
         expression_target = intensity
         expression_mouth_strength = mouth_strength
         expression_expires_at = time.monotonic() + duration_ms / 1000.0
     else:
         # Fade the previous basis out before changing basis, avoiding a one
         # frame eyebrow/mouth jump at clause boundaries.
-        expression_pending = (profile, intensity, mouth_strength, duration_ms)
+        expression_pending = (profile, intensity, mouth_strength, duration_ms, owner)
         expression_target = 0.0
-    return web.json_response({
-        "ok": True,
-        "profile": profile,
-        "intensity": intensity,
-        "duration_ms": duration_ms,
-        "sequence": expression_sequence,
-    })
+
+
+def _apply_due_expressions(elapsed_ms: int) -> None:
+    while expression_timeline and expression_timeline[0][0] <= elapsed_ms:
+        _delay, profile, intensity, mouth_strength, duration_ms, _sequence = (
+            expression_timeline.popleft()
+        )
+        _apply_expression(profile, intensity, mouth_strength, duration_ms)
 
 
 async def handle_livestream(request):
@@ -1635,20 +2049,21 @@ async def handle_audio(request):
         pcm = wav_to_pcm16(raw)
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=400)
-    await append_speech(pcm)
+    await append_speech(pcm, mode=request.query.get("mode", "interactive"))
     return web.json_response({"ok": True, "samples": len(pcm) // 2})
 
 
 async def handle_audio_chunk(request):
     raw = await request.read()
-    await append_speech(raw)
+    await append_speech(raw, mode=request.query.get("mode", "interactive"))
     return web.json_response({"ok": True, "bytes": len(raw)})
 
 
 async def handle_audio_finish(_request):
-    global speech_finished, last_tts_metrics
+    global speech_finished, speech_output_finished, last_tts_metrics
     async with buf_lock:
         speech_finished = True
+        speech_output_finished = True
         metrics: dict[str, float | int] = {}
         for key in ("audio_ms", "generation_ms", "rtf", "chunks", "max_gap_ms"):
             raw = _request.query.get(key)
@@ -1683,8 +2098,10 @@ async def handle_listen_reset(_request):
 async def handle_interrupt(_request):
     global state_blob, last_speech_input_at, speech_finished
     global speech_turn_active, speech_playing, speech_rebuffering, speech_turn_underruns
-    global speech_output_ready
+    global speech_output_ready, speech_output_active, speech_output_finished
+    global speech_output_rebuffering
     global expression_target, expression_pending, expression_expires_at
+    global speech_output_elapsed_ms
     async with buf_lock:
         speech_pcm.clear()
         speech_finished = False
@@ -1693,16 +2110,19 @@ async def handle_interrupt(_request):
         speech_rebuffering = False
         speech_turn_underruns = 0
         speech_output_ready = False
+        speech_output_pcm.clear()
+        speech_output_active = False
+        speech_output_finished = False
+        speech_output_rebuffering = False
         state_blob = None
         last_speech_input_at = 0.0
         expression_target = 0.0
         expression_pending = None
         expression_expires_at = 0.0
-    while not av_pace_queue.empty():
-        try:
-            av_pace_queue.get_nowait()
-        except asyncio.QueueEmpty:
-            break
+        expression_timeline.clear()
+        speech_output_elapsed_ms = 0
+        _cancel_idle_expression()
+    clear_av_frames()
     return web.json_response({"ok": True})
 
 
@@ -1714,12 +2134,13 @@ async def on_startup(app):
     flv_muxer_voice = FlvMuxer()
     await asyncio.to_thread(background_music.load)
     app["pacer"] = asyncio.create_task(pace_av())
+    app["encoder"] = asyncio.create_task(encode_video_loop())
     app["render"] = asyncio.create_task(render_loop())
 
 
 async def on_cleanup(app):
     global renderer_session
-    for key in ("pacer", "render"):
+    for key in ("pacer", "encoder", "render"):
         app[key].cancel()
     if renderer_session is not None:
         await renderer_session.close()
