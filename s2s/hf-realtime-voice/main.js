@@ -335,6 +335,7 @@ const restartBtn = $("#restart-conversation");
 /** @type {HTMLElement} */
 const restartHint = $("#restart-hint");
 const settingsForm = /** @type {HTMLFormElement} */ (settingsModal.querySelector("form"));
+const settingsClose = /** @type {HTMLButtonElement} */ ($("#settings-close"));
 const settingsAutoSaveStatus = $("#settings-auto-save-status");
 const motionSaveStatus = $("#motion-save-status");
 const motionInputs = [...settingsModal.querySelectorAll("[data-motion]")];
@@ -1727,7 +1728,19 @@ function promptServerUrl() {
 }
 
 settingsForm.addEventListener("submit", (event) => event.preventDefault());
+settingsClose.addEventListener("click", () => settingsModal.close());
 document.getElementById("settings-done")?.addEventListener("click", () => settingsModal.close());
+
+// Native <dialog> backdrops dispatch the click on the dialog itself. Keep the
+// content click inside the form, and dismiss only a real backdrop click.
+settingsModal.addEventListener("click", (event) => {
+  if (event.target === settingsModal) settingsModal.close();
+});
+settingsModal.addEventListener("cancel", (event) => {
+  // Make Escape follow the exact same cleanup path as X/backdrop/Done.
+  event.preventDefault();
+  settingsModal.close();
+});
 
 inputInstructions.addEventListener("input", () => {
   scheduleGeneralSettingsSave(false);
