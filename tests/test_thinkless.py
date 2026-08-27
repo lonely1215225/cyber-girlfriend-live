@@ -15,6 +15,7 @@ from ollama_thinkless import (  # noqa: E402
     _is_fast_external_planning,
     _needs_reliable_external_route,
     _is_room_welcome_request,
+    _num_predict_for_messages,
     clean_model_output,
     completed_response,
     local_compaction,
@@ -93,10 +94,14 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         self.assertFalse(_is_exact_speech_request([{"role": "user", "content": "现在多少钱？"}]))
 
     def test_room_welcome_uses_fast_local_provider(self):
-        self.assertTrue(_is_room_welcome_request([
+        messages = [
             {"role": "system", "content": "你现在是直播间入场欢迎生成器。"},
             {"role": "user", "content": "欢迎林清欢"},
-        ]))
+        ]
+        self.assertTrue(_is_room_welcome_request(messages))
+        # The hidden delivery tag shares this budget with the spoken Chinese.
+        # The former 48-token cap could stop a welcome in the middle of a word.
+        self.assertGreaterEqual(_num_predict_for_messages(messages), 96)
         self.assertFalse(_is_room_welcome_request([{"role": "user", "content": "普通聊天"}]))
 
     def test_translates_responses_api_tools_for_ollama(self):

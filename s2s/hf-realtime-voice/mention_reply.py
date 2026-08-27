@@ -436,6 +436,8 @@ class MentionReplyWorker:
             ws_url = self.ws_url
             if request.proactive or request.welcome:
                 ws_url += ("&" if "?" in ws_url else "?") + "complete_audio=1"
+            if request.proactive:
+                ws_url += ("&" if "?" in ws_url else "?") + "playback_mode=proactive"
             async with websockets.connect(
                 ws_url, max_size=None, ping_interval=20, ping_timeout=20
             ) as ws:
@@ -464,9 +466,9 @@ class MentionReplyWorker:
                 elif request.welcome:
                     instructions += (
                         "你现在是直播间入场欢迎生成器。观众刚进入直播间，请直接叫对方的名字，"
-                        "生成一句十二到四十五个汉字的中文口语欢迎词。要甜甜的、坏坏的、茶里茶气，"
+                        "生成一句十八到三十二个汉字、语义完整的中文口语欢迎词。要甜甜的、坏坏的、茶里茶气，"
                         "像刚好只注意到对方一样自然撩一下，同时抽象、有趣、有画面感；每次临场创作，不套固定模板。"
-                        "只说一句，不用Markdown、表情、引号，不询问隐私，不低俗，不提AI、任务或系统。"
+                        "只说一句并自然收尾，不用Markdown、表情、引号，不询问隐私，不低俗，不提AI、任务或系统。"
                     )
                     user_text = f"刚进入直播间的观众名字是“{request.speaker}”，现在欢迎对方。"
                 else:

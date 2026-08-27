@@ -23,6 +23,11 @@ PORT = int(os.environ.get("THINKLESS_PORT", "11435"))
 KEEP_ALIVE = os.environ.get("LLM_KEEP_ALIVE", "-1").strip() or "-1"
 PREWARM = os.environ.get("LLM_PREWARM", "1").strip().lower() in {"1", "true", "yes", "on"}
 COMPACTION_NUM_PREDICT = int(os.environ.get("LLM_COMPACTION_NUM_PREDICT", "256"))
+WELCOME_NUM_PREDICT = max(96, int(os.environ.get("LLM_WELCOME_NUM_PREDICT", "128")))
+WELCOME_RETRY_NUM_PREDICT = max(
+    WELCOME_NUM_PREDICT,
+    int(os.environ.get("LLM_WELCOME_RETRY_NUM_PREDICT", "192")),
+)
 COMPACTION_MODE = os.environ.get("LLM_COMPACTION_MODE", "local").strip().lower()
 COMPACTION_MAX_CHARS = max(300, int(os.environ.get("LLM_COMPACTION_MAX_CHARS", "900")))
 GROK_ENABLED = os.environ.get("GROK_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -32,7 +37,7 @@ GROK_API_KEY = os.environ.get("GROK_PROXY_API_KEY", "").strip()
 GROK_REASONING_EFFORT = os.environ.get("GROK_REASONING_EFFORT", "low").strip().lower() or "low"
 GROK_TIMEOUT_SECONDS = max(2.0, float(os.environ.get("GROK_TIMEOUT_SECONDS", "45")))
 LOCAL_READ_TIMEOUT_SECONDS = max(
-    2.0, float(os.environ.get("LLM_LOCAL_READ_TIMEOUT_SECONDS", "4.0"))
+    4.0, float(os.environ.get("LLM_LOCAL_READ_TIMEOUT_SECONDS", "12.0"))
 )
 LOCAL_TIMEOUT_REPLY = "嗯？刚才没接稳，你再说一遍嘛。"
 _REASONING_TAGS = {"think", "analysis", "reasoning"}
@@ -302,15 +307,32 @@ def local_compaction(messages: list[dict]) -> str:
     return _local_compaction(messages, COMPACTION_MAX_CHARS)
 
 
-def ollama_chat(model: str, messages: list[dict], stream: bool, tools: list[dict] | None = None):
+def _num_predict_for_messages(messages: list[dict]) -> int:
+    """Reserve enough output for both the hidden delivery plan and spoken text."""
+    num_predict = int(os.environ.get("LLM_NUM_PREDICT", "128"))
+    if _is_compaction_request(messages):
+        return COMPACTION_NUM_PREDICT
+    if _is_room_welcome_request(messages):
+        return WELCOME_NUM_PREDICT
+    return num_predict
+
+
+def ollama_chat(
+    model: str,
+    messages: list[dict],
+    stream: bool,
+    tools: list[dict] | None = None,
+    *,
+    num_predict_override: int | None = None,
+):
     # Default Ollama ctx for this 9B is 262144. Prompt eval then takes ~8s even
     # for a short line, and under GPU contention it exceeds the s2s 20s timeout.
     num_ctx = int(os.environ.get("LLM_NUM_CTX", "4096"))
-    num_predict = int(os.environ.get("LLM_NUM_PREDICT", "128"))
-    if _is_compaction_request(messages):
-        num_predict = COMPACTION_NUM_PREDICT
-    elif _is_room_welcome_request(messages):
-        num_predict = min(num_predict, 48)
+    num_predict = (
+        max(1, int(num_predict_override))
+        if num_predict_override is not None
+        else _num_predict_for_messages(messages)
+    )
     payload = {
             "model": model,
             "messages": messages,
@@ -625,36 +647,96 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+        local_done_reason = ""
         try:
-            with ollama_chat(model, messages, True, tools) as r:
-                for raw in r:
-                    line = raw.decode("utf-8", "ignore").strip()
-                    if not line:
-                        continue
-                    data = json.loads(line)
-                    in_tok = int(data.get("prompt_eval_count") or in_tok)
-                    out_tok = int(data.get("eval_count") or out_tok)
-                    raw_piece = ((data.get("message") or {}).get("content")) or ""
-                    chunk_calls = ((data.get("message") or {}).get("tool_calls")) or []
-                    if chunk_calls:
-                        if first_delta_at is None:
-                            first_delta_at = time.monotonic()
-                        tool_calls.extend(chunk_calls)
-                    piece = sanitizer.feed(raw_piece)
-                    if piece:
-                        if first_delta_at is None:
-                            first_delta_at = time.monotonic()
-                        full.append(piece)
-                        sse(
-                            "response.output_text.delta",
-                            {
-                                "type": "response.output_text.delta",
-                                "delta": piece,
-                                "content_index": 0,
-                                "item_id": mid,
-                                "output_index": 0,
-                            },
-                        )
+            # A welcome is short, but it must be delivered atomically. Buffer
+            # it until Ollama reports a clean finish so a token-limit response
+            # can never become a half-spoken greeting. Normal dialogue keeps
+            # the existing token stream and therefore its minimum TTFT.
+            if fast_welcome:
+                with ollama_chat(model, messages, False, tools) as r:
+                    data = json.loads(r.read())
+                msg = data.get("message") or {}
+                raw_text = str(msg.get("content") or "")
+                local_done_reason = str(data.get("done_reason") or "")
+                in_tok = int(data.get("prompt_eval_count") or 0)
+                out_tok = int(data.get("eval_count") or 0)
+                if local_done_reason == "length":
+                    print(
+                        "[thinkless] welcome hit output limit; regenerating a shorter complete line",
+                        flush=True,
+                    )
+                    retry_messages = [
+                        *messages,
+                        {"role": "assistant", "content": raw_text},
+                        {
+                            "role": "user",
+                            "content": (
+                                "上一句因长度限制没有说完。请重新生成一句更短、语义完整的欢迎词；"
+                                "仍遵守原要求，并用句号、问号、感叹号或波浪号自然收尾。"
+                            ),
+                        },
+                    ]
+                    with ollama_chat(
+                        model,
+                        retry_messages,
+                        False,
+                        tools,
+                        num_predict_override=WELCOME_RETRY_NUM_PREDICT,
+                    ) as r:
+                        data = json.loads(r.read())
+                    msg = data.get("message") or {}
+                    raw_text = str(msg.get("content") or "")
+                    local_done_reason = str(data.get("done_reason") or "")
+                    in_tok += int(data.get("prompt_eval_count") or 0)
+                    out_tok += int(data.get("eval_count") or 0)
+                piece = sanitizer.feed(raw_text)
+                if piece:
+                    first_delta_at = time.monotonic()
+                    full.append(piece)
+                    sse(
+                        "response.output_text.delta",
+                        {
+                            "type": "response.output_text.delta",
+                            "delta": piece,
+                            "content_index": 0,
+                            "item_id": mid,
+                            "output_index": 0,
+                        },
+                    )
+                tool_calls.extend(msg.get("tool_calls") or [])
+            else:
+                with ollama_chat(model, messages, True, tools) as r:
+                    for raw in r:
+                        line = raw.decode("utf-8", "ignore").strip()
+                        if not line:
+                            continue
+                        data = json.loads(line)
+                        in_tok = int(data.get("prompt_eval_count") or in_tok)
+                        out_tok = int(data.get("eval_count") or out_tok)
+                        if data.get("done"):
+                            local_done_reason = str(data.get("done_reason") or "")
+                        raw_piece = ((data.get("message") or {}).get("content")) or ""
+                        chunk_calls = ((data.get("message") or {}).get("tool_calls")) or []
+                        if chunk_calls:
+                            if first_delta_at is None:
+                                first_delta_at = time.monotonic()
+                            tool_calls.extend(chunk_calls)
+                        piece = sanitizer.feed(raw_piece)
+                        if piece:
+                            if first_delta_at is None:
+                                first_delta_at = time.monotonic()
+                            full.append(piece)
+                            sse(
+                                "response.output_text.delta",
+                                {
+                                    "type": "response.output_text.delta",
+                                    "delta": piece,
+                                    "content_index": 0,
+                                    "item_id": mid,
+                                    "output_index": 0,
+                                },
+                            )
         except (TimeoutError, OSError, HTTPError, URLError, json.JSONDecodeError) as exc:
             if not full and not tool_calls:
                 first_delta_at = time.monotonic()
@@ -693,7 +775,7 @@ class Handler(BaseHTTPRequestHandler):
         print(
             f"[thinkless] local latency first={first_ms:.0f}ms "
             f"total={(time.monotonic() - local_started) * 1000:.0f}ms "
-            f"tools={len(tool_calls)} chars={len(text)}",
+            f"tools={len(tool_calls)} chars={len(text)} done_reason={local_done_reason or 'unknown'}",
             flush=True,
         )
         sse(
