@@ -31,7 +31,7 @@ EXPRESSION_SOURCE_PREFIX = os.environ.get(
 BG_ID = os.environ.get("AVTR1_BG_ID", "plain_white")
 H264_BITRATE = int(os.environ.get("AVTR1_H264_BITRATE", "1800000"))
 SPEECH_START_BUFFER_MS = max(
-    420, int(os.environ.get("AVATAR_TEE_PREROLL_MS", "800"))
+    420, int(os.environ.get("AVTR1_SPEECH_START_BUFFER_MS", "600"))
 )
 SPEECH_REBUFFER_STEP_MS = max(
     100, int(os.environ.get("AVTR1_AUDIO_REBUFFER_STEP_MS", "200"))
@@ -41,7 +41,8 @@ SPEECH_MAX_BUFFER_MS = max(
     int(os.environ.get("AVTR1_AUDIO_MAX_BUFFER_MS", "1400")),
 )
 AV_OUTPUT_RESERVOIR_MS = max(
-    200, int(os.environ.get("AVTR1_OUTPUT_RESERVOIR_MS", "480"))
+    SPEECH_START_BUFFER_MS,
+    int(os.environ.get("AVTR1_OUTPUT_RESERVOIR_MS", "800")),
 )
 PROACTIVE_OUTPUT_RESERVOIR_MS = max(
     AV_OUTPUT_RESERVOIR_MS,
@@ -144,13 +145,13 @@ IDLE_EXPRESSION_ENABLED = os.environ.get(
     "AVTR1_IDLE_EXPRESSION_ENABLED", "1"
 ).lower() not in {"0", "false", "off", "no"}
 IDLE_EXPRESSION_MIN_SECONDS = min(
-    60.0, max(6.0, float(os.environ.get("AVTR1_IDLE_EXPRESSION_MIN_SECONDS", "10")))
+    60.0, max(6.0, float(os.environ.get("AVTR1_IDLE_EXPRESSION_MIN_SECONDS", "6")))
 )
 IDLE_EXPRESSION_MAX_SECONDS = min(
     90.0,
     max(
         IDLE_EXPRESSION_MIN_SECONDS,
-        float(os.environ.get("AVTR1_IDLE_EXPRESSION_MAX_SECONDS", "24")),
+        float(os.environ.get("AVTR1_IDLE_EXPRESSION_MAX_SECONDS", "14")),
     ),
 )
 IDLE_EXPRESSION_INTENSITY = min(
@@ -401,7 +402,10 @@ av_pace_queue: asyncio.Queue = asyncio.Queue(
 )
 speech_frames_queued = 0
 h264_encoder: H264Encoder | None = None
-video_encode_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+VIDEO_ENCODE_QUEUE_FRAMES = max(
+    3, int(os.environ.get("AVTR1_VIDEO_ENCODE_QUEUE_FRAMES", "8"))
+)
+video_encode_queue: asyncio.Queue = asyncio.Queue(maxsize=VIDEO_ENCODE_QUEUE_FRAMES)
 h264_bytes = 0
 video_epoch = 0
 video_frames_rendered = 0
@@ -418,6 +422,7 @@ render_deadline_misses = 0
 render_errors = 0
 render_short_batches = 0
 render_durations_ms: deque[float] = deque(maxlen=900)
+encode_durations_ms: deque[float] = deque(maxlen=1500)
 renderer_session: aiohttp.ClientSession | None = None
 flv_muxer_music: FlvMuxer | None = None
 flv_muxer_voice: FlvMuxer | None = None
@@ -444,9 +449,11 @@ idle_expression_sequences = 0
 speech_output_elapsed_ms = 0
 expression_render_avatar = AVATAR_ID
 expression_previous_frame: bytes | None = None
+expression_transition_from_frame: bytes | None = None
 expression_transition_frames = 0
 expression_transition_total_frames = 0
 expression_crisp_switches = 0
+expression_soft_switches = 0
 EXPRESSION_SOURCE_MIN_INTENSITY = min(
     0.9, max(0.2, float(os.environ.get("AVTR1_EXPRESSION_SOURCE_MIN_INTENSITY", "0.48")))
 )
@@ -461,6 +468,13 @@ EXPRESSION_ATTACK_STEP = min(
 )
 EXPRESSION_RELEASE_STEP = min(
     0.2, max(0.01, float(os.environ.get("AVTR1_EXPRESSION_RELEASE_STEP", "0.025")))
+)
+EXPRESSION_TRANSITION_SPEECH_FRAMES = max(
+    3, min(10, int(os.environ.get("AVTR1_EXPRESSION_TRANSITION_SPEECH_FRAMES", "5")))
+)
+EXPRESSION_TRANSITION_IDLE_FRAMES = max(
+    EXPRESSION_TRANSITION_SPEECH_FRAMES,
+    min(14, int(os.environ.get("AVTR1_EXPRESSION_TRANSITION_IDLE_FRAMES", "8"))),
 )
 
 
@@ -482,26 +496,59 @@ def _render_avatar_for_expression(base_avatar_id: str) -> str:
 
 
 def _crossfade_expression_frame(raw: bytes, render_avatar_id: str) -> bytes:
-    """Switch expression sources without blending two moving video frames.
+    """Ease between identity-matched expression sources without ghost trails.
 
-    The semantic expression envelope already ramps on the base portrait up to
-    ``EXPRESSION_SOURCE_MIN_INTENSITY`` and continues after the source switch.
-    Alpha-blending the old rendered frame into each subsequent moving frame
-    added a recursive temporal trail: eyes and lips looked out of focus and the
-    full-frame float conversion briefly stalled the event loop.  Preserve the
-    envelope, but publish the selected AVTR frame byte-for-byte.
+    A source change used to be a one-frame cut. The older recursive blend was
+    softer but repeatedly blended an already blended frame, leaving moving
+    eyes and lips visibly smeared. Keep one immutable snapshot from just
+    before the switch and blend every incoming AVTR frame against that same
+    snapshot. The transition is short while speaking and slightly more
+    relaxed while idle, so lip motion remains responsive.
     """
 
     global expression_render_avatar, expression_previous_frame
+    global expression_transition_from_frame
     global expression_transition_frames, expression_transition_total_frames
-    global expression_crisp_switches
+    global expression_crisp_switches, expression_soft_switches
     if render_avatar_id != expression_render_avatar:
         expression_render_avatar = render_avatar_id
-        expression_transition_total_frames = 0
+        if expression_previous_frame is not None and len(expression_previous_frame) == len(raw):
+            expression_transition_from_frame = expression_previous_frame
+            expression_transition_total_frames = (
+                EXPRESSION_TRANSITION_SPEECH_FRAMES
+                if speech_output_active or speech_playing or speech_turn_active
+                else EXPRESSION_TRANSITION_IDLE_FRAMES
+            )
+            expression_transition_frames = expression_transition_total_frames
+            expression_soft_switches += 1
+        else:
+            expression_transition_from_frame = None
+            expression_transition_total_frames = 0
+            expression_transition_frames = 0
+            expression_crisp_switches += 1
+
+    output = raw
+    source = expression_transition_from_frame
+    if source is not None and expression_transition_frames > 0 and len(source) == len(raw):
+        completed = expression_transition_total_frames - expression_transition_frames + 1
+        progress = completed / max(1, expression_transition_total_frames)
+        # Smoothstep starts and finishes gently without extending the blend.
+        alpha = progress * progress * (3.0 - 2.0 * progress)
+        old = np.frombuffer(source, dtype=np.uint8).astype(np.float32)
+        new = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+        output = np.clip(old * (1.0 - alpha) + new * alpha, 0, 255).astype(np.uint8).tobytes()
+        expression_transition_frames -= 1
+        if expression_transition_frames <= 0:
+            output = raw
+            expression_transition_from_frame = None
+            expression_transition_total_frames = 0
+    elif expression_transition_frames:
+        expression_transition_from_frame = None
         expression_transition_frames = 0
-        expression_crisp_switches += 1
-    expression_previous_frame = raw
-    return raw
+        expression_transition_total_frames = 0
+
+    expression_previous_frame = output
+    return output
 
 
 class BackgroundMusic:
@@ -924,7 +971,9 @@ async def encode_video_loop() -> None:
                 f"[avtr1-gw] H.264 {width}x{height} 25fps bitrate={H264_BITRATE}",
                 flush=True,
             )
+        encode_started = time.monotonic()
         packets = await asyncio.to_thread(h264_encoder.encode, raw)
+        encode_durations_ms.append((time.monotonic() - encode_started) * 1000.0)
         h264_bytes += sum(len(packet) for packet, _ in packets)
         video_frames_published += 1
         if flv_muxer_music is not None and flv_muxer_voice is not None:
@@ -1746,6 +1795,10 @@ async def handle_status(_request):
                 "catchup_drops": video_catchup_drops,
                 "encode_queue_drops": video_encode_drops,
                 "encode_queue_frames": video_encode_queue.qsize(),
+                "encode_queue_capacity": VIDEO_ENCODE_QUEUE_FRAMES,
+                "encode_duration_p50_ms": percentile(encode_durations_ms, 50),
+                "encode_duration_p95_ms": percentile(encode_durations_ms, 95),
+                "encode_duration_p99_ms": percentile(encode_durations_ms, 99),
                 "publisher_late_ticks": publisher_late_ticks,
                 "queue_frames": av_pace_queue.qsize(),
             },
@@ -1817,7 +1870,10 @@ async def handle_status(_request):
                     "render_source": expression_render_avatar,
                     "source_min_intensity": EXPRESSION_SOURCE_MIN_INTENSITY,
                     "transition_frames_remaining": expression_transition_frames,
-                    "transition_mode": "crisp_hybrid",
+                    "transition_mode": "fixed_snapshot_smoothstep",
+                    "transition_speech_frames": EXPRESSION_TRANSITION_SPEECH_FRAMES,
+                    "transition_idle_frames": EXPRESSION_TRANSITION_IDLE_FRAMES,
+                    "soft_switches": expression_soft_switches,
                     "crisp_switches": expression_crisp_switches,
                     "attack_ms": EXPRESSION_ATTACK_FRAMES * 40,
                     "release_ms": EXPRESSION_RELEASE_FRAMES * 40,
@@ -1847,7 +1903,8 @@ async def handle_avatars(_request):
 
 async def handle_set_avatar(request):
     global AVATAR_ID, state_blob, state_avatar_id, h264_encoder, next_blink_at
-    global expression_render_avatar, expression_previous_frame, expression_transition_frames
+    global expression_render_avatar, expression_previous_frame, expression_transition_from_frame
+    global expression_transition_frames
     global expression_transition_total_frames
     global speech_finished, speech_turn_active, speech_playing, speech_rebuffering
     global speech_turn_underruns, speech_dynamic_buffer_bytes, speech_output_ready, video_epoch
@@ -1884,6 +1941,7 @@ async def handle_set_avatar(request):
         h264_encoder = None
         expression_render_avatar = avatar_id
         expression_previous_frame = None
+        expression_transition_from_frame = None
         expression_transition_frames = 0
         expression_transition_total_frames = 0
         video_epoch += 1

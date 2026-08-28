@@ -266,16 +266,34 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
         self.assertEqual(gateway.expression_pending[-1], "dialogue")
         self.assertEqual(gateway.expression_target, 0.0)
 
-    def test_expression_source_switch_never_alpha_blends_video_pixels(self):
+    def test_expression_source_switch_uses_bounded_non_recursive_transition(self):
         gateway.expression_render_avatar = "xiaoya_locket"
         gateway.expression_previous_frame = bytes([10, 20, 30, 40])
-        gateway.expression_transition_frames = 12
+        gateway.expression_transition_from_frame = None
+        gateway.expression_transition_frames = 0
+        gateway.expression_transition_total_frames = 0
+        gateway.speech_output_active = True
+        gateway.speech_playing = False
+        gateway.speech_turn_active = False
         new_frame = bytes([200, 180, 160, 140])
-        output = gateway._crossfade_expression_frame(
+        first = gateway._crossfade_expression_frame(
             new_frame, "xiaoya_locket_expr_smirk"
         )
+        self.assertNotEqual(first, new_frame)
+        self.assertGreater(first[0], 10)
+        self.assertLess(first[0], 200)
+        self.assertEqual(
+            gateway.expression_transition_frames,
+            gateway.EXPRESSION_TRANSITION_SPEECH_FRAMES - 1,
+        )
+        output = first
+        for _ in range(gateway.EXPRESSION_TRANSITION_SPEECH_FRAMES - 1):
+            output = gateway._crossfade_expression_frame(
+                new_frame, "xiaoya_locket_expr_smirk"
+            )
         self.assertEqual(output, new_frame)
         self.assertEqual(gateway.expression_transition_frames, 0)
+        self.assertIsNone(gateway.expression_transition_from_frame)
 
 
 if __name__ == "__main__":
