@@ -3061,6 +3061,54 @@ body {
   background: color-mix(in srgb, var(--bg-elev-2) 55%, transparent);
 }
 
+.avatar-transport-setting {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg-elev-2) 55%, transparent);
+}
+
+.avatar-transport-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.avatar-transport-options button {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(8, 10, 16, 0.42);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.avatar-transport-options button:hover {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+}
+
+.avatar-transport-options button.active,
+.avatar-transport-options button[aria-checked="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, rgba(8, 10, 16, 0.56));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.avatar-transport-options strong { font-size: 13px; }
+.avatar-transport-options small { color: var(--text-dim); line-height: 1.35; }
+.avatar-transport-status { color: var(--accent); }
+
+@media (max-width: 430px) {
+  .avatar-transport-options { grid-template-columns: 1fr; }
+}
+
 .avatar-slider {
   display: flex;
   flex-direction: column;
@@ -3789,8 +3837,15 @@ body[data-room-status="calling"] .room-my-status {
 }
 
 .room-live-line.agent-status.partial .room-live-quote::after {
-  content: " · 查询进行中";
+  content: " · 回复生成中";
   color: rgba(171, 160, 255, .7);
+}
+
+.room-live-line.agent-status[data-agent-phase="planning"] .room-live-quote::after,
+.room-live-line.agent-status[data-agent-phase="researching"] .room-live-quote::after,
+.room-live-line.agent-status[data-agent-phase="verifying"] .room-live-quote::after,
+.room-live-line.agent-status[data-agent-phase="repairing"] .room-live-quote::after {
+  content: " · 查询进行中";
 }
 
 .room-live-line.agent-status[data-agent-phase="repairing"] .room-live-content {

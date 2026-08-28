@@ -134,6 +134,20 @@ class RoomStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.store.admin_session(first))
         self.assertIsNotNone(await self.store.admin_session(second))
 
+    async def test_room_setting_is_global_persistent_and_versioned(self):
+        missing = await self.store.room_setting("avatar_transport", "webrtc")
+        self.assertEqual(missing["value"], "webrtc")
+        self.assertEqual(missing["revision"], 0)
+        first = await self.store.set_room_setting("avatar_transport", "http-flv")
+        second = await self.store.set_room_setting("avatar_transport", "webrtc")
+        self.assertEqual(first["revision"], 1)
+        self.assertEqual(second["revision"], 2)
+        restored = RoomStore(self.store.path)
+        await restored.initialize()
+        current = await restored.room_setting("avatar_transport", "http-flv")
+        self.assertEqual(current["value"], "webrtc")
+        self.assertEqual(current["revision"], 2)
+
     async def test_agent_jobs_are_persistent_recoverable_and_keep_context(self):
         base = {
             "id": "aj-one", "message_id": "chat-one", "participant_id": "user-a",

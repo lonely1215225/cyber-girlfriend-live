@@ -219,6 +219,12 @@ class RoomStore:
                     ip_address TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS room_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    updated_at REAL NOT NULL
+                );
                 """
             )
             agent_columns = {row["name"] for row in db.execute("PRAGMA table_info(agent_jobs)")}
@@ -262,6 +268,53 @@ class RoomStore:
             db.execute("PRAGMA user_version=1")
         os.chmod(self.path, 0o600)
         self._initialized = True
+
+    async def room_setting(self, key: str, default: Any = None) -> dict[str, Any]:
+        return await asyncio.to_thread(self._room_setting_sync, key, default)
+
+    def _room_setting_sync(self, key: str, default: Any) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT value_json,revision,updated_at FROM room_settings WHERE setting_key=?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return {"key": key, "value": default, "revision": 0, "updated_at": 0.0}
+        try:
+            value = json.loads(row["value_json"])
+        except (TypeError, json.JSONDecodeError):
+            value = default
+        return {
+            "key": key,
+            "value": value,
+            "revision": int(row["revision"] or 0),
+            "updated_at": float(row["updated_at"] or 0.0),
+        }
+
+    async def set_room_setting(self, key: str, value: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self._set_room_setting_sync, key, value)
+
+    def _set_room_setting_sync(self, key: str, value: Any) -> dict[str, Any]:
+        now = time.time()
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO room_settings(setting_key,value_json,revision,updated_at) "
+                "VALUES(?,?,1,?) ON CONFLICT(setting_key) DO UPDATE SET "
+                "value_json=excluded.value_json,revision=room_settings.revision+1,"
+                "updated_at=excluded.updated_at",
+                (key, encoded, now),
+            )
+            row = db.execute(
+                "SELECT revision,updated_at FROM room_settings WHERE setting_key=?",
+                (key,),
+            ).fetchone()
+        return {
+            "key": key,
+            "value": value,
+            "revision": int(row["revision"]),
+            "updated_at": float(row["updated_at"]),
+        }
 
     @staticmethod
     def _token_hash(token: str) -> str:

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>小麻直播间</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%2378d99a'/><circle cx='11' cy='14' r='2' fill='%230b0d12'/><circle cx='21' cy='14' r='2' fill='%230b0d12'/><path d='M10 21c4 3 8 3 12 0' fill='none' stroke='%230b0d12' stroke-width='2' stroke-linecap='round'/></svg>" />
-    <link rel="stylesheet" href="style.css?v=20260824d" />
+    <link rel="stylesheet" href="style.css?v=20260827f" />
   </head>
   <!--
     `booting` disables transitions/animations until the first paint commits.
@@ -277,6 +277,20 @@
               <small>拖动时即时预览，停止调整后自动保存并同步给所有观众。</small>
             </div>
 
+            <div class="field avatar-transport-setting">
+              <span>数字人播放模式</span>
+              <div class="avatar-transport-options" role="radiogroup" aria-label="数字人播放模式">
+                <button type="button" role="radio" aria-checked="false" data-avatar-transport="webrtc">
+                  <strong>WebRTC</strong><small>低延迟，适合实时连线</small>
+                </button>
+                <button type="button" role="radio" aria-checked="false" data-avatar-transport="http-flv">
+                  <strong>HTTP-FLV</strong><small>缓冲更深，优先保证流畅完整</small>
+                </button>
+              </div>
+              <small id="avatar-transport-status" class="avatar-transport-status" aria-live="polite">正在读取当前播放模式…</small>
+              <small>这是直播间全局设置；管理员修改后会立即同步所有在线观众，并对新访客保持生效。</small>
+            </div>
+
             <label class="field" id="conn-field">
               <span id="conn-label">Speech-to-speech server URL</span>
               <input id="lb-url" type="text" autocomplete="off" spellcheck="false" placeholder="http://localhost:port" />
@@ -521,7 +535,7 @@
     </dialog>
 
     <script src="/vendor/mpegts.min.js"></script>
-    <script src="/avatar-sync.js?v=20260827f"></script>
+    <script src="/avatar-sync.js?v=20260828a"></script>
     <script type="module" src="room.js?v=20260825d"></script>
     <script type="module" src="main.js?v=20260827a"></script>
   </body>

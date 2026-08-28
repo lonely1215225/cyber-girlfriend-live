@@ -19,6 +19,7 @@
 
   const CFG = Object.assign({}, DEFAULTS, window.AVATAR_CONFIG || {});
   const MUSIC_STORAGE_KEY = 'avtr1.backgroundMusic.v1';
+  const LEGACY_TRANSPORT_STORAGE_KEY = 'avtr1.transport.v1';
   const VIEW_DEFAULTS = {
     size: 100,
     position: Math.round(-parseFloat(CFG.rightOffset || '-4')),
@@ -38,8 +39,86 @@
   let avatarView = loadAvatarView();
   let profilePreviewLocked = false;
   let musicEnabled = localStorage.getItem(MUSIC_STORAGE_KEY) !== '0';
+  let transportPreference = '';
+  let activeTransport = '';
   window.AVATAR_MUTE_TTS = true;
   const gw = () => CFG.gatewayBase.replace(/\/+$/, '');
+
+  function requestedTransport(config = streamConfig) {
+    if (transportPreference) return transportPreference;
+    return config?.transport === 'webrtc' ? 'webrtc' : 'http-flv';
+  }
+
+  function renderTransportControls(detail = '') {
+    const requested = requestedTransport();
+    document.querySelectorAll('[data-avatar-transport]').forEach((button) => {
+      const selected = button.dataset.avatarTransport === requested;
+      button.setAttribute('aria-checked', selected ? 'true' : 'false');
+      button.classList.toggle('active', selected);
+    });
+    const status = document.getElementById('avatar-transport-status');
+    if (!status) return;
+    if (detail) {
+      status.textContent = detail;
+    } else if (activeTransport) {
+      status.textContent = activeTransport === 'webrtc'
+        ? '当前正在使用 WebRTC'
+        : '当前正在使用 HTTP-FLV';
+    } else {
+      status.textContent = requested === 'webrtc'
+        ? '将优先使用 WebRTC，协商失败时临时回退 HTTP-FLV。'
+        : '固定使用 HTTP-FLV，不会自动切换到 WebRTC。';
+    }
+  }
+
+  function applyGlobalTransport(value, revision, reconnect = true) {
+    if (value !== 'webrtc' && value !== 'http-flv') return false;
+    const changed = transportPreference !== value;
+    transportPreference = value;
+    streamConfig = {
+      ...(streamConfig || {}),
+      transport: value,
+      transport_revision: Number(revision || streamConfig?.transport_revision || 0),
+    };
+    try { localStorage.removeItem(LEGACY_TRANSPORT_STORAGE_KEY); } catch (_) { /* ignore */ }
+    if (!changed) {
+      renderTransportControls();
+      return false;
+    }
+    activeTransport = '';
+    webrtcRetryAfter = 0;
+    webrtcFallbackReason = '';
+    renderTransportControls(changed ? '正在切换全局播放模式…' : '');
+    if (changed && reconnect) reconnectLive();
+    return changed;
+  }
+
+  async function setTransportPreference(value) {
+    if (value !== 'webrtc' && value !== 'http-flv') return;
+    renderTransportControls('正在保存全局播放模式…');
+    try {
+      const response = await fetch('/api/admin/avatar-transport', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ transport: value }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.detail || '播放模式保存失败');
+      applyGlobalTransport(data.transport, data.transport_revision, true);
+    } catch (error) {
+      renderTransportControls(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function bindTransportControls() {
+    document.querySelectorAll('[data-avatar-transport]').forEach((button) => {
+      button.addEventListener('click', () => {
+        void setTransportPreference(button.dataset.avatarTransport || '');
+      });
+    });
+    renderTransportControls();
+  }
 
   const maskGradient = `linear-gradient(90deg, rgba(0,0,0,0) 0%,
     rgba(0,0,0,.30) var(--av-fade-soft),
@@ -109,6 +188,7 @@
   let webrtcRetryAfter = 0;
   let audioUnlocked = false;
   let connecting = false;
+  let reconnectRequested = false;
   let retryHandle = null;
   let webrtcUpgradeHandle = null;
   let watchdogHandle = null;
@@ -284,7 +364,12 @@
   }
 
   function scheduleWebRTCUpgrade() {
-    if (webrtcUpgradeHandle || !flvPlayer || document.hidden) return;
+    if (
+      requestedTransport() !== 'webrtc'
+      || webrtcUpgradeHandle
+      || !flvPlayer
+      || document.hidden
+    ) return;
     const delay = Math.max(5000, webrtcRetryAfter - Date.now());
     webrtcUpgradeHandle = setTimeout(async () => {
       webrtcUpgradeHandle = null;
@@ -334,12 +419,33 @@
     }, 1500);
   }
 
-  async function avatarStreamConfig() {
-    if (streamConfig) return streamConfig;
+  async function avatarStreamConfig(force = false) {
+    if (streamConfig && !force) return streamConfig;
     const response = await fetch('/api/avatar-config', { cache: 'no-store' });
     if (!response.ok) throw new Error(`直播配置不可用 (${response.status})`);
     streamConfig = await response.json();
+    transportPreference = streamConfig.transport === 'webrtc' ? 'webrtc' : 'http-flv';
+    try { localStorage.removeItem(LEGACY_TRANSPORT_STORAGE_KEY); } catch (_) { /* ignore */ }
     return streamConfig;
+  }
+
+  async function refreshGlobalTransport() {
+    const previousTransport = transportPreference;
+    const previousRevision = streamConfig?.transport_revision;
+    try {
+      const config = await avatarStreamConfig(true);
+      const changed = previousRevision !== undefined && (
+        previousTransport !== config.transport
+        || Number(previousRevision) !== Number(config.transport_revision)
+      );
+      renderTransportControls();
+      if (changed && previousTransport !== config.transport) {
+        activeTransport = '';
+        webrtcRetryAfter = 0;
+        webrtcFallbackReason = '';
+        reconnectLive();
+      }
+    } catch (_) { /* retain the last server-owned value */ }
   }
 
   function waitForIceGathering(pc, timeoutMs = 2500) {
@@ -520,8 +626,10 @@
     destroyPlayer();
     try {
       const config = await avatarStreamConfig();
+      const requested = requestedTransport(config);
+      renderTransportControls();
       let label = '';
-      if (config.transport === 'webrtc' && Date.now() >= webrtcRetryAfter) {
+      if (requested === 'webrtc' && Date.now() >= webrtcRetryAfter) {
         try {
           label = await connectWebRTC(config);
         } catch (err) {
@@ -532,6 +640,7 @@
         }
       }
       if (!label) label = await connectFLV();
+      activeTransport = label.includes('WebRTC') ? 'webrtc' : 'http-flv';
       lastMediaTime = -1;
       lastProgressAt = Date.now();
       layer.classList.add('live');
@@ -544,7 +653,12 @@
         statusEl.title = '';
         statusEl.removeAttribute('aria-label');
       }
-      if (label.includes('FLV') && config.transport === 'webrtc') scheduleWebRTCUpgrade();
+      if (label.includes('FLV') && requested === 'webrtc') {
+        renderTransportControls(`WebRTC 暂不可用，当前临时使用 HTTP-FLV：${webrtcFallbackReason}`);
+        scheduleWebRTCUpgrade();
+      } else {
+        renderTransportControls();
+      }
       startWatchdog();
     } catch (err) {
       destroyPlayer();
@@ -554,6 +668,10 @@
       scheduleReconnect(3000);
     } finally {
       connecting = false;
+      if (reconnectRequested) {
+        reconnectRequested = false;
+        reconnectLive();
+      }
     }
   }
 
@@ -615,6 +733,13 @@
       if (!profilePreviewLocked) void refreshActiveProfile(false);
     },
     reconnect: reconnectLive,
+  };
+
+  window.AVATAR_STREAM_UI = {
+    current() {
+      return { requested: requestedTransport(), active: activeTransport };
+    },
+    setTransport: setTransportPreference,
   };
 
   async function switchAvatar(avatarId) {
@@ -718,6 +843,7 @@
     }
     setStatus('idle');
     bindMusicToggle();
+    bindTransportControls();
     document.addEventListener('pointerdown', () => {
       audioUnlocked = true;
       syncAudioRoute();
@@ -752,7 +878,15 @@
       clearTimeout(retryHandle);
       retryHandle = null;
     }
-    connecting = false;
+    if (connecting) {
+      // Serialize mode/profile/music changes with the current negotiation.
+      // Starting a second WHEP/MSE player before the first promise settles can
+      // let its late completion overwrite the newly selected transport.
+      reconnectRequested = true;
+      destroyPlayer();
+      layer?.classList.remove('live');
+      return;
+    }
     destroyPlayer();
     layer?.classList.remove('live');
     syncAudioRoute();
@@ -775,10 +909,21 @@
     if (window.EventSource) {
       const events = new EventSource('/api/avatar-profile/events');
       events.addEventListener('profile', () => void refreshActiveProfile(true));
+      events.addEventListener('transport', (event) => {
+        try {
+          const data = JSON.parse(event.data || '{}');
+          applyGlobalTransport(data.transport, data.revision, true);
+        } catch (_) { /* periodic refresh remains the fallback */ }
+      });
     }
-    setInterval(() => void refreshActiveProfile(true), 2000);
+    setInterval(() => {
+      void refreshActiveProfile(true);
+      void refreshGlobalTransport();
+    }, 2000);
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && flvPlayer) scheduleWebRTCUpgrade();
+      if (!document.hidden && flvPlayer && requestedTransport() === 'webrtc') {
+        scheduleWebRTCUpgrade();
+      }
     });
     void connect();
   }
