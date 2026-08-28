@@ -38,6 +38,9 @@ class FakeRoom:
     async def can_bot_reply(self):
         return True
 
+    async def publish_agent_job(self, job, **_kwargs):
+        return job
+
 
 class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_mention_publishes_queue_status_while_call_is_busy(self):
@@ -92,7 +95,8 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         worker.enqueue({"id": "m1", "participant_id": "p2", "speaker": "Nova", "text": "@小麻 在吗"})
         self.assertEqual(
             [(item.welcome, item.proactive) for item in worker.pending],
-            [(False, False), (True, False), (False, True)],
+            # A direct question makes an unplayed idle broadcast stale.
+            [(False, False), (True, False)],
         )
 
     async def test_live_call_discards_only_that_callers_stale_welcome(self):
@@ -115,6 +119,26 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         worker._active_request = worker.pending.popleft()
         self.assertEqual(worker.enqueue(message), 0)
         self.assertEqual(len(worker.pending), 0)
+
+    async def test_new_message_drops_stale_welcome_proactive_and_same_viewer_question(self):
+        worker = MentionReplyWorker(FakeRoom(), mock.Mock(), "ws://unused")
+        worker.enqueue_welcome(participant_id="p1", speaker="林清欢")
+        worker.enqueue_proactive("讲一条新闻")
+        worker.enqueue({"id": "old", "participant_id": "p1", "speaker": "林清欢", "text": "@小麻 在吗"})
+        worker.enqueue({"id": "new", "participant_id": "p1", "speaker": "林清欢", "text": "@小麻 你是谁"})
+        self.assertEqual([item.message_id for item in worker.pending], ["new"])
+
+    async def test_new_message_cancels_unspoken_active_request(self):
+        worker = MentionReplyWorker(FakeRoom(), mock.Mock(), "ws://unused")
+        old = parse_mention({
+            "id": "old", "participant_id": "p1", "speaker": "林清欢", "text": "@小麻 在吗",
+        })
+        worker._active_request = old
+        worker._response_task = asyncio.create_task(asyncio.sleep(30))
+        worker.enqueue({"id": "new", "participant_id": "p1", "speaker": "林清欢", "text": "@小麻 你是谁"})
+        await asyncio.sleep(0)
+        self.assertTrue(old.superseded)
+        self.assertTrue(worker._response_task.cancelled())
 
     async def test_delivered_reply_is_terminal_instead_of_requeued_after_call_preemption(self):
         class RecordingRoom(FakeRoom):

@@ -38,6 +38,17 @@ _REASONING_BLOCK_RE = re.compile(
 )
 _REASONING_OPEN_RE = re.compile(r"<(?:think|analysis|reasoning)\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
 _REASONING_CLOSE_RE = re.compile(r"</(?:think|analysis|reasoning)\s*>", re.IGNORECASE)
+_PRIVATE_PROTOCOL_BLOCK_RE = re.compile(
+    r"<(tool_call|toolcall|function_call|functioncall)\b[^>]*>.*?</\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_PRIVATE_PROTOCOL_OPEN_RE = re.compile(
+    r"<(?:tool_call|toolcall|function_call|functioncall)\b[^>]*>.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_PRIVATE_PROTOCOL_CLOSE_RE = re.compile(
+    r"</(?:tool_call|toolcall|function_call|functioncall)\s*>", re.IGNORECASE
+)
 _DELIVERY_PROFILES = (
     "neutral", "happy", "surprised", "serious", "pout", "one_brow",
     "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",
@@ -62,6 +73,10 @@ CHAT_WINDOW_MESSAGES = 5
 def _clean_public_text(value: str, *, assistant: bool = False) -> str:
     """Remove provider reasoning markup before it reaches the public room."""
     text = str(value or "")
+    if assistant:
+        text = _PRIVATE_PROTOCOL_BLOCK_RE.sub("", text)
+        text = _PRIVATE_PROTOCOL_OPEN_RE.sub("", text)
+        text = _PRIVATE_PROTOCOL_CLOSE_RE.sub("", text)
     text = _REASONING_BLOCK_RE.sub("", text)
     text = _REASONING_OPEN_RE.sub("", text)
     text = _REASONING_CLOSE_RE.sub("", text)

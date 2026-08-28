@@ -47,6 +47,7 @@ class MentionRequest:
     delivery_started: bool = False
     final_delivered: bool = False
     delivered_text: str = ""
+    superseded: bool = False
 
 
 def looks_like_deferred_answer(text: str) -> bool:
@@ -108,6 +109,39 @@ class MentionReplyWorker:
         for index, pending in enumerate(self.pending):
             if pending.message_id == request.message_id:
                 return index + 1
+        # A direct viewer message makes their unplayed welcome stale.  It also
+        # supersedes older unplayed questions from the same viewer and any idle
+        # broadcast waiting in front of it.  Otherwise a busy room appears to
+        # answer one new comment three or four times in succession.
+        kept: deque[MentionRequest] = deque()
+        stale: list[MentionRequest] = []
+        for pending in self.pending:
+            should_drop = pending.proactive or (
+                pending.participant_id == request.participant_id
+                and (pending.welcome or not pending.delivery_started)
+            )
+            if should_drop:
+                pending.superseded = True
+                stale.append(pending)
+            else:
+                kept.append(pending)
+        self.pending = kept
+        for old in stale:
+            self._schedule_superseded(old)
+
+        active = self._active_request
+        if active is not None and (
+            active.proactive
+            or (
+                active.participant_id == request.participant_id
+                and not active.delivery_started
+            )
+        ):
+            active.superseded = True
+            task = self._response_task
+            if task is not None and not task.done():
+                task.cancel()
+                self._schedule_avatar_interrupt()
         if len(self.pending) >= self.max_queue:
             self.pending.popleft()
         insert_at = next(
@@ -117,6 +151,24 @@ class MentionReplyWorker:
         self.pending.insert(insert_at, request)
         self._wake.set()
         return insert_at + 1
+
+    def _schedule_superseded(self, request: MentionRequest) -> None:
+        if request.proactive or request.welcome:
+            return
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(self._finalize_superseded(request))
+
+    def _schedule_avatar_interrupt(self) -> None:
+        if not self.avatar_url:
+            return
+
+        async def stop_playback() -> None:
+            with contextlib.suppress(httpx.HTTPError):
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    await client.post(f"{self.avatar_url}/interrupt")
+
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(stop_playback())
 
     async def publish_queued(self, message: dict[str, Any], position: int) -> None:
         """Expose queue acknowledgement immediately instead of waiting silently."""
@@ -230,10 +282,12 @@ class MentionReplyWorker:
             try:
                 await self._response_task
             except asyncio.CancelledError:
+                if request.superseded:
+                    await self._finalize_superseded(request)
                 # A live caller preempted this reply. Retry only work which has
                 # not emitted anything; replaying an already visible/audible
                 # response after the call would duplicate it from the start.
-                if request.delivery_started:
+                elif request.delivery_started:
                     await self._finalize_interrupted_delivery(request)
                 elif not request.welcome:
                     self.pending.appendleft(request)
@@ -340,6 +394,18 @@ class MentionReplyWorker:
             "terminal": False, "event_only": True,
         }, reply_to=self._reply_quote(request))
 
+    async def _finalize_superseded(self, request: MentionRequest) -> None:
+        """Close stale work without publishing another chat reply."""
+        if request.proactive or request.welcome:
+            return
+        await self.room.publish_agent_job({
+            "id": self._agent_job_id(request), "message_id": request.message_id,
+            "participant_id": request.participant_id, "speaker": request.speaker,
+            "prompt": request.prompt, "phase": "cancelled",
+            "status_text": "已由你的新消息替代", "terminal": True,
+            "error": "superseded_by_new_message", "event_only": True,
+        }, reply_to=self._reply_quote(request))
+
     async def _finalize_interrupted_delivery(self, request: MentionRequest) -> None:
         """Never replay a room reply which the audience has already heard or seen."""
         if request.proactive or request.welcome:
@@ -372,7 +438,7 @@ class MentionReplyWorker:
         job = None if request.proactive or request.welcome else {
             "id": self._agent_job_id(request), "message_id": request.message_id,
             "participant_id": request.participant_id, "speaker": request.speaker,
-            "prompt": request.prompt, "phase": "planning", "status_text": "正在理解你的问题",
+            "prompt": request.prompt, "phase": "responding", "status_text": "正在回复",
             "terminal": False, "created_at": time.time(), "event_only": True,
         }
         if job is not None:
@@ -488,6 +554,7 @@ class MentionReplyWorker:
                         )
                         user_text += f"\n\n{active_topic}"
                 pending_calls: list[dict[str, str]] = []
+                unauthorized_tool_calls = 0
                 tool_rounds = 0
                 discovery_rounds = 0
                 answer_retries = 0
@@ -554,13 +621,26 @@ class MentionReplyWorker:
                         transcript = completed_transcript
                         await publish_spoken(partial=False)
                     elif event_type == "response.function_call_arguments.done":
-                        pending_calls.append(
-                            {
-                                "name": str(event.get("name") or ""),
-                                "arguments": str(event.get("arguments") or "{}"),
-                                "call_id": str(event.get("call_id") or ""),
-                            }
-                        )
+                        call_name = str(event.get("name") or "")
+                        authorized = (
+                            call_name == self.mcp_gateway.DISCOVERY_TOOL_NAME
+                            and bool(public_tools)
+                        ) or call_name in active_external_tools
+                        if authorized:
+                            pending_calls.append(
+                                {
+                                    "name": call_name,
+                                    "arguments": str(event.get("arguments") or "{}"),
+                                    "call_id": str(event.get("call_id") or ""),
+                                }
+                            )
+                        else:
+                            unauthorized_tool_calls += 1
+                            logger.warning(
+                                "blocked undeclared model tool call name=%r request=%s",
+                                call_name,
+                                request.message_id,
+                            )
                     elif event_type == "response.done":
                         response = event.get("response") if isinstance(event.get("response"), dict) else {}
                         usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
@@ -569,6 +649,8 @@ class MentionReplyWorker:
                                 usage_totals[key] += max(0, int(usage.get(key) or 0))
                             except (TypeError, ValueError):
                                 pass
+                        if unauthorized_tool_calls:
+                            raise RuntimeError("模型尝试调用本轮未授权的工具")
                         cancelled = response.get("status") in {"cancelled", "failed", "incomplete"}
                         if transcript.strip() and (not round_finalized or cancelled):
                             await publish_spoken(partial=False, interrupted=cancelled)
@@ -710,6 +792,8 @@ class MentionReplyWorker:
 
                             async def execute_call(call: dict[str, str]) -> tuple[dict[str, str], str]:
                                 try:
+                                    if call["name"] not in active_external_tools:
+                                        raise PermissionError("工具未在本轮服务端许可清单中")
                                     arguments = json.loads(call["arguments"])
                                     output = await self.mcp_gateway.call(call["name"], arguments)
                                 except Exception as exc:  # noqa: BLE001

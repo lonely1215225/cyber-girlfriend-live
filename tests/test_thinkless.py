@@ -15,11 +15,14 @@ from ollama_thinkless import (  # noqa: E402
     _is_fast_external_planning,
     _needs_reliable_external_route,
     _is_room_welcome_request,
+    _is_proactive_broadcast_request,
     _num_predict_for_messages,
     clean_model_output,
     completed_response,
     local_compaction,
+    relay_sanitized_grok_stream,
     request_messages,
+    sanitize_response_payload,
     to_messages,
     to_ollama_tools,
 )
@@ -48,6 +51,14 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         ]))
         self.assertTrue(_needs_reliable_external_route([
             {"role": "user", "content": "为什么比特币最近涨这么多"},
+        ]))
+
+    def test_only_server_owned_proactive_marker_disables_conversation_lead(self):
+        self.assertTrue(_is_proactive_broadcast_request([
+            {"role": "system", "content": "现在是无人连线时的直播间主动播报，不要回复某位观众。"},
+        ]))
+        self.assertFalse(_is_proactive_broadcast_request([
+            {"role": "user", "content": "你主动说点什么呀"},
         ]))
 
     def test_only_the_initial_discovery_turn_uses_fast_local_model(self):
@@ -143,6 +154,65 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         visible = "".join(cleaner.feed(chunk) for chunk in chunks)
         visible += cleaner.feed("", final=True)
         self.assertEqual(visible, "我先上香吧")
+
+    def test_tool_protocol_blocks_are_never_public_text(self):
+        leaked = (
+            "我先看一眼。<tool_call>web_fetch?url=https://example.com"
+            "</tool_call>这是最终结论。"
+        )
+        self.assertEqual(clean_model_output(leaked), "我先看一眼。这是最终结论。")
+
+    def test_tool_protocol_split_across_stream_chunks_is_hidden(self):
+        cleaner = ModelOutputSanitizer()
+        chunks = ["开头。<tool_", "call>web_fetch?", "url=x</tool_", "call>结论。"]
+        visible = "".join(cleaner.feed(chunk) for chunk in chunks)
+        visible += cleaner.feed("", final=True)
+        self.assertEqual(visible, "开头。结论。")
+
+    def test_sanitizes_every_text_view_in_completed_response(self):
+        payload = completed_response(
+            "grok", "<toolcall>secret</toolcall>安全答案", 1, 2
+        )
+        sanitize_response_payload(payload)
+        self.assertEqual(payload["output_text"], "安全答案")
+        self.assertEqual(payload["output"][0]["content"][0]["text"], "安全答案")
+
+    def test_grok_sse_relay_filters_protocol_but_keeps_structured_calls(self):
+        events = (
+            'event: response.output_text.delta\n'
+            'data: {"type":"response.output_text.delta","delta":"开头。<tool_"}\n\n'
+            'event: response.output_text.delta\n'
+            'data: {"type":"response.output_text.delta","delta":"call>secret</tool_call>结论。"}\n\n'
+            'event: response.content_part.done\n'
+            'data: {"type":"response.content_part.done","part":{"type":"output_text","text":"<tool_call>secret</tool_call>结论。"}}\n\n'
+            'event: response.function_call_arguments.done\n'
+            'data: {"type":"response.function_call_arguments.done","name":"search","arguments":"{}"}\n\n'
+            'data: [DONE]\n\n'
+        ).encode().splitlines(keepends=True)
+        output: list[bytes] = []
+        relay_sanitized_grok_stream(events, output.append)
+        rendered = b"".join(output).decode()
+        self.assertNotIn("secret", rendered)
+        self.assertNotIn("tool_call", rendered)
+        self.assertIn("开头。", rendered)
+        self.assertIn("结论。", rendered)
+        self.assertIn('"name": "search"', rendered)
+
+    def test_grok_sse_relay_can_prepend_a_complete_local_lead(self):
+        events = (
+            'event: response.created\n'
+            'data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}\n\n'
+            'event: response.output_text.delta\n'
+            'data: {"type":"response.output_text.delta","output_index":0,"delta":"正式回答。"}\n\n'
+            'event: response.completed\n'
+            'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"output_text":"正式回答。"}}\n\n'
+        ).encode().splitlines(keepends=True)
+        output: list[bytes] = []
+        relay_sanitized_grok_stream(events, output.append, prefix_text="嗯，我听着呢。")
+        rendered = b"".join(output).decode()
+        self.assertLess(rendered.index("嗯，我听着呢。"), rendered.index("正式回答。"))
+        self.assertIn('"output_index": 1', rendered)
+        self.assertIn("嗯，我听着呢。正式回答。", rendered)
 
     def test_preserves_normal_angle_bracket_text(self):
         self.assertEqual(clean_model_output("价格 < 10，答案正常"), "价格 < 10，答案正常")

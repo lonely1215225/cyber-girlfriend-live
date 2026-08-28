@@ -207,6 +207,16 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(reply["text"], "欢迎你呀。")
 
+        protocol_reply = await self.room.publish_bot_reply(
+            message_id="tool-protocol-reply",
+            text=(
+                "我先看一眼。<tool_call>web_fetch?url=https://example.com"
+                "</tool_call>这是最终结论。"
+            ),
+            reply_to=None,
+        )
+        self.assertEqual(protocol_reply["text"], "我先看一眼。这是最终结论。")
+
     async def test_viewers_can_chat_and_are_rate_limited(self):
         message = await self.room.publish_chat(self.alice.token, "  大家 好  ")
         self.assertEqual(message["text"], "大家 好")

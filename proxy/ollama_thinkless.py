@@ -11,11 +11,13 @@ import os
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from memory_compaction import local_compaction as _local_compaction
+from output_harness import PublicOutputFilter, clean_public_output
 
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 HOST = os.environ.get("THINKLESS_HOST", "127.0.0.1")
@@ -33,6 +35,7 @@ COMPACTION_MAX_CHARS = max(300, int(os.environ.get("LLM_COMPACTION_MAX_CHARS", "
 GROK_ENABLED = os.environ.get("GROK_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 GROK_BASE_URL = os.environ.get("GROK_PROXY_BASE_URL", "http://127.0.0.1:18080/v1").rstrip("/")
 GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4.6").strip() or "grok-4.6"
+GROK_FAST_MODEL = os.environ.get("GROK_FAST_MODEL", "grok-4.5").strip() or "grok-4.5"
 GROK_API_KEY = os.environ.get("GROK_PROXY_API_KEY", "").strip()
 GROK_REASONING_EFFORT = os.environ.get("GROK_REASONING_EFFORT", "low").strip().lower() or "low"
 GROK_TIMEOUT_SECONDS = max(2.0, float(os.environ.get("GROK_TIMEOUT_SECONDS", "45")))
@@ -40,7 +43,18 @@ LOCAL_READ_TIMEOUT_SECONDS = max(
     4.0, float(os.environ.get("LLM_LOCAL_READ_TIMEOUT_SECONDS", "12.0"))
 )
 LOCAL_TIMEOUT_REPLY = "嗯？刚才没接稳，你再说一遍嘛。"
-_REASONING_TAGS = {"think", "analysis", "reasoning"}
+LOCAL_LEAD_ENABLED = os.environ.get("LOCAL_LEAD_ENABLED", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+LOCAL_LEAD_MODEL = os.environ.get(
+    "LOCAL_LEAD_MODEL", "jaahas/qwen3.5-uncensored:9b"
+).strip()
+LOCAL_LEAD_TIMEOUT_SECONDS = max(
+    0.25, float(os.environ.get("LOCAL_LEAD_TIMEOUT_SECONDS", "1.4"))
+)
+LOCAL_LEAD_MAX_CHARS = max(8, int(os.environ.get("LOCAL_LEAD_MAX_CHARS", "24")))
+LEAD_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="local-lead")
+GROK_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grok-upstream")
 _EXTERNAL_INTENT_RE = re.compile(
     r"(?:查(?:一下|下|查)?|搜索|搜一下|联网|核实|验证|最新|实时|新闻|热搜|行情|报价|汇率|"
     r"现在.{0,12}(?:价格|多少钱|报价|行情|天气|汇率)|"
@@ -52,60 +66,11 @@ _EXTERNAL_INTENT_RE = re.compile(
 )
 
 
-class ModelOutputSanitizer:
-    """Incrementally remove provider reasoning blocks without delaying speech.
-
-    Model tokens and XML-like tags can be split across arbitrary NDJSON chunks,
-    so a regex on each individual chunk is not sufficient.
-    """
-
-    def __init__(self) -> None:
-        self.buffer = ""
-        self.suppressed_depth = 0
-
-    def feed(self, piece: str, *, final: bool = False) -> str:
-        self.buffer += piece or ""
-        output: list[str] = []
-        while self.buffer:
-            opening = self.buffer.find("<")
-            if opening < 0:
-                if not self.suppressed_depth:
-                    output.append(self.buffer)
-                self.buffer = ""
-                break
-            if opening > 0:
-                if not self.suppressed_depth:
-                    output.append(self.buffer[:opening])
-                self.buffer = self.buffer[opening:]
-            closing = self.buffer.find(">")
-            if closing < 0:
-                if final:
-                    candidate = self.buffer[1:].strip().lower().lstrip("/")
-                    looks_like_reasoning = any(tag.startswith(candidate) for tag in _REASONING_TAGS)
-                    if not self.suppressed_depth and not looks_like_reasoning:
-                        output.append(self.buffer)
-                    self.buffer = ""
-                break
-            raw_tag = self.buffer[: closing + 1]
-            tag_body = self.buffer[1:closing].strip()
-            is_closing = tag_body.startswith("/")
-            tag_name = re.split(r"\s+", tag_body.lstrip("/").rstrip("/"), maxsplit=1)[0].lower()
-            if tag_name in _REASONING_TAGS:
-                if is_closing:
-                    self.suppressed_depth = max(0, self.suppressed_depth - 1)
-                elif not tag_body.endswith("/"):
-                    self.suppressed_depth += 1
-            elif not self.suppressed_depth:
-                # Preserve unknown angle-bracket text; only provider reasoning
-                # markup is hidden.
-                output.append(raw_tag)
-            self.buffer = self.buffer[closing + 1 :]
-        return "".join(output)
+ModelOutputSanitizer = PublicOutputFilter
 
 
 def clean_model_output(text: str) -> str:
-    cleaner = ModelOutputSanitizer()
-    return cleaner.feed(text, final=True).strip()
+    return clean_public_output(text)
 
 
 def _keep_alive_value() -> int | str:
@@ -224,9 +189,17 @@ def _is_exact_speech_request(messages: list[dict]) -> bool:
 
 
 def _is_room_welcome_request(messages: list[dict]) -> bool:
-    """Arrival greetings are short creative work suited to the resident LLM."""
+    """Recognize the server-owned arrival greeting workflow."""
     return any(
         "直播间入场欢迎生成器" in str(message.get("content", ""))
+        for message in messages
+    )
+
+
+def _is_proactive_broadcast_request(messages: list[dict]) -> bool:
+    """Recognize server-owned unattended broadcasts, never user semantics."""
+    return any(
+        "无人连线时的直播间主动播报" in str(message.get("content", ""))
         for message in messages
     )
 
@@ -359,7 +332,9 @@ def ollama_chat(
     return urlopen(req, timeout=LOCAL_READ_TIMEOUT_SECONDS)
 
 
-def grok_response(payload: dict):
+def grok_response(
+    payload: dict, *, model: str | None = None, reasoning_effort: str | None = None
+):
     """Forward one Responses API request to the private Grok OAuth proxy.
 
     The public application continues to address this shim with its logical
@@ -367,8 +342,10 @@ def grok_response(payload: dict):
     same request can safely fall back to the local Ollama model.
     """
     forwarded = dict(payload)
-    forwarded["model"] = GROK_MODEL
-    forwarded.setdefault("reasoning", {"effort": GROK_REASONING_EFFORT})
+    forwarded["model"] = model or GROK_MODEL
+    forwarded["reasoning"] = {
+        "effort": reasoning_effort or GROK_REASONING_EFFORT
+    }
     headers = {"Content-Type": "application/json", "Accept": "text/event-stream" if forwarded.get("stream") else "application/json"}
     if GROK_API_KEY:
         headers["Authorization"] = f"Bearer {GROK_API_KEY}"
@@ -379,6 +356,62 @@ def grok_response(payload: dict):
         method="POST",
     )
     return urlopen(request, timeout=GROK_TIMEOUT_SECONDS)
+
+
+def local_conversation_lead(messages: list[dict]) -> str:
+    """Generate one fact-free spoken bridge while Grok works in parallel.
+
+    This model never owns the answer. A deterministic safety gate rejects
+    numbers, URLs and protocol-like output so a fast lead cannot race an
+    evidence-backed result with a made-up fact.
+    """
+    current = next(
+        (
+            str(item.get("content") or "")
+            for item in reversed(messages)
+            if item.get("role") == "user"
+        ),
+        "",
+    ).split("\n\n【", 1)[0].strip()
+    if not current:
+        return ""
+    lead_messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是小麻，只生成实时对话开头的一句自然接话。"
+                "根据对方刚说的话接住语气或情绪，甜甜的、灵动、有点坏但不刻薄。"
+                "这句只负责承接，不回答事实，不给价格、日期、新闻结论，不承诺查询，"
+                "不复述问题，不说正在思考，不添加对方没提过的具体物品、经历或动作。"
+                "不能讽刺、嫌弃、贬低或指导投资。对事实问题只表达认真对待。"
+                "只输出一句八到二十四个汉字的完整中文口语。"
+            ),
+        },
+        {"role": "user", "content": current[:500]},
+    ]
+    with ollama_chat(
+        LOCAL_LEAD_MODEL,
+        lead_messages,
+        False,
+        [],
+        num_predict_override=40,
+    ) as response:
+        data = json.loads(response.read())
+    text = clean_model_output(str((data.get("message") or {}).get("content") or ""))
+    text = re.sub(r"\s+", "", text).strip()
+    match = re.search(r"[。！？!?～~]", text)
+    if match:
+        text = text[: match.end()]
+    if len(text) > LOCAL_LEAD_MAX_CHARS:
+        text = text[:LOCAL_LEAD_MAX_CHARS].rstrip("，、；：") + "。"
+    elif text and text[-1] not in "。！？!?～~":
+        text += "。"
+    if (
+        len(re.findall(r"[\u3400-\u9fff]", text)) < 6
+        or re.search(r"\d|https?://|<[^>]+>|(?:tool|function)_call|[¥￥$€]", text, re.I)
+    ):
+        return ""
+    return text
 
 
 def response_output_text(payload: dict) -> str:
@@ -394,6 +427,239 @@ def response_output_text(payload: dict) -> str:
             if isinstance(content, dict) and content.get("type") == "output_text":
                 parts.append(str(content.get("text") or ""))
     return clean_model_output("".join(parts))
+
+
+def sanitize_response_payload(payload: dict, *, visible_text: str | None = None) -> dict:
+    """Apply the public boundary to every textual view of a Responses result."""
+    if not isinstance(payload, dict):
+        return payload
+    override = clean_model_output(visible_text) if visible_text is not None else None
+    if isinstance(payload.get("output_text"), str):
+        payload["output_text"] = override if override is not None else clean_model_output(payload["output_text"])
+    if isinstance(payload.get("output"), list):
+        payload["output"] = [
+            item for item in payload["output"]
+            if not isinstance(item, dict) or item.get("type") != "reasoning"
+        ]
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content") or []:
+            if isinstance(content, dict) and content.get("type") == "output_text":
+                content["text"] = (
+                    override
+                    if override is not None
+                    else clean_model_output(str(content.get("text") or ""))
+                )
+    return payload
+
+
+def _sanitize_stream_event(
+    payload: dict,
+    cleaner: PublicOutputFilter,
+    visible: list[str],
+) -> tuple[dict | None, str]:
+    """Sanitize one Grok SSE event while retaining structured function calls."""
+    event_type = str(payload.get("type") or "")
+    tail = ""
+    if event_type == "response.output_text.delta":
+        delta = cleaner.feed(str(payload.get("delta") or ""))
+        if not delta:
+            return None, ""
+        visible.append(delta)
+        payload["delta"] = delta
+    elif event_type in {"response.output_text.done", "response.completed", "response.done"}:
+        tail = cleaner.feed("", final=True)
+        if tail:
+            visible.append(tail)
+        text = "".join(visible)
+        if event_type == "response.output_text.done":
+            payload["text"] = text
+        response = payload.get("response")
+        if isinstance(response, dict):
+            sanitize_response_payload(response, visible_text=text)
+    elif event_type == "response.output_item.done":
+        item = payload.get("item")
+        if isinstance(item, dict) and item.get("type") == "message":
+            sanitize_response_payload({"output": [item]}, visible_text="".join(visible))
+    elif event_type in {"response.content_part.added", "response.content_part.done"}:
+        part = payload.get("part")
+        if isinstance(part, dict) and part.get("type") == "output_text":
+            part["text"] = "".join(visible)
+    elif "reasoning" in event_type:
+        # Reasoning summaries are provider diagnostics, not public response
+        # content. The client does not need them to execute structured tools.
+        return None, ""
+    return payload, tail
+
+
+def relay_sanitized_grok_stream(
+    upstream, writer, *, prefix_text: str = "", eager_prefix: bool = False
+) -> None:
+    """Relay provider SSE without ever forwarding private protocol text."""
+    cleaner = PublicOutputFilter()
+    visible: list[str] = []
+    block: list[str] = []
+    prefix_item_id = "msg_lead_" + uuid.uuid4().hex[:16]
+    prefix_injected = False
+    synthetic_response_id = "resp_hybrid_" + uuid.uuid4().hex[:16]
+
+    def write_event(event_type: str, payload: dict) -> None:
+        writer(
+            (
+                f"event: {event_type}\n"
+                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            ).encode()
+        )
+
+    def inject_prefix() -> None:
+        nonlocal prefix_injected
+        if prefix_injected or not prefix_text:
+            return
+        prefix_injected = True
+        item = {
+            "id": prefix_item_id,
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [],
+        }
+        write_event(
+            "response.output_item.added",
+            {"type": "response.output_item.added", "output_index": 0, "item": item},
+        )
+        write_event(
+            "response.content_part.added",
+            {
+                "type": "response.content_part.added",
+                "item_id": prefix_item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": []},
+            },
+        )
+        write_event(
+            "response.output_text.delta",
+            {
+                "type": "response.output_text.delta",
+                "item_id": prefix_item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "delta": prefix_text,
+            },
+        )
+        write_event(
+            "response.output_text.done",
+            {
+                "type": "response.output_text.done",
+                "item_id": prefix_item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "text": prefix_text,
+            },
+        )
+        completed_item = {
+            **item,
+            "status": "completed",
+            "content": [{"type": "output_text", "text": prefix_text, "annotations": []}],
+        }
+        write_event(
+            "response.content_part.done",
+            {
+                "type": "response.content_part.done",
+                "item_id": prefix_item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "part": completed_item["content"][0],
+            },
+        )
+        write_event(
+            "response.output_item.done",
+            {"type": "response.output_item.done", "output_index": 0, "item": completed_item},
+        )
+
+    if eager_prefix and prefix_text:
+        write_event(
+            "response.created",
+            {
+                "type": "response.created",
+                "response": {"id": synthetic_response_id, "status": "in_progress"},
+            },
+        )
+        inject_prefix()
+
+    def emit(lines: list[str]) -> None:
+        if not lines:
+            return
+        data_lines = [line[5:].lstrip() for line in lines if line.startswith("data:")]
+        if not data_lines or data_lines == ["[DONE]"]:
+            writer(("\n".join(lines) + "\n\n").encode())
+            return
+        try:
+            payload = json.loads("\n".join(data_lines))
+        except json.JSONDecodeError:
+            # Unknown provider framing is withheld rather than risking public
+            # protocol leakage. Structured Responses events are JSON.
+            return
+        sanitized, tail = _sanitize_stream_event(payload, cleaner, visible)
+        if tail:
+            synthetic = {
+                "type": "response.output_text.delta",
+                "delta": tail,
+                "content_index": 0,
+                "output_index": 0,
+            }
+            writer(
+                (
+                    "event: response.output_text.delta\n"
+                    f"data: {json.dumps(synthetic, ensure_ascii=False)}\n\n"
+                ).encode()
+            )
+        if sanitized is None:
+            return
+        event_type = str(sanitized.get("type") or "")
+        if prefix_text and event_type == "response.created" and eager_prefix:
+            return
+        if prefix_text and event_type == "response.created":
+            event_lines = [line for line in lines if not line.startswith("data:")]
+            event_lines.append(f"data: {json.dumps(sanitized, ensure_ascii=False)}")
+            writer(("\n".join(event_lines) + "\n\n").encode())
+            inject_prefix()
+            return
+        if prefix_text and "output_index" in sanitized:
+            try:
+                sanitized["output_index"] = int(sanitized["output_index"]) + 1
+            except (TypeError, ValueError):
+                pass
+        if prefix_text and event_type == "response.output_text.done":
+            sanitized["text"] = prefix_text + str(sanitized.get("text") or "")
+        response = sanitized.get("response")
+        if prefix_text and isinstance(response, dict) and event_type in {
+            "response.completed", "response.done"
+        }:
+            if eager_prefix:
+                response["id"] = synthetic_response_id
+            prefix_item = {
+                "id": prefix_item_id,
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": prefix_text, "annotations": []}],
+            }
+            response["output"] = [prefix_item, *(response.get("output") or [])]
+            response["output_text"] = prefix_text + "".join(visible)
+        event_lines = [line for line in lines if not line.startswith("data:")]
+        event_lines.append(f"data: {json.dumps(sanitized, ensure_ascii=False)}")
+        writer(("\n".join(event_lines) + "\n\n").encode())
+
+    for raw in upstream:
+        line = raw.decode("utf-8", "ignore").rstrip("\r\n")
+        if line:
+            block.append(line)
+        else:
+            emit(block)
+            block = []
+    emit(block)
 
 
 def _function_call_item(call: dict) -> dict:
@@ -500,7 +766,23 @@ class Handler(BaseHTTPRequestHandler):
         fast_conversation = _is_fast_conversation_followup(req)
         fast_external_planning = _is_fast_external_planning(req)
         fast_welcome = _is_room_welcome_request(messages)
+        proactive_broadcast = _is_proactive_broadcast_request(messages)
         explicit_external_request = fast_discovery and _needs_reliable_external_route(messages)
+        has_tool_evidence = any(
+            isinstance(item, dict) and item.get("type") == "function_call_output"
+            for item in req.get("input") or []
+        )
+        # One request must have exactly one prose generator.  The previous
+        # hybrid path exposed a local answer and then appended a second Grok
+        # answer, which sounded like repeated replies and delayed newer room
+        # comments.  The resident model now owns bounded low-latency turns;
+        # Grok owns evidence-backed synthesis after real tool output.
+        local_primary = (
+            fast_discovery
+            or fast_conversation
+            or fast_external_planning
+            or fast_welcome
+        )
         if explicit_external_request:
             current = next(
                 (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
@@ -542,23 +824,124 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(out, ensure_ascii=False).encode(), "application/json")
             return
 
-        # Grok is the high-quality primary provider.  Connection, DNS, OAuth,
-        # quota, and 5xx failures fall back before any response headers are
-        # emitted, preserving the existing local low-latency path.
+        # Grok owns every generative/semantic task. Local Ollama remains only
+        # a provider-outage fallback plus deterministic compaction/exact TTS.
+        # Tool permission and public-output safety are enforced below in code,
+        # independently of either model's instruction following.
         if (
             GROK_ENABLED
             and not _is_exact_speech_request(messages)
-            and not fast_discovery
-            and not fast_conversation
-            and not fast_external_planning
-            and not fast_welcome
+            and not local_primary
         ):
             try:
-                upstream = grok_response(req)
+                # Structural workflow routing, not keyword answer logic:
+                # ordinary conversation and capability selection need low TTFT,
+                # while evidence-backed synthesis keeps the strongest model.
+                # No local 9B prose is exposed on either path.
+                use_fast_grok = (
+                    fast_discovery
+                    or fast_conversation
+                    or fast_welcome
+                    or (not tools and not has_tool_evidence)
+                )
+                route_model = GROK_FAST_MODEL if use_fast_grok else GROK_MODEL
+                route_effort = "none" if use_fast_grok else GROK_REASONING_EFFORT
+                # Hybrid prose is deliberately disabled.  Running two models
+                # is useful for background work, but only one of them may own
+                # the user-visible answer for a turn.
+                use_local_lead = False
+                lead_started = time.monotonic()
+                lead_future = (
+                    LEAD_POOL.submit(local_conversation_lead, messages)
+                    if use_local_lead
+                    else None
+                )
+                grok_request = req
+                if use_local_lead:
+                    grok_request = dict(req)
+                    grok_request["instructions"] = (
+                        str(req.get("instructions") or "")
+                        + "\n同一轮会先播放一句本地生成的简短接话，它已经负责接住情绪、"
+                        "态度和第一层直接回应。请从补充信息、解释或推进话题开始，"
+                        "不要再次问候、安慰、复述问题或重复第一层结论。"
+                    ).strip()
+                print(
+                    f"[thinkless] route provider=grok model={route_model} "
+                    f"effort={route_effort} stream={want_stream} "
+                    f"discovery={fast_discovery} planning={fast_external_planning} "
+                    f"welcome={fast_welcome}",
+                    flush=True,
+                )
+                grok_future = (
+                    GROK_POOL.submit(
+                        grok_response,
+                        grok_request,
+                        model=route_model,
+                        reasoning_effort=route_effort,
+                    )
+                    if use_local_lead
+                    else None
+                )
+                # Hybrid streaming must expose HTTP immediately; waiting for
+                # Grok's response headers here previously hid a ready 1-second
+                # local lead behind a 5-13 second provider handshake.
+                if use_local_lead:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                lead_text = ""
+                if lead_future is not None:
+                    remaining = max(
+                        0.0,
+                        LOCAL_LEAD_TIMEOUT_SECONDS - (time.monotonic() - lead_started),
+                    )
+                    try:
+                        lead_text = lead_future.result(timeout=remaining)
+                    except FutureTimeout:
+                        lead_future.cancel()
+                        print("[thinkless] local lead missed deadline; Grok continues", flush=True)
+                    except Exception as exc:
+                        print(
+                            f"[thinkless] local lead skipped: {type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
+                if grok_future is not None:
+                    try:
+                        upstream = grok_future.result(timeout=GROK_TIMEOUT_SECONDS)
+                    except Exception as exc:
+                        print(
+                            f"[thinkless] Grok hybrid stream failed: {type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
+                        return
+                    with upstream:
+                        try:
+                            relay_sanitized_grok_stream(
+                                upstream,
+                                lambda chunk: (
+                                    self.wfile.write(chunk), self.wfile.flush()
+                                ),
+                                prefix_text=lead_text,
+                                eager_prefix=bool(lead_text),
+                            )
+                        except (OSError, ValueError, json.JSONDecodeError) as exc:
+                            print(
+                                f"[thinkless] Grok hybrid stream ended early: "
+                                f"{type(exc).__name__}: {exc}",
+                                flush=True,
+                            )
+                    return
+                upstream = grok_response(
+                    grok_request, model=route_model, reasoning_effort=route_effort
+                )
                 if not want_stream:
                     with upstream:
                         data = json.loads(upstream.read())
                     data["output_text"] = response_output_text(data)
+                    sanitize_response_payload(data)
                     has_tool_call = any(
                         isinstance(item, dict) and item.get("type") == "function_call"
                         for item in data.get("output") or []
@@ -575,17 +958,26 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 with upstream:
-                    while True:
-                        chunk = upstream.read(65536)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        self.wfile.flush()
+                    try:
+                        relay_sanitized_grok_stream(
+                            upstream,
+                            lambda chunk: (self.wfile.write(chunk), self.wfile.flush()),
+                            prefix_text=lead_text,
+                        )
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        # Headers may already be visible to the realtime client;
+                        # never splice a second provider into the same SSE body.
+                        print(
+                            f"[thinkless] Grok stream ended early: {type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
                 return
             except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
                 print(f"[thinkless] Grok unavailable, using local fallback: {type(exc).__name__}: {exc}", flush=True)
 
         if not want_stream:
+            reason = "fast_primary" if local_primary else "fallback_or_exact"
+            print(f"[thinkless] route provider=ollama reason={reason}", flush=True)
             started = time.monotonic()
             try:
                 with ollama_chat(model, messages, False, tools) as r:
