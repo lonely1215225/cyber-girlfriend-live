@@ -127,4 +127,14 @@ if [[ -n "$LLM_NAME" && "$LLM_NAME" =~ ^[A-Za-z0-9._:/-]+$ ]] \
   fi
 fi
 
+LOCAL_LEAD_MODEL="${LOCAL_LEAD_MODEL:-}"
+if [[ -n "$LOCAL_LEAD_MODEL" && "$LOCAL_LEAD_MODEL" != "$LLM_NAME" \
+      && "$LOCAL_LEAD_MODEL" =~ ^[A-Za-z0-9._:/-]+$ ]] \
+      && curl -fsS --max-time 2 "$OLLAMA_URL/api/tags" >/dev/null 2>&1; then
+  say "unload Ollama model $LOCAL_LEAD_MODEL"
+  unload_payload="$(printf '{"model":"%s","keep_alive":0}' "$LOCAL_LEAD_MODEL")"
+  curl -fsS --max-time 20 -H 'Content-Type: application/json' \
+    -d "$unload_payload" "$OLLAMA_URL/api/generate" >/dev/null || true
+fi
+
 say "Cyber Girlfriend stopped"
