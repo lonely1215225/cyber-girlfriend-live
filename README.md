@@ -86,7 +86,7 @@ flowchart LR
 - **公网入口：** Nginx、HTTPS、自签名证书
 - **语音识别：** FunASR `SenseVoiceSmall` + Silero VAD（中/英/粤/日/韩）
 - **大语言模型：** 可选 Grok 4.6 主模型 + Ollama `jaahas/qwen3.5-uncensored:9b` 自动降级
-- **语音合成：** Qwen3-TTS 1.7B，支持参考音频音色克隆
+- **语音合成：** Qwen3-TTS 1.7B，支持参考音频音色克隆。IndexTTS-2.5 低延迟克隆实验已失败并移除：官方只有按句整段合成，没有可用的 token 级流式，首包延迟达不到陪伴对话要求。
 - **数字人渲染与分发：** AVTR-1、TensorRT、H.264/Opus、MediaMTX WebRTC/WHEP、HTTP-FLV 回退
 - **工具调用：** Streamable HTTP MCP（CoinGecko、Exa、GDELT）
 - **运行环境：** Ubuntu、Python 3.12、CUDA 12.8、Pixi、uv
