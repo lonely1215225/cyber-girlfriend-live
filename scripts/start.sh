@@ -15,7 +15,7 @@ FRONTEND="$ROOT/s2s/hf-realtime-voice"
 # Allow relative paths in config.env
 [[ "${TTS_MODEL:-}" = /* ]] || TTS_MODEL="$ROOT/${TTS_MODEL:-models/qwen3tts/Qwen3-TTS-12Hz-1.7B-Base}"
 [[ "${REF_AUDIO:-}" = /* ]] || REF_AUDIO="$ROOT/${REF_AUDIO:-assets/ref16k.wav}"
-export REF_AUDIO REF_TEXT
+export TTS_MODEL REF_AUDIO REF_TEXT
 SENSEVOICE_MODEL="${SENSEVOICE_MODEL:-models/sensevoice/SenseVoiceSmall}"
 if [[ "$SENSEVOICE_MODEL" == models/* ]]; then
   SENSEVOICE_MODEL="$ROOT/$SENSEVOICE_MODEL"
@@ -65,6 +65,7 @@ wait_port() {
 }
 
 [[ -x "$S2S_VENV/bin/speech-to-speech" ]] || die "speech-to-speech is not installed；先运行 ./install.sh"
+[[ -s "$TTS_MODEL/config.json" ]] || die "Qwen3-TTS weight is missing at $TTS_MODEL；先运行 ./install.sh"
 [[ -d "$FRONTEND" ]] || die "frontend is missing"
 [[ -f "$REF_AUDIO" ]] || die "missing ref audio $REF_AUDIO"
 mkdir -p "$FRONTEND/avatar"
