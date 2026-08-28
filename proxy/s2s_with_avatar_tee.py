@@ -55,9 +55,16 @@ uvicorn.Config.__init__ = _quiet_uvicorn_config
 TEE_URL = os.environ.get("AVTR1_LOCAL_TEE_URL", "").rstrip("/")
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
-PREROLL_MS = max(420, int(os.environ.get("AVATAR_TEE_PREROLL_MS", "800")))
+# Uploading to the local gateway and starting public playback are deliberately
+# separate watermarks. The gateway owns the safe playback reservoir; holding
+# the first PCM here as well made the safety buffer run twice before AVTR could
+# even start rendering.
+PREROLL_MS = max(240, int(os.environ.get("AVATAR_TEE_UPLOAD_PREROLL_MS", "320")))
 PREROLL_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * PREROLL_MS / 1000)
 PACE_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * 0.1)
+SEGMENT_GAP_SECONDS = max(
+    0.9, float(os.environ.get("AVATAR_TEE_SEGMENT_GAP_MS", "1200")) / 1000.0
+)
 
 
 class LocalAvatarTee:
@@ -80,6 +87,7 @@ class LocalAvatarTee:
         self.expression_claimed = False
         self.consecutive_post_failures = 0
         self.active_connection_id: int | None = None
+        self.segment_gap_task: asyncio.Task | None = None
 
     def _client(self) -> httpx.AsyncClient:
         if self.client is None:
@@ -104,12 +112,38 @@ class LocalAvatarTee:
         self.audio_bytes += len(pcm)
         self.chunk_count += 1
         self.pending.extend(pcm)
+        if self.segment_gap_task is not None:
+            self.segment_gap_task.cancel()
+        generation = self.generation
+        marker = self.last_feed_at
+        self.segment_gap_task = asyncio.create_task(
+            self._finish_segment_after_gap(generation, marker)
+        )
         if (
             not self.complete_flush
             and self.pump_task is None
             and len(self.pending) >= PREROLL_BYTES
         ):
             self._start_pump()
+
+    async def _finish_segment_after_gap(
+        self, generation: int, marker: float | None
+    ) -> None:
+        """Close a spoken segment while a slow cloud continuation is pending."""
+        try:
+            await asyncio.sleep(SEGMENT_GAP_SECONDS)
+            if (
+                generation == self.generation
+                and marker is not None
+                and self.last_feed_at == marker
+                and not self.done
+            ):
+                self.finish()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self.segment_gap_task is asyncio.current_task():
+                self.segment_gap_task = None
 
     async def sync_expression(self) -> None:
         """Bind the model's complete facial timeline to the PCM playback clock."""
@@ -159,6 +193,10 @@ class LocalAvatarTee:
         self._reset_metrics()
         task = self.pump_task
         self.pump_task = None
+        gap_task = self.segment_gap_task
+        self.segment_gap_task = None
+        if gap_task is not None:
+            gap_task.cancel()
         if task is not None:
             task.cancel()
         try:

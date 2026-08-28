@@ -23,6 +23,7 @@ from expression_director import (
     begin_delivery_generation,
     publish_expression,
 )
+from output_harness import PublicOutputFilter
 
 # Reuse the handler logger, which the service explicitly keeps at INFO. The
 # module's former top-level logger stayed at WARNING, hiding the exact text and
@@ -47,6 +48,7 @@ _SPEECHABLE_WITH_CJK_PUNCTUATION = re.compile(
 )
 
 _delivery_filter_local = threading.local()
+_public_filter_local = threading.local()
 
 
 def remove_unspeechable_preserving_cjk(text: str) -> str:
@@ -57,6 +59,11 @@ def remove_unspeechable_preserving_cjk(text: str) -> str:
         delivery_filter = DeliveryControlFilter()
         _delivery_filter_local.value = delivery_filter
     visible_text = delivery_filter.feed(text)
+    public_filter = getattr(_public_filter_local, "value", None)
+    if public_filter is None:
+        public_filter = PublicOutputFilter()
+        _public_filter_local.value = public_filter
+    visible_text = public_filter.feed(visible_text)
     return _SPEECHABLE_WITH_CJK_PUNCTUATION.sub("", visible_text)
 
 
@@ -78,20 +85,38 @@ def split_streaming_sentences(text: str) -> list[str]:
         # audible without splitting every comma in the paragraph.
         boundaries: list[int] = []
         clause_start = 0
+        first_boundary_emitted = False
         for index, char in enumerate(text):
             if char in "。！？!?；：":
                 boundaries.append(index + 1)
                 clause_start = index + 1
+                first_boundary_emitted = True
             elif char == "…" and (index + 1 == len(text) or text[index + 1] != "…"):
                 # A completed ellipsis is a punctuation boundary regardless of
                 # the words around it; no semantic phrase list is involved.
                 boundaries.append(index + 1)
                 clause_start = index + 1
+                first_boundary_emitted = True
             elif char == "，":
                 prefix = text[clause_start:index].strip()
-                if 1 <= len(prefix) <= 8 and re.fullmatch(r"[\u3400-\u9fff]+", prefix):
+                short_address = (
+                    1 <= len(prefix) <= 8
+                    and re.fullmatch(r"[\u3400-\u9fff]+", prefix)
+                )
+                # The first model-authored comma is a safe low-latency boundary
+                # once the clause is substantial enough. This does not infer
+                # intent or add punctuation; it only stops waiting for a far
+                # away full stop while keeping the original comma in TTS.
+                first_natural_clause = (
+                    not first_boundary_emitted
+                    and 9 <= len(prefix) <= 24
+                    and bool(re.search(r"[\u3400-\u9fff]", prefix))
+                    and not bool(re.search(r"\d", prefix))
+                )
+                if short_address or first_natural_clause:
                     boundaries.append(index + 1)
                     clause_start = index + 1
+                    first_boundary_emitted = True
         if not boundaries:
             return [text]
         output: list[str] = []
@@ -322,6 +347,7 @@ def install_emotion_aware_tts() -> None:
             # model delta, unlike the later outbound response.created event.
             begin_delivery_generation()
             _delivery_filter_local.value = DeliveryControlFilter()
+            _public_filter_local.value = PublicOutputFilter()
             yield from original_generate(self, *args, **kwargs)
 
         handler_class._generate = generate_with_delivery_control

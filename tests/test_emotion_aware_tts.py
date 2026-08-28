@@ -57,6 +57,12 @@ class EmotionAwareTTSTests(unittest.TestCase):
         )
         self.assertEqual(prepare_tts_text("喂，", "cheerful"), "喂，")
 
+    def test_first_model_comma_can_start_tts_before_distant_full_stop(self) -> None:
+        self.assertEqual(
+            split_streaming_sentences("这条消息最重要的变化是，后面还有更多证据"),
+            ["这条消息最重要的变化是，", "后面还有更多证据"],
+        )
+
     def test_fallback_style_does_not_guess_semantics_from_words(self) -> None:
         self.assertEqual(choose_tts_style("任意复杂语境", SenseVoiceMetadata(emotion="难过")), "neutral")
         self.assertEqual(choose_tts_style("你今天在做什么？"), "neutral")
@@ -141,6 +147,12 @@ class EmotionAwareTTSTests(unittest.TestCase):
         cue = publish_expression(visible)
         self.assertEqual(cue.profile, "wink")
         self.assertEqual(cue.style, "cheerful")
+
+    def test_textual_tool_call_never_reaches_tts(self) -> None:
+        visible = remove_unspeechable_preserving_cjk(
+            "<tool_call>web_fetch?url=https://example.com</tool_call>"
+        )
+        self.assertEqual(visible, "")
 
     def test_multiple_bare_controls_are_removed_from_any_text_position(self) -> None:
         control = DeliveryControlFilter()
