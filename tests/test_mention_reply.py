@@ -11,6 +11,7 @@ FRONTEND_DIR = Path(__file__).resolve().parents[1] / "s2s" / "hf-realtime-voice"
 sys.path.insert(0, str(FRONTEND_DIR))
 
 from mention_reply import (  # noqa: E402
+    DuplicateReplyDetected,
     MentionReplyWorker,
     looks_like_deferred_answer,
     parse_mention,
@@ -43,6 +44,55 @@ class FakeRoom:
 
 
 class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_current_comment_follows_memory_and_duplicate_reply_is_blocked(self):
+        old_reply = "哟，三丰叔又来啦？嘴这么勤快，是不是又来找我补糖呀？"
+
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+            async def participant_memory_context(self, *_args, **kwargs):
+                self.exclude_message_id = kwargs.get("exclude_message_id")
+                return f"用户：@小麻 你干啥呢\n数字人：{old_reply}"
+            async def active_news_context(self, *_args): return ""
+            async def latest_assistant_reply(self, *_args, **_kwargs): return old_reply
+
+        class NoTools:
+            enabled = False
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    json.dumps({"type":"response.audio_transcript.done","transcript":old_reply}, ensure_ascii=False),
+                ])
+                self.sent = []
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def recv(self): return next(self.events)
+            async def send(self, message): self.sent.append(json.loads(message))
+
+        room, socket = RecordingRoom(), FakeWebSocket()
+        worker = MentionReplyWorker(room, NoTools(), "ws://unused")
+        request = parse_mention({
+            "id": "current", "participant_id": "p1", "speaker": "张三丰",
+            "text": "@小麻 谁是你叔，我是你哥啊！",
+        })
+        with mock.patch("mention_reply.websockets.connect", return_value=socket):
+            with self.assertRaises(DuplicateReplyDetected):
+                await worker._respond(request)
+
+        user_item = next(
+            item for item in socket.sent if item.get("type") == "conversation.item.create"
+        )
+        session = next(item["session"] for item in socket.sent if item.get("type") == "session.update")
+        prompt = user_item["item"]["content"][0]["text"]
+        self.assertIn("这是公开评论", session["instructions"])
+        self.assertNotIn("这是直播间入场欢迎", session["instructions"])
+        self.assertEqual(room.exclude_message_id, "current")
+        self.assertLess(prompt.index("【历史记忆，仅供理解】"), prompt.index("【当前评论"))
+        self.assertTrue(prompt.rstrip().endswith("谁是你叔，我是你哥啊！"))
+        self.assertEqual(room.items, [])
+
     async def test_mention_publishes_queue_status_while_call_is_busy(self):
         class BusyRoom:
             def __init__(self): self.jobs = []
@@ -200,7 +250,8 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         session = next(item["session"] for item in socket.sent if item.get("type") == "session.update")
         user_item = next(item for item in socket.sent if item.get("type") == "conversation.item.create")
         self.assertIn("甜美灵动", session["instructions"])
-        self.assertIn("直播间入场欢迎生成器", session["instructions"])
+        self.assertIn("这是直播间入场欢迎", session["instructions"])
+        self.assertNotIn("这是公开评论", session["instructions"])
         self.assertIn("林清欢", user_item["item"]["content"][0]["text"])
         self.assertEqual(room.items[-1]["text"], "林清欢，你一来，今晚的月亮都像偷偷调亮了一格呀。")
         self.assertIsNone(room.items[-1]["reply_to"])
@@ -218,7 +269,7 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self): self.items = []
             async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
             async def publish_agent_job(self, job, **_kwargs): self.items.append(dict(job)); return job
-            async def participant_memory_context(self, *_args): return ""
+            async def participant_memory_context(self, *_args, **_kwargs): return ""
             async def active_news_context(self, *_args): return ""
 
         class ToolGateway:
@@ -270,7 +321,9 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         request = parse_mention({"id": "tools", "participant_id": "p1", "speaker": "观众", "text": "@小麻 查证一下"})
         worker._speak_exact = mock.AsyncMock()
         started = time.monotonic()
-        with mock.patch("mention_reply.websockets.connect", return_value=socket):
+        with mock.patch("mention_reply.DIALOGUE_TOOLS_ENABLED", True), mock.patch(
+            "mention_reply.websockets.connect", return_value=socket
+        ):
             await worker._respond(request)
         elapsed = time.monotonic() - started
         self.assertLess(elapsed, 0.09)
@@ -290,7 +343,7 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self): self.jobs = []
             async def publish_bot_reply(self, **item): return item
             async def publish_agent_job(self, job, **_kwargs): self.jobs.append(dict(job)); return job
-            async def participant_memory_context(self, *_args): return ""
+            async def participant_memory_context(self, *_args, **_kwargs): return ""
             async def active_news_context(self, *_args): return ""
 
         class ToolGateway:
@@ -336,7 +389,9 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
             "id": "car", "participant_id": "p1", "speaker": "观众",
             "text": "@小麻 小米最新的汽车是什么，多少钱",
         })
-        with mock.patch("mention_reply.websockets.connect", return_value=socket):
+        with mock.patch("mention_reply.DIALOGUE_TOOLS_ENABLED", True), mock.patch(
+            "mention_reply.websockets.connect", return_value=socket
+        ):
             await worker._respond(request)
 
         completed = [job for job in room.jobs if job.get("terminal")]
