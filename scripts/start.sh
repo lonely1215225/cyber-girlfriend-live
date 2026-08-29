@@ -64,11 +64,51 @@ wait_port() {
   die "$label did not listen on :$port"
 }
 
+port_listening() {
+  ss -ltn "sport = :$1" 2>/dev/null | grep -q LISTEN
+}
+
+webrtc_publishers_ready() {
+  local paths_json="${1:-}"
+  if [[ -z "$paths_json" ]]; then
+    paths_json="$(curl -fsS --max-time 2 \
+      "http://127.0.0.1:${MEDIAMTX_API_PORT}/v3/paths/list" 2>/dev/null || true)"
+  fi
+  grep -Eq '"name":"avatar_music"[^}]*"ready":true' <<<"$paths_json" \
+    && grep -Eq '"name":"avatar_voice"[^}]*"ready":true' <<<"$paths_json"
+}
+
+stop_bg() {
+  local name="$1" pidfile="$2"
+  local pid
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  rm -f "$pidfile"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  say "stop $name ($pid)"
+  local pgid
+  pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$pgid" == "$pid" ]]; then
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+  else
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+  local i
+  for i in $(seq 1 40); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.25
+  done
+  if [[ "$pgid" == "$pid" ]]; then
+    kill -KILL -- "-$pgid" 2>/dev/null || true
+  else
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+}
+
 [[ -x "$S2S_VENV/bin/speech-to-speech" ]] || die "speech-to-speech is not installed；先运行 ./install.sh"
 [[ -s "$TTS_MODEL/config.json" ]] || die "Qwen3-TTS weight is missing at $TTS_MODEL；先运行 ./install.sh"
 [[ -d "$FRONTEND" ]] || die "frontend is missing"
 [[ -f "$REF_AUDIO" ]] || die "missing ref audio $REF_AUDIO"
-mkdir -p "$FRONTEND/avatar"
 mkdir -p "$ROOT/proxy/certs"
 if [[ ! -f "$ROOT/proxy/certs/server.crt" ]]; then
   if [[ "${PUBLIC_IP}" =~ ^[0-9a-fA-F:.]+$ ]]; then
@@ -182,12 +222,14 @@ export ROOM_DB_PATH
 export ROOM_IP_RETENTION_DAYS="${ROOM_IP_RETENTION_DAYS:-30}"
 export MENTION_REPLY_QUEUE_LIMIT="${MENTION_REPLY_QUEUE_LIMIT:-30}"
 export BACKGROUND_MUSIC_ENABLED="${BACKGROUND_MUSIC_ENABLED:-1}"
-BACKGROUND_MUSIC_DIR="${BACKGROUND_MUSIC_DIR:-.}"
+BACKGROUND_MUSIC_DIR="${BACKGROUND_MUSIC_DIR:-assets/music}"
 [[ "$BACKGROUND_MUSIC_DIR" = /* ]] || BACKGROUND_MUSIC_DIR="$ROOT/$BACKGROUND_MUSIC_DIR"
 export BACKGROUND_MUSIC_DIR
 export BACKGROUND_MUSIC_VOLUME="${BACKGROUND_MUSIC_VOLUME:-0.16}"
 export BACKGROUND_MUSIC_DUCK_VOLUME="${BACKGROUND_MUSIC_DUCK_VOLUME:-0.04}"
 export BACKGROUND_MUSIC_USER_RMS="${BACKGROUND_MUSIC_USER_RMS:-450}"
+export DIALOGUE_TOOLS_ENABLED="${DIALOGUE_TOOLS_ENABLED:-0}"
+export LLM_LOCAL_CONVERSATION_NUM_PREDICT="${LLM_LOCAL_CONVERSATION_NUM_PREDICT:-96}"
 export MCP_ENABLED="${MCP_ENABLED:-1}"
 export MCP_COINGECKO_URL="${MCP_COINGECKO_URL:-https://mcp.api.coingecko.com/mcp}"
 export MCP_EXA_URL="${MCP_EXA_URL:-https://mcp.exa.ai/mcp}"
@@ -445,6 +487,10 @@ if [[ "$WEBRTC_ENABLED" != "0" ]]; then
   [[ "$WEBRTC_PUBLIC_HOST" =~ ^[A-Za-z0-9._:-]+$ ]] \
     || die "WEBRTC_PUBLIC_HOST contains unsupported characters"
   MEDIAMTX_CONF="$RUN/mediamtx.yml"
+  # Truncating the live config in place makes MediaMTX hot-reload an empty or
+  # half-written file and fall back to its default ports. Write aside, then
+  # replace the file in one rename.
+  MEDIAMTX_CONF_TMP="$MEDIAMTX_CONF.tmp.$$"
   sed -e "s|__MEDIAMTX_WHEP_PORT__|$MEDIAMTX_WHEP_PORT|g" \
       -e "s|__MEDIAMTX_RTSP_PORT__|$MEDIAMTX_RTSP_PORT|g" \
       -e "s|__MEDIAMTX_API_PORT__|$MEDIAMTX_API_PORT|g" \
@@ -452,9 +498,27 @@ if [[ "$WEBRTC_ENABLED" != "0" ]]; then
       -e "s|__WEBRTC_UDP_PORT__|$WEBRTC_UDP_PORT|g" \
       -e "s|__WEBRTC_TCP_PORT__|$WEBRTC_TCP_PORT|g" \
       -e "s|__WEBRTC_PUBLIC_HOST__|$WEBRTC_PUBLIC_HOST|g" \
-    "$ROOT/proxy/mediamtx.yml.tpl" > "$MEDIAMTX_CONF"
-  start_bg mediamtx "$RUN/mediamtx.pid" "$LOG/mediamtx.log" \
-    "$MEDIAMTX_BIN" "$MEDIAMTX_CONF"
+    "$ROOT/proxy/mediamtx.yml.tpl" > "$MEDIAMTX_CONF_TMP"
+  if grep -qE '__[A-Z0-9_]+__' "$MEDIAMTX_CONF_TMP"; then
+    rm -f "$MEDIAMTX_CONF_TMP"
+    die "MediaMTX template substitution left unresolved placeholders"
+  fi
+  mv -f "$MEDIAMTX_CONF_TMP" "$MEDIAMTX_CONF"
+  if port_listening "$MEDIAMTX_WHEP_PORT" \
+      && port_listening "$MEDIAMTX_RTSP_PORT" \
+      && port_listening "$MEDIAMTX_API_PORT"; then
+    if ! alive "$RUN/mediamtx.pid"; then
+      existing_pid="$(pgrep -n -f "^${MEDIAMTX_BIN} ${MEDIAMTX_CONF}$" || true)"
+      if [[ "$existing_pid" =~ ^[0-9]+$ ]]; then
+        echo "$existing_pid" >"$RUN/mediamtx.pid"
+      fi
+    fi
+    say "mediamtx already running on :$MEDIAMTX_WHEP_PORT and :$MEDIAMTX_RTSP_PORT"
+  else
+    stop_bg mediamtx "$RUN/mediamtx.pid"
+    start_bg mediamtx "$RUN/mediamtx.pid" "$LOG/mediamtx.log" \
+      "$MEDIAMTX_BIN" "$MEDIAMTX_CONF"
+  fi
   wait_port "$MEDIAMTX_WHEP_PORT" "MediaMTX WHEP" 30
   wait_port "$MEDIAMTX_RTSP_PORT" "MediaMTX RTSP" 30
 
@@ -463,19 +527,23 @@ if [[ "$WEBRTC_ENABLED" != "0" ]]; then
     start_bg "$name" "$RUN/${name}.pid" "$LOG/${name}.log" \
       "$ROOT/scripts/webrtc_publisher.sh" "$music" "$path"
   }
+  # Publishers cache the old RTSP port for the life of ffmpeg. Bounce them
+  # whenever MediaMTX was just (re)started onto the project listeners.
+  if ! webrtc_publishers_ready; then
+    stop_bg webrtc_music "$RUN/webrtc_music.pid"
+    stop_bg webrtc_voice "$RUN/webrtc_voice.pid"
+  fi
   start_webrtc_publisher webrtc_music 1 avatar_music
   start_webrtc_publisher webrtc_voice 0 avatar_voice
   for _ in $(seq 1 40); do
     paths_json="$(curl -fsS --max-time 2 "http://127.0.0.1:${MEDIAMTX_API_PORT}/v3/paths/list" 2>/dev/null || true)"
-    if grep -Eq '"name":"avatar_music"[^}]*"ready":true' <<<"$paths_json" \
-        && grep -Eq '"name":"avatar_voice"[^}]*"ready":true' <<<"$paths_json"; then
+    if webrtc_publishers_ready "$paths_json"; then
       say "WebRTC H.264+Opus publishers ready"
       break
     fi
     sleep 0.25
   done
-  grep -Eq '"name":"avatar_music"[^}]*"ready":true' <<<"${paths_json:-}" \
-    && grep -Eq '"name":"avatar_voice"[^}]*"ready":true' <<<"${paths_json:-}" \
+  webrtc_publishers_ready "${paths_json:-}" \
     || die "WebRTC publishers are not ready; see $LOG/webrtc_*.log"
 fi
 
@@ -519,6 +587,19 @@ if [[ -f "$REF_AUDIO" ]]; then
   TTS_ARGS+=(--qwen3_tts_ref_audio "$REF_AUDIO" --qwen3_tts_ref_text "$REF_TEXT")
 else
   TTS_ARGS+=(--qwen3_tts_speaker Vivian)
+fi
+
+# A manually started s2s can listen on the right port and still be silent:
+# the browser mutes WebSocket PCM, so speech only exists if this process
+# tees audio to the local avatar gateway.
+if alive "$RUN/s2s.pid"; then
+  s2s_pid="$(cat "$RUN/s2s.pid")"
+  if [[ -r "/proc/${s2s_pid}/environ" ]] \
+      && ! tr '\0' '\n' <"/proc/${s2s_pid}/environ" \
+        | grep -Fxq "AVTR1_LOCAL_TEE_URL=${AVTR1_LOCAL_TEE_URL}"; then
+    say "s2s is running without the avatar audio tee; restarting"
+    stop_bg s2s "$RUN/s2s.pid"
+  fi
 fi
 
 start_bg s2s "$RUN/s2s.pid" "$LOG/s2s.log" \
