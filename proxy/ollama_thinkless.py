@@ -43,6 +43,9 @@ LOCAL_READ_TIMEOUT_SECONDS = max(
     4.0, float(os.environ.get("LLM_LOCAL_READ_TIMEOUT_SECONDS", "12.0"))
 )
 LOCAL_TIMEOUT_REPLY = "嗯？刚才没接稳，你再说一遍嘛。"
+LOCAL_CONVERSATION_NUM_PREDICT = max(
+    48, int(os.environ.get("LLM_LOCAL_CONVERSATION_NUM_PREDICT", "96"))
+)
 LOCAL_LEAD_ENABLED = os.environ.get("LOCAL_LEAD_ENABLED", "0").strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -191,8 +194,9 @@ def _is_exact_speech_request(messages: list[dict]) -> bool:
 def _is_room_welcome_request(messages: list[dict]) -> bool:
     """Recognize the server-owned arrival greeting workflow."""
     return any(
-        "直播间入场欢迎生成器" in str(message.get("content", ""))
+        "这是直播间入场欢迎" in content or "直播间入场欢迎生成器" in content
         for message in messages
+        for content in [str(message.get("content", ""))]
     )
 
 
@@ -200,6 +204,20 @@ def _is_proactive_broadcast_request(messages: list[dict]) -> bool:
     """Recognize server-owned unattended broadcasts, never user semantics."""
     return any(
         "无人连线时的直播间主动播报" in str(message.get("content", ""))
+        for message in messages
+    )
+
+
+def _is_public_comment_request(messages: list[dict]) -> bool:
+    """Route room comments to the stronger conversational model.
+
+    This marker is server-owned and therefore safe for structural routing. It
+    does not infer intent from viewer wording or encode answer semantics.
+    """
+
+    return any(
+        message.get("role") == "system"
+        and "这是公开评论" in str(message.get("content", ""))
         for message in messages
     )
 
@@ -380,7 +398,8 @@ def local_conversation_lead(messages: list[dict]) -> str:
             "role": "system",
             "content": (
                 "你是小麻，只生成实时对话开头的一句自然接话。"
-                "根据对方刚说的话接住语气或情绪，甜甜的、灵动、有点坏但不刻薄。"
+                "先接住对方刚说的话，短、直、像随口说，可以带一点点磕绊。"
+                "不要“既然……那就……”这类书面腔。"
                 "这句只负责承接，不回答事实，不给价格、日期、新闻结论，不承诺查询，"
                 "不复述问题，不说正在思考，不添加对方没提过的具体物品、经历或动作。"
                 "不能讽刺、嫌弃、贬低或指导投资。对事实问题只表达认真对待。"
@@ -578,6 +597,9 @@ def relay_sanitized_grok_stream(
             {"type": "response.output_item.done", "output_index": 0, "item": completed_item},
         )
 
+    grok_started = time.monotonic()
+    first_visible_at: float | None = None
+
     if eager_prefix and prefix_text:
         write_event(
             "response.created",
@@ -587,8 +609,10 @@ def relay_sanitized_grok_stream(
             },
         )
         inject_prefix()
+        first_visible_at = time.monotonic()
 
     def emit(lines: list[str]) -> None:
+        nonlocal first_visible_at
         if not lines:
             return
         data_lines = [line[5:].lstrip() for line in lines if line.startswith("data:")]
@@ -602,6 +626,10 @@ def relay_sanitized_grok_stream(
             # protocol leakage. Structured Responses events are JSON.
             return
         sanitized, tail = _sanitize_stream_event(payload, cleaner, visible)
+        if first_visible_at is None and (
+            tail or (sanitized and sanitized.get("type") == "response.output_text.delta")
+        ):
+            first_visible_at = time.monotonic()
         if tail:
             synthetic = {
                 "type": "response.output_text.delta",
@@ -660,6 +688,16 @@ def relay_sanitized_grok_stream(
             emit(block)
             block = []
     emit(block)
+    first_ms = (
+        (first_visible_at - grok_started) * 1000.0
+        if first_visible_at is not None else -1.0
+    )
+    print(
+        f"[thinkless] grok latency first={first_ms:.0f}ms "
+        f"total={(time.monotonic() - grok_started) * 1000:.0f}ms "
+        f"chars={len(''.join(visible))}",
+        flush=True,
+    )
 
 
 def _function_call_item(call: dict) -> dict:
@@ -767,21 +805,33 @@ class Handler(BaseHTTPRequestHandler):
         fast_external_planning = _is_fast_external_planning(req)
         fast_welcome = _is_room_welcome_request(messages)
         proactive_broadcast = _is_proactive_broadcast_request(messages)
+        public_comment = _is_public_comment_request(messages)
         explicit_external_request = fast_discovery and _needs_reliable_external_route(messages)
         has_tool_evidence = any(
             isinstance(item, dict) and item.get("type") == "function_call_output"
             for item in req.get("input") or []
+        )
+        ordinary_no_tool_turn = (
+            not req.get("tools")
+            and not has_tool_evidence
+            and not proactive_broadcast
+            and not _is_exact_speech_request(messages)
         )
         # One request must have exactly one prose generator.  The previous
         # hybrid path exposed a local answer and then appended a second Grok
         # answer, which sounded like repeated replies and delayed newer room
         # comments.  The resident model now owns bounded low-latency turns;
         # Grok owns evidence-backed synthesis after real tool output.
+        # Companion and public-comment turns have no tools. Sending them to
+        # Grok hid the first spoken token behind a 5-13s provider handshake.
+        # Keep Grok for evidence-backed research and unattended news only.
         local_primary = (
             fast_discovery
             or fast_conversation
             or fast_external_planning
             or fast_welcome
+            or ordinary_no_tool_turn
+            or (public_comment and not has_tool_evidence)
         )
         if explicit_external_request:
             current = next(
@@ -824,10 +874,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(out, ensure_ascii=False).encode(), "application/json")
             return
 
-        # Grok owns every generative/semantic task. Local Ollama remains only
-        # a provider-outage fallback plus deterministic compaction/exact TTS.
-        # Tool permission and public-output safety are enforced below in code,
-        # independently of either model's instruction following.
+        # Local Ollama owns bounded low-latency turns: ordinary chat, welcome,
+        # public comments, capability discovery, and first tool planning.
+        # Grok owns evidence-backed synthesis after real tool output, plus
+        # unattended news when enabled. Public-output safety is enforced below.
         if (
             GROK_ENABLED
             and not _is_exact_speech_request(messages)
@@ -980,7 +1030,14 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[thinkless] route provider=ollama reason={reason}", flush=True)
             started = time.monotonic()
             try:
-                with ollama_chat(model, messages, False, tools) as r:
+                local_limit = (
+                    LOCAL_CONVERSATION_NUM_PREDICT
+                    if ordinary_no_tool_turn else None
+                )
+                with ollama_chat(
+                    model, messages, False, tools,
+                    num_predict_override=local_limit,
+                ) as r:
                     data = json.loads(r.read())
             except (TimeoutError, OSError, HTTPError, URLError, json.JSONDecodeError) as exc:
                 print(
@@ -1098,7 +1155,14 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 tool_calls.extend(msg.get("tool_calls") or [])
             else:
-                with ollama_chat(model, messages, True, tools) as r:
+                local_limit = (
+                    LOCAL_CONVERSATION_NUM_PREDICT
+                    if ordinary_no_tool_turn else None
+                )
+                with ollama_chat(
+                    model, messages, True, tools,
+                    num_predict_override=local_limit,
+                ) as r:
                     for raw in r:
                         line = raw.decode("utf-8", "ignore").strip()
                         if not line:

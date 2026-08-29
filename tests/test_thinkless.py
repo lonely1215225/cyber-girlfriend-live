@@ -16,6 +16,7 @@ from ollama_thinkless import (  # noqa: E402
     _needs_reliable_external_route,
     _is_room_welcome_request,
     _is_proactive_broadcast_request,
+    _is_public_comment_request,
     _num_predict_for_messages,
     clean_model_output,
     completed_response,
@@ -59,6 +60,14 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         ]))
         self.assertFalse(_is_proactive_broadcast_request([
             {"role": "user", "content": "你主动说点什么呀"},
+        ]))
+
+    def test_public_comment_route_uses_only_server_owned_marker(self):
+        self.assertTrue(_is_public_comment_request([
+            {"role": "system", "content": "这是公开评论：请直接回答当前观众。"},
+        ]))
+        self.assertFalse(_is_public_comment_request([
+            {"role": "user", "content": "我想公开评论一件事"},
         ]))
 
     def test_only_the_initial_discovery_turn_uses_fast_local_model(self):
@@ -106,7 +115,7 @@ class ModelOutputSanitizerTests(unittest.TestCase):
 
     def test_room_welcome_uses_fast_local_provider(self):
         messages = [
-            {"role": "system", "content": "你现在是直播间入场欢迎生成器。"},
+            {"role": "system", "content": "这是直播间入场欢迎。观众刚进来。"},
             {"role": "user", "content": "欢迎林清欢"},
         ]
         self.assertTrue(_is_room_welcome_request(messages))
