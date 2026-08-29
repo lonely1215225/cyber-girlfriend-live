@@ -770,8 +770,17 @@ class RoomStore:
                     (user_id, key, memory_type, value, message_id, now, now),
                 )
 
-    async def memory_context(self, user_id: str, query: str = "", *, max_chars: int = 3200) -> str:
-        return await asyncio.to_thread(self._memory_context_sync, user_id, query, max_chars)
+    async def memory_context(
+        self,
+        user_id: str,
+        query: str = "",
+        *,
+        max_chars: int = 3200,
+        exclude_message_id: str = "",
+    ) -> str:
+        return await asyncio.to_thread(
+            self._memory_context_sync, user_id, query, max_chars, exclude_message_id
+        )
 
     @staticmethod
     def _fts_query(query: str) -> str:
@@ -783,7 +792,9 @@ class RoomStore:
         unique = list(dict.fromkeys(term.replace('"', '') for term in terms if len(term) >= 3))[:16]
         return " OR ".join(f'"{term}"' for term in unique)
 
-    def _memory_context_sync(self, user_id: str, query: str, max_chars: int) -> str:
+    def _memory_context_sync(
+        self, user_id: str, query: str, max_chars: int, exclude_message_id: str = ""
+    ) -> str:
         with self._connect() as db:
             user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
             if user is None:
@@ -800,22 +811,22 @@ class RoomStore:
                         "SELECT m.id,m.role,m.speaker_snapshot,m.content,m.created_at "
                         "FROM chat_messages_fts f JOIN chat_messages m ON m.id=f.message_id "
                         "LEFT JOIN agent_jobs j ON j.room_id=m.room_id AND j.message_id=m.reply_to_id "
-                        "WHERE f.user_id=? AND chat_messages_fts MATCH ? "
+                        "WHERE f.user_id=? AND chat_messages_fts MATCH ? AND m.id<>? "
                         "AND NOT (m.role='assistant' AND COALESCE(j.terminal,0)=1 "
                         "AND COALESCE(j.phase,'')<>'completed') "
                         "ORDER BY bm25(chat_messages_fts) LIMIT 6",
-                        (user_id, fts_query),
+                        (user_id, fts_query, exclude_message_id),
                     ).fetchall()
                 except sqlite3.OperationalError:
                     relevant = []
             recent = db.execute(
                 "SELECT m.id,m.role,m.speaker_snapshot,m.content,m.created_at FROM chat_messages m "
                 "LEFT JOIN agent_jobs j ON j.room_id=m.room_id AND j.message_id=m.reply_to_id "
-                "WHERE m.user_id=? "
+                "WHERE m.user_id=? AND m.id<>? "
                 "AND NOT (m.role='assistant' AND COALESCE(j.terminal,0)=1 "
                 "AND COALESCE(j.phase,'')<>'completed') "
                 "ORDER BY m.created_at DESC LIMIT 10",
-                (user_id,),
+                (user_id, exclude_message_id),
             ).fetchall()
         lines = [f"用户固定身份：{user['display_name']}"]
         labels = {"name": "称呼", "like": "喜欢", "dislike": "不喜欢", "location": "所在地", "occupation": "身份/职业"}
@@ -834,6 +845,27 @@ class RoomStore:
         if history:
             lines.append("仅属于该用户的历史对话：\n" + "\n".join(history))
         return "\n".join(lines)[:max_chars]
+
+    async def latest_assistant_reply(
+        self, user_id: str, *, exclude_reply_to_id: str = ""
+    ) -> str:
+        return await asyncio.to_thread(
+            self._latest_assistant_reply_sync, user_id, exclude_reply_to_id
+        )
+
+    def _latest_assistant_reply_sync(
+        self, user_id: str, exclude_reply_to_id: str = ""
+    ) -> str:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT m.content FROM chat_messages m "
+                "LEFT JOIN agent_jobs j ON j.room_id=m.room_id AND j.message_id=m.reply_to_id "
+                "WHERE m.user_id=? AND m.role='assistant' AND m.reply_to_id<>? "
+                "AND NOT (COALESCE(j.terminal,0)=1 AND COALESCE(j.phase,'')<>'completed') "
+                "ORDER BY m.created_at DESC LIMIT 1",
+                (user_id, exclude_reply_to_id),
+            ).fetchone()
+        return str(row["content"] or "") if row else ""
 
     async def start_call(self, call_id: str, user_id: str, granted_at: float, connected_at: float) -> None:
         await asyncio.to_thread(self._start_call_sync, call_id, user_id, granted_at, connected_at)

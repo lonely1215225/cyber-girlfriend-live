@@ -54,7 +54,22 @@ _DELIVERY_PROFILES = (
     "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",
 )
 _DELIVERY_STYLES = ("neutral", "gentle", "calm", "cheerful", "serious")
+_VOCAL_EMOTIONS = (
+    "neutral", "happy", "playful", "warm", "tender", "shy", "serious",
+    "sad", "angry", "surprised",
+)
+_NONVERBAL_EVENTS = ("none", "soft_laugh", "laugh", "sigh", "breath", "hum")
 _DELIVERY_TAG_RE = re.compile(r"</?e(?:\s+[^>]*)?>", re.IGNORECASE)
+_DELIVERY_COMPACT_BARE_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])(?:{'|'.join(sorted(_DELIVERY_PROFILES, key=len, reverse=True))})"
+    rf"\s+(?:0(?:\.\d+)?|1(?:\.0+)?)"
+    rf"\s+(?:{'|'.join(sorted(_VOCAL_EMOTIONS, key=len, reverse=True))})"
+    rf"\s+(?:0(?:\.\d+)?|1(?:\.0+)?)"
+    rf"\s+(?:{'|'.join(sorted(_NONVERBAL_EVENTS, key=len, reverse=True))})"
+    rf"\s+(?:0(?:\.\d+)?|1(?:\.\d+)?)"
+    r"(?=$|[\s，。！？、；：,.!?;:])",
+    re.IGNORECASE,
+)
 _DELIVERY_BARE_RE = re.compile(
     rf"(?<![A-Za-z0-9_])(?:{'|'.join(sorted(_DELIVERY_PROFILES, key=len, reverse=True))})"
     rf"\s+(?:0(?:\.\d+)?|1(?:\.0+)?)"
@@ -65,6 +80,8 @@ _DELIVERY_BARE_RE = re.compile(
 )
 _DELIVERY_PROFILE_SET = frozenset(_DELIVERY_PROFILES)
 _DELIVERY_STYLE_SET = frozenset(_DELIVERY_STYLES)
+_VOCAL_SET = frozenset(_VOCAL_EMOTIONS)
+_NONVERBAL_SET = frozenset(_NONVERBAL_EVENTS)
 MESSAGE_LIMIT = 80
 CHAT_WINDOW_SECONDS = 10.0
 CHAT_WINDOW_MESSAGES = 5
@@ -82,33 +99,57 @@ def _clean_public_text(value: str, *, assistant: bool = False) -> str:
     text = _REASONING_CLOSE_RE.sub("", text)
     if assistant:
         text = _DELIVERY_TAG_RE.sub("", text)
+        opening = text.rfind("<")
+        if opening >= 0:
+            tail = text[opening:]
+            if ">" not in tail and re.match(r"</?e\b|^<$", tail, re.IGNORECASE):
+                text = text[:opening]
+        text = _DELIVERY_COMPACT_BARE_RE.sub("", text)
         text = _DELIVERY_BARE_RE.sub("", text)
         # Partial transcript events can arrive token by token. Hide an exact
         # protocol prefix at the tail until it either becomes a complete
         # record (removed above) or proves to be ordinary prose.
-        search_start = max(0, len(text) - 96)
+        search_start = max(0, len(text) - 180)
         for token in re.finditer(r"(?<![A-Za-z0-9_])[A-Za-z_]", text[search_start:]):
             index = search_start + token.start()
-            candidate = text[index:].strip()
-            parts = candidate.split()
-            if not parts:
-                continue
-            profile = parts[0].lower()
-            possible = False
-            if len(parts) == 1:
-                possible = any(item.startswith(profile) for item in _DELIVERY_PROFILE_SET)
-            elif profile in _DELIVERY_PROFILE_SET and re.fullmatch(r"[01](?:\.\d*)?", parts[1]):
-                if len(parts) == 2:
-                    possible = True
-                elif re.fullmatch(r"(?:0(?:\.\d+)?|1(?:\.0+)?)", parts[1]):
-                    style = parts[2].lower()
-                    possible = len(parts) == 3 and any(
-                        item.startswith(style) for item in _DELIVERY_STYLE_SET
-                    )
-            if possible:
+            if _looks_like_incomplete_delivery(text[index:].split()):
                 text = text[:index]
                 break
     return _SPACE_RE.sub(" ", text).strip()
+
+
+def _looks_like_incomplete_delivery(parts: list[str]) -> bool:
+    """Whether a trailing token list can still become a hidden control record."""
+
+    if not parts or len(parts) > 6:
+        return False
+    profile = parts[0].lower()
+    if len(parts) == 1:
+        return any(item.startswith(profile) for item in _DELIVERY_PROFILE_SET)
+    if profile not in _DELIVERY_PROFILE_SET:
+        return False
+    if not re.fullmatch(r"[01](?:\.\d*)?", parts[1]):
+        return False
+    if len(parts) == 2:
+        return True
+    third = parts[2].lower()
+    if not (
+        any(item.startswith(third) for item in _DELIVERY_STYLE_SET)
+        or any(item.startswith(third) for item in _VOCAL_SET)
+    ):
+        return False
+    if len(parts) == 3:
+        return True
+    if not re.fullmatch(r"[01](?:\.\d*)?", parts[3]):
+        return False
+    if len(parts) == 4:
+        return True
+    nonverbal = parts[4].lower()
+    if not any(item.startswith(nonverbal) for item in _NONVERBAL_SET):
+        return False
+    if len(parts) == 5:
+        return True
+    return bool(re.fullmatch(r"(?:0(?:\.\d+)?|1(?:\.\d+)?)", parts[5]))
 
 
 class RoomError(RuntimeError):
@@ -713,10 +754,23 @@ class LiveRoom:
             user_id = participant.id
         return await self.store.memory_context(user_id, query)
 
-    async def participant_memory_context(self, participant_id: str, query: str = "") -> str:
+    async def participant_memory_context(
+        self, participant_id: str, query: str = "", *, exclude_message_id: str = ""
+    ) -> str:
         if not self.store or not participant_id:
             return ""
-        return await self.store.memory_context(participant_id, query)
+        return await self.store.memory_context(
+            participant_id, query, exclude_message_id=exclude_message_id
+        )
+
+    async def latest_assistant_reply(
+        self, participant_id: str, *, exclude_reply_to_id: str = ""
+    ) -> str:
+        if not self.store or not participant_id:
+            return ""
+        return await self.store.latest_assistant_reply(
+            participant_id, exclude_reply_to_id=exclude_reply_to_id
+        )
 
     async def active_news_context(self, query: str = "", *, include_unconditionally: bool = False) -> str:
         if not self.store:

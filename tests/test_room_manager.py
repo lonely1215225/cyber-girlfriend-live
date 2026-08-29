@@ -200,6 +200,24 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
         state = await self.room.snapshot(self.alice.token)
         self.assertEqual(len(state["messages"]), before)
 
+        await self.room.publish_transcript(
+            session_id="call-expression",
+            event_id="partial-compact",
+            role="assistant",
+            speaker="小麻",
+            text="happy 0.58 playful 0.56",
+            partial=True,
+        )
+        state = await self.room.snapshot(self.alice.token)
+        self.assertEqual(len(state["messages"]), before)
+
+        compact = await self.room.publish_bot_reply(
+            message_id="compact-expression-reply",
+            text="happy 0.58 neutral 0.08 none 1.00 先说正事。",
+            reply_to=None,
+        )
+        self.assertEqual(compact["text"], "先说正事。")
+
         reply = await self.room.publish_bot_reply(
             message_id="expression-reply",
             text="<e profile=wink intensity=0.7 style=cheerful>欢迎你呀。",

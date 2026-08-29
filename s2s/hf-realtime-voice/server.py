@@ -65,7 +65,12 @@ from pydantic import BaseModel
 
 import auth
 import limiter
-from avatar_profiles import AvatarProfileStore, DEFAULT_PERSONA_PROMPT, ROLE_IDENTITY_POLICY
+from avatar_profiles import (
+    AvatarProfileStore,
+    DEFAULT_PERSONA_PROMPT,
+    ROLE_IDENTITY_POLICY,
+    ROLE_OUTPUT_POLICY,
+)
 from mcp_gateway import McpGateway
 from mention_reply import MentionReplyWorker
 from rss_news import (
@@ -171,6 +176,7 @@ LB_USER_AGENT = "hf-realtime-voice-space"
 
 app = FastAPI(title="s2s-demo")
 mcp_gateway = McpGateway()
+DIALOGUE_TOOLS_ENABLED = os.environ.get("DIALOGUE_TOOLS_ENABLED", "0") == "1"
 mention_replies = MentionReplyWorker(
     live_room,
     mcp_gateway,
@@ -357,6 +363,7 @@ class AvatarProfileUpdateRequest(BaseModel):
     motion: dict | None = None
     voice_asset_id: str | None = None
     persona_prompt: str | None = None
+    emotion_references: dict[str, str] | None = None
 
 
 class VoiceUpdateRequest(BaseModel):
@@ -786,7 +793,7 @@ async def admin_update_avatar_profile(avatar_id: str, body: AvatarProfileUpdateR
     try:
         profile = await avatar_profiles.update_profile(
             avatar_id, view=body.view, motion=body.motion, voice_asset_id=body.voice_asset_id,
-            persona_prompt=body.persona_prompt,
+            persona_prompt=body.persona_prompt, emotion_references=body.emotion_references,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="数字人角色不存在") from exc
@@ -833,6 +840,16 @@ async def admin_activate_avatar_profile(avatar_id: str, request: Request):
 async def admin_list_voices(request: Request):
     await _require_admin(request)
     return {"voices": await avatar_profiles.voices()}
+
+
+@app.get("/api/admin/tts/status")
+async def admin_tts_status(request: Request):
+    await _require_admin(request)
+    model = Path(os.environ.get("TTS_MODEL", "models/qwen3tts/Qwen3-TTS-12Hz-1.7B-Base"))
+    if not model.is_absolute():
+        model = Path(__file__).resolve().parents[2] / model
+    ready = (model / "config.json").is_file()
+    return {"ready": ready, "engine": "Qwen3-TTS", "model": str(model)}
 
 
 @app.post("/api/admin/voices")
@@ -1108,6 +1125,8 @@ def _login_required_response(reason: str, set_cookie=None) -> JSONResponse:
 async def search(req: SearchRequest):
     """Proxy a Google search via Serper.dev. The key stays on the server unless
     the user brought their own (then theirs is used for this request only)."""
+    if not DIALOGUE_TOOLS_ENABLED:
+        raise HTTPException(status_code=503, detail="对话联网查询未启用")
     query = (req.query or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="Empty query.")
@@ -1171,7 +1190,7 @@ async def mcp_tools(capabilities: str = ""):
     this keeps ordinary live conversation fast and prevents unrelated tools
     from being called merely because their schemas were present.
     """
-    if not mcp_gateway.enabled:
+    if not DIALOGUE_TOOLS_ENABLED or not mcp_gateway.enabled:
         return {"enabled": False, "tools": [], "sources": []}
     try:
         requested = [item.strip().lower() for item in capabilities.split(",") if item.strip()]
@@ -1189,7 +1208,7 @@ async def mcp_tools(capabilities: str = ""):
 
 @app.post("/api/mcp/call")
 async def mcp_call(body: McpCallRequest, request: Request):
-    if not mcp_gateway.enabled:
+    if not DIALOGUE_TOOLS_ENABLED or not mcp_gateway.enabled:
         raise HTTPException(status_code=503, detail="MCP 未启用")
     if LIVE_ROOM_ENABLED:
         try:
@@ -1214,6 +1233,8 @@ async def mcp_call(body: McpCallRequest, request: Request):
 @app.post("/api/rss/query")
 async def rss_query(body: RssQueryRequest, request: Request):
     """Execute an explicit RSS tool request for the current caller."""
+    if not DIALOGUE_TOOLS_ENABLED:
+        raise HTTPException(status_code=503, detail="对话 RSS 查询未启用")
     if LIVE_ROOM_ENABLED:
         try:
             participant, _ = await _room_identity(request, create=False)
@@ -1729,12 +1750,14 @@ def _role_instructions(persona_prompt: str, display_name: str, personal_memory: 
     instructions = str(persona_prompt or DEFAULT_PERSONA_PROMPT).strip()
     identity = f"当前正在与你连线的观众名字是“{display_name}”。请自然地用这个名字称呼对方。"
     tool_policy = (
-        "普通聊天、问候、情绪交流和上下文追问直接回答，禁止调用工具。只有确实需要实时、最新、"
-        "价格、新闻、网页、私有知识或视觉信息时，才调用 request_external_capabilities 请求最小必要能力。"
-        "能力展开后先用一句自然口语说明正在查询，同时立刻调用最合适的工具；拿到结果后必须在本轮"
-        "给出结论，不能只留下‘我去查’。工具失败就明确说明，绝不编造。"
+        "当前是纯陪伴聊天模式。直接回应对方，不调用搜索、新闻、价格、网页、RSS、MCP、视觉或"
+        "其他外部工具，也不要说正在查询、核对来源或稍后告诉对方。遇到依赖实时外部资料的问题，"
+        "坦率说明现在只陪对方聊天，不猜测、不编造。"
     )
-    additions = [item for item in (ROLE_IDENTITY_POLICY, identity, tool_policy) if item not in instructions]
+    additions = [
+        item for item in (ROLE_IDENTITY_POLICY, ROLE_OUTPUT_POLICY, identity, tool_policy)
+        if item not in instructions
+    ]
     if personal_memory:
         additions.append(
             "以下记忆仅属于当前连线者，只在相关时自然使用，不复述、不与其他用户混用。"
@@ -1743,9 +1766,9 @@ def _role_instructions(persona_prompt: str, display_name: str, personal_memory: 
         )
     if active_news:
         additions.append(
-            "下面是直播间刚播报的公共话题，可用于承接讨论；涉及新进展仍须查询。"
+            "下面是直播间刚播报的公共话题，可用于承接讨论，但不要继续联网查询。"
             "只有对方说‘这个、刚才那条、它、为什么、后来呢’或明确提到相关主体时才使用；"
-            "无关问题必须忽略。涉及现在价格、最新进展或实时状态时重新调用工具核实。\n"
+            "无关问题必须忽略；涉及现在价格、最新进展或实时状态时不要猜测。\n"
             f"{active_news}"
         )
     return "\n".join([instructions, *additions]).strip()

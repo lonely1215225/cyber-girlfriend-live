@@ -191,6 +191,38 @@ class RoomStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("实时行情", memory)
         self.assertIn("你是机器人吗", memory)
 
+    async def test_current_comment_is_excluded_and_previous_reply_is_addressable(self):
+        self.assertTrue(await self.store.create_user(
+            user_id="user-a", display_name="张三丰", name_zh="张三丰", name_en="",
+            token="turn-isolation-token",
+        ))
+        await self.store.save_message({
+            "id": "chat-old", "kind": "chat", "role": "viewer", "speaker": "张三丰",
+            "text": "@小麻 你干啥呢", "created_at": 100.0,
+        }, user_id="user-a")
+        old_reply = "我正在直播间等你呀。"
+        await self.store.save_message({
+            "id": "bot-old", "kind": "mention_reply", "role": "assistant", "speaker": "小麻",
+            "text": old_reply, "created_at": 101.0,
+            "reply_to": {"id": "chat-old", "speaker": "张三丰", "text": "@小麻 你干啥呢"},
+        }, user_id="user-a")
+        await self.store.save_message({
+            "id": "chat-current", "kind": "chat", "role": "viewer", "speaker": "张三丰",
+            "text": "@小麻 谁是你叔，我是你哥", "created_at": 102.0,
+        }, user_id="user-a")
+
+        memory = await self.store.memory_context(
+            "user-a", "谁是你叔，我是你哥", exclude_message_id="chat-current"
+        )
+        self.assertNotIn("谁是你叔", memory)
+        self.assertIn(old_reply, memory)
+        self.assertEqual(
+            await self.store.latest_assistant_reply(
+                "user-a", exclude_reply_to_id="chat-current"
+            ),
+            old_reply,
+        )
+
     async def test_conversation_focus_is_private_and_persistent(self):
         spec = {
             "subject": "bitcoin", "subject_label": "比特币",
