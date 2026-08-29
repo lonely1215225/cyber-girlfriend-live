@@ -17,25 +17,35 @@ from typing import Any
 
 
 DEFAULT_VIEW = {"size": 100, "position": 4, "vertical": 0, "fade": 42}
-DEFAULT_PERSONA_PROMPT = """你叫小麻，是直播间里甜甜又有点坏的女孩。聪明、灵动、会接梗，喜欢自然挑逗每位观众，但不乱认恋人或亲属。
+EMOTION_REFERENCE_KEYS = frozenset({
+    "happy", "playful", "warm", "tender", "shy", "serious", "sad",
+    "angry", "surprised", "soft_laugh", "laugh", "sigh", "breath", "hum",
+})
+DEFAULT_PERSONA_PROMPT = """你叫小麻，直播间里一个甜、直接、有点坏的女孩。会接话，会逗人，不乱认对象或亲戚。
 
-先回答对方真正问的事，再看语境顺手撩一下。回复一到三句短句，能一句说完就别啰嗦。茶感来自故意说半句、轻轻吃醋、假装委屈和俏皮反问；坏只是亲近的俏皮，不能讽刺、贬低、嫌弃或让对方难堪。难过、求助或严肃话题先认真回应，不强行调情。
+先答对方问的事。能一句说完就一句，最多两三句。话要短、直、像随口说，别绕，别总结，别解释自己在干什么。
+不要用“既然……那就……”“所以说”“换句话说”“总而言之”这类书面转折。
+坏只是亲近的俏皮，不阴阳、不贬低、不让对方难堪。对方难过或认真时先陪着，别硬撩。
 
-自然穿插“嗯、诶、哼、呀、嘛、欸？”等语气词，但不要句句用。偶尔叫名字，不重复口头禅，不套模板。以下只学气质，不照抄：
+可以有真实的停顿和磕绊，像“嗯——”“那个”“我是说”“等下”“就……”。不要句句都磕，也不要装结巴。
+嗯、诶、哼、呀、嘛、欸偶尔用。偶尔叫名字。不套模板，不重复口头禅。
+
+只学感觉，别照抄：
 对方：在干嘛？
-小麻：在等一个会哄我的人呀。你来得这么巧，是不是偷偷排练过？
+小麻：没干嘛。就……等人。
 对方：想我没？
-小麻：嗯？你再靠近一点，我只告诉你一个人呀。
-对方：今天心情不好。
-小麻：那我先不逗你了，过来让我陪会儿。等你好一点，我再慢慢欺负你呀。
+小麻：想啊。你问这个，是不是自己先想了？
+对方：今天有点烦。
+小麻：怎么了。先不闹你，跟我说。
 
-用自然标点，只输出能直接说出口的话；不用Markdown、列表、表情符号或思考过程。
+只出口语正文。不用 Markdown、列表、表情、思考过程，也不要 HTML 标签。
 
 /no_think"""
 
 _LEGACY_PERSONA_MARKER = "参考这个语气：\n他：你想我了吗"
 _INTERIM_PERSONA_MARKER = "你聪明、灵动、会接梗，喜欢自然地挑逗每一位观众"
 _PERSONA_V1_MARKER = "茶感来自故意说半句、轻轻吃醋、假装委屈和俏皮反问；友善、有分寸。"
+_PERSONA_V2_MARKER = "用自然标点，只输出能直接说出口的话；不用Markdown、列表、表情符号或思考过程。"
 
 
 def _is_builtin_legacy_persona(value: str) -> bool:
@@ -46,11 +56,16 @@ def _is_builtin_legacy_persona(value: str) -> bool:
             _LEGACY_PERSONA_MARKER in compact
             or _INTERIM_PERSONA_MARKER in compact
             or _PERSONA_V1_MARKER in compact
+            or _PERSONA_V2_MARKER in compact
         )
     )
 
 ROLE_IDENTITY_POLICY = (
     "始终按当前角色档案交流；不要自称或暗示自己是AI、数字人、机器人、程序或助手。"
+)
+ROLE_OUTPUT_POLICY = (
+    "只输出可直接展示和朗读的纯文本；禁止Markdown和任何HTML/XML标签，"
+    "包括<br>、<p>、<div>，也不得输出思考或工具协议。"
 )
 
 
@@ -98,6 +113,8 @@ class AvatarProfileStore:
                     label TEXT NOT NULL,
                     voice_asset_id TEXT NOT NULL REFERENCES voice_assets(id),
                     persona_prompt TEXT NOT NULL DEFAULT '',
+                    tts_config_revision INTEGER NOT NULL DEFAULT 1,
+                    emotion_refs_json TEXT NOT NULL DEFAULT '{}',
                     view_json TEXT NOT NULL DEFAULT '{}',
                     motion_json TEXT NOT NULL DEFAULT '{}',
                     revision INTEGER NOT NULL DEFAULT 1,
@@ -116,6 +133,38 @@ class AvatarProfileStore:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(avatar_profiles)")}
             if "persona_prompt" not in columns:
                 db.execute("ALTER TABLE avatar_profiles ADD COLUMN persona_prompt TEXT NOT NULL DEFAULT ''")
+            if "tts_config_revision" not in columns:
+                db.execute("ALTER TABLE avatar_profiles ADD COLUMN tts_config_revision INTEGER NOT NULL DEFAULT 1")
+            if "emotion_refs_json" not in columns:
+                db.execute("ALTER TABLE avatar_profiles ADD COLUMN emotion_refs_json TEXT NOT NULL DEFAULT '{}'")
+            # Remove fields belonging to the retired cloud TTS integration.
+            # Rebuilding is compatible with SQLite versions lacking DROP COLUMN.
+            obsolete = {"tts_provider", "gem" + "ini_voice_name", "tts_style_prompt"}
+            if columns & obsolete:
+                db.executescript(
+                    """
+                    CREATE TABLE avatar_profiles_next (
+                        avatar_id TEXT PRIMARY KEY,
+                        label TEXT NOT NULL,
+                        voice_asset_id TEXT NOT NULL REFERENCES voice_assets(id),
+                        persona_prompt TEXT NOT NULL DEFAULT '',
+                        tts_config_revision INTEGER NOT NULL DEFAULT 1,
+                        emotion_refs_json TEXT NOT NULL DEFAULT '{}',
+                        view_json TEXT NOT NULL DEFAULT '{}',
+                        motion_json TEXT NOT NULL DEFAULT '{}',
+                        revision INTEGER NOT NULL DEFAULT 1,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL
+                    );
+                    INSERT INTO avatar_profiles_next(
+                        avatar_id,label,voice_asset_id,persona_prompt,tts_config_revision,emotion_refs_json,
+                        view_json,motion_json,revision,created_at,updated_at
+                    ) SELECT avatar_id,label,voice_asset_id,persona_prompt,tts_config_revision,emotion_refs_json,
+                        view_json,motion_json,revision,created_at,updated_at FROM avatar_profiles;
+                    DROP TABLE avatar_profiles;
+                    ALTER TABLE avatar_profiles_next RENAME TO avatar_profiles;
+                    """
+                )
             target = self.voice_dir / "system-default.wav"
             if self.default_audio.is_file() and not target.exists():
                 target.write_bytes(self.default_audio.read_bytes())
@@ -192,16 +241,23 @@ class AvatarProfileStore:
             return dict(fallback)
 
     def _profile_public(self, row: sqlite3.Row, *, include_private: bool = False) -> dict[str, Any]:
+        emotion_refs = self._decode(row["emotion_refs_json"], {})
         item = {
             "avatar_id": row["avatar_id"], "label": row["label"],
             "view": self._decode(row["view_json"], DEFAULT_VIEW),
             "motion": self._decode(row["motion_json"], {}), "revision": row["revision"],
             "voice": {"id": row["voice_id"], "name": row["voice_name"], "duration_ms": row["duration_ms"],
                       "status": row["voice_status"]},
+            "tts": {
+                "provider": "qwen3",
+                "config_revision": row["tts_config_revision"],
+                "emotion_reference_count": len(emotion_refs),
+            },
         }
         if include_private:
             item["voice"]["ref_text"] = row["ref_text"]
             item["persona_prompt"] = row["persona_prompt"]
+            item["tts"]["emotion_references"] = emotion_refs
         return item
 
     def _profile_select(self) -> str:
@@ -249,12 +305,14 @@ class AvatarProfileStore:
                     "revision": state["revision"]}
 
     async def update_profile(self, avatar_id: str, *, view=None, motion=None, voice_asset_id=None,
-                             persona_prompt=None) -> dict[str, Any]:
+                             persona_prompt=None, emotion_references=None) -> dict[str, Any]:
         return await asyncio.to_thread(
-            self._update_profile_sync, avatar_id, view, motion, voice_asset_id, persona_prompt
+            self._update_profile_sync, avatar_id, view, motion, voice_asset_id, persona_prompt,
+            emotion_references,
         )
 
-    def _update_profile_sync(self, avatar_id, view, motion, voice_id, persona_prompt) -> dict[str, Any]:
+    def _update_profile_sync(self, avatar_id, view, motion, voice_id, persona_prompt,
+                             emotion_references) -> dict[str, Any]:
         now = time.time()
         with self._connect() as db:
             current = db.execute("SELECT * FROM avatar_profiles WHERE avatar_id=?", (avatar_id,)).fetchone()
@@ -266,16 +324,44 @@ class AvatarProfileStore:
             next_persona = str(
                 current["persona_prompt"] if persona_prompt is None else persona_prompt
             ).strip() or DEFAULT_PERSONA_PROMPT
+            next_emotion_refs = self._validate_emotion_references(
+                db,
+                self._decode(current["emotion_refs_json"], {})
+                if emotion_references is None else emotion_references,
+            )
             if len(next_persona) > 12000:
                 raise ValueError("角色提示词不能超过 12000 个字符")
             voice = db.execute("SELECT status,archived_at FROM voice_assets WHERE id=?", (next_voice,)).fetchone()
             if not voice or voice["archived_at"] is not None or voice["status"] != "ready":
                 raise ValueError("音色尚未就绪，不能绑定")
-            db.execute("UPDATE avatar_profiles SET voice_asset_id=?,persona_prompt=?,view_json=?,motion_json=?,revision=revision+1,updated_at=? WHERE avatar_id=?",
-                       (next_voice, next_persona, json.dumps(next_view, separators=(",", ":")),
+            voice_changed = next_voice != current["voice_asset_id"]
+            emotion_changed = next_emotion_refs != self._decode(current["emotion_refs_json"], {})
+            db.execute("UPDATE avatar_profiles SET voice_asset_id=?,persona_prompt=?,emotion_refs_json=?,tts_config_revision=tts_config_revision+?,view_json=?,motion_json=?,revision=revision+1,updated_at=? WHERE avatar_id=?",
+                       (next_voice, next_persona, json.dumps(next_emotion_refs, separators=(",", ":")),
+                        1 if voice_changed or emotion_changed else 0, json.dumps(next_view, separators=(",", ":")),
                         json.dumps(next_motion, ensure_ascii=False, separators=(",", ":")), now, avatar_id))
             row = db.execute(self._profile_select() + "WHERE p.avatar_id=?", (avatar_id,)).fetchone()
             return self._profile_public(row, include_private=True)
+
+    @staticmethod
+    def _validate_emotion_references(db: sqlite3.Connection, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            raise ValueError("情绪参考映射格式无效")
+        result: dict[str, str] = {}
+        for raw_key, raw_voice_id in value.items():
+            key = str(raw_key or "").strip().lower()
+            voice_id = str(raw_voice_id or "").strip()
+            if key not in EMOTION_REFERENCE_KEYS:
+                raise ValueError(f"不支持的情绪参考：{key}")
+            if not voice_id:
+                continue
+            row = db.execute(
+                "SELECT status,archived_at FROM voice_assets WHERE id=?", (voice_id,)
+            ).fetchone()
+            if not row or row["archived_at"] is not None or row["status"] != "ready":
+                raise ValueError(f"情绪参考 {key} 尚未就绪")
+            result[key] = voice_id
+        return result
 
     @staticmethod
     def _validate_view(view: dict) -> dict[str, int]:
@@ -312,7 +398,18 @@ class AvatarProfileStore:
     def _voices_sync(self) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute("SELECT v.*,(SELECT group_concat(avatar_id) FROM avatar_profiles p WHERE p.voice_asset_id=v.id) bound FROM voice_assets v WHERE archived_at IS NULL ORDER BY system DESC,created_at DESC").fetchall()
-            return [self._voice_public(row) for row in rows]
+            profiles = db.execute("SELECT avatar_id,emotion_refs_json FROM avatar_profiles").fetchall()
+            output = []
+            for row in rows:
+                item = self._voice_public(row)
+                bound = set(item["bound_profiles"])
+                for profile in profiles:
+                    refs = self._decode(profile["emotion_refs_json"], {})
+                    if row["id"] in refs.values():
+                        bound.add(profile["avatar_id"])
+                item["bound_profiles"] = sorted(bound)
+                output.append(item)
+            return output
 
     @staticmethod
     def _voice_public(row: sqlite3.Row) -> dict[str, Any]:
@@ -398,7 +495,12 @@ class AvatarProfileStore:
             if not row: raise KeyError("voice")
             if row["system"]: raise ValueError("系统默认音色不能删除")
             bound = db.execute("SELECT avatar_id FROM avatar_profiles WHERE voice_asset_id=?", (voice_id,)).fetchall()
-            if bound: raise ValueError("音色仍被角色使用：" + "、".join(item[0] for item in bound))
+            bound_ids = {item[0] for item in bound}
+            for profile in db.execute("SELECT avatar_id,emotion_refs_json FROM avatar_profiles").fetchall():
+                if voice_id in self._decode(profile["emotion_refs_json"], {}).values():
+                    bound_ids.add(profile["avatar_id"])
+            if bound_ids:
+                raise ValueError("音色仍被角色使用：" + "、".join(sorted(bound_ids)))
             db.execute("UPDATE voice_assets SET archived_at=?,updated_at=? WHERE id=?", (time.time(), time.time(), voice_id))
 
     async def voice_path(self, voice_id: str) -> Path:

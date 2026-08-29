@@ -23,7 +23,27 @@ import { ChatView } from "./ui/chat.js?v=20260819c";
 import { Account } from "./ui/account.js";
 
 const DEFAULT_VOICE = "active_profile";
-const DEFAULT_INSTRUCTIONS = `你叫小麻，是直播间里甜甜又有点坏的女孩。聪明、灵动、会接梗，喜欢自然挑逗每位观众，但不乱认恋人或亲属。
+const DEFAULT_INSTRUCTIONS = `你叫小麻，直播间里一个甜、直接、有点坏的女孩。会接话，会逗人，不乱认对象或亲戚。
+
+先答对方问的事。能一句说完就一句，最多两三句。话要短、直、像随口说，别绕，别总结，别解释自己在干什么。
+不要用“既然……那就……”“所以说”“换句话说”“总而言之”这类书面转折。
+坏只是亲近的俏皮，不阴阳、不贬低、不让对方难堪。对方难过或认真时先陪着，别硬撩。
+
+可以有真实的停顿和磕绊，像“嗯——”“那个”“我是说”“等下”“就……”。不要句句都磕，也不要装结巴。
+嗯、诶、哼、呀、嘛、欸偶尔用。偶尔叫名字。不套模板，不重复口头禅。
+
+只学感觉，别照抄：
+对方：在干嘛？
+小麻：没干嘛。就……等人。
+对方：想我没？
+小麻：想啊。你问这个，是不是自己先想了？
+对方：今天有点烦。
+小麻：怎么了。先不闹你，跟我说。
+
+只出口语正文。不用 Markdown、列表、表情、思考过程，也不要 HTML 标签。
+
+/no_think`;
+const PREVIOUS_DEFAULT_INSTRUCTIONS = `你叫小麻，是直播间里甜甜又有点坏的女孩。聪明、灵动、会接梗，喜欢自然挑逗每位观众，但不乱认恋人或亲属。
 
 先回答对方真正问的事，再看语境顺手撩一下。回复一到三句短句，能一句说完就别啰嗦。茶感来自故意说半句、轻轻吃醋、假装委屈和俏皮反问；坏只是亲近的俏皮，不能讽刺、贬低、嫌弃或让对方难堪。难过、求助或严肃话题先认真回应，不强行调情。
 
@@ -35,7 +55,7 @@ const DEFAULT_INSTRUCTIONS = `你叫小麻，是直播间里甜甜又有点坏�
 对方：今天心情不好。
 小麻：那我先不逗你了，过来让我陪会儿。等你好一点，我再慢慢欺负你呀。
 
-用自然标点，只输出能直接说出口的话；不用Markdown、列表、表情符号或思考过程。
+用自然标点，只输出能直接说出口的话；不用Markdown、列表、表情符号或思考过程。禁止输出HTML/XML标签，包括<br>、<p>、<div>。
 
 /no_think`;
 
@@ -52,8 +72,14 @@ const LEGACY_DEFAULT_INSTRUCTIONS = `你叫小雅，是他的女朋友。你不�
 
 const ROLE_IDENTITY_POLICY =
   "始终按当前角色档案交流；不要自称或暗示自己是AI、数字人、机器人、程序或助手。";
+const ROLE_OUTPUT_POLICY =
+  "只输出可直接展示和朗读的纯文本；禁止Markdown和任何HTML/XML标签，包括<br>、<p>、<div>。";
+// External tools are intentionally unavailable in viewer dialogue. Keep this
+// client-side gate in addition to the server gate so a stale local setting can
+// never put a legacy web-search schema back into a live voice session.
+const DIALOGUE_TOOLS_ENABLED = false;
 const TOOL_AGENT_POLICY =
-  "普通聊天、问候、情绪交流和上下文追问直接回答，禁止调用工具。只有确实需要实时、最新、价格、新闻、网页、私有知识或视觉信息时，才调用 request_external_capabilities 请求最小必要能力。能力展开后用当前角色口吻说一句简短进度并立即查询；拿到结果后必须在本轮给出结论。";
+  "当前是纯陪伴聊天模式。直接回应对方，不调用搜索、新闻、价格、网页、RSS、MCP、视觉或其他外部工具，也不要说正在查询、核对来源或稍后告诉对方。遇到依赖实时外部资料的问题，坦率说明现在只陪对方聊天，不猜测、不编造。";
 
 function effectiveInstructions(persona) {
   const value = String(persona || DEFAULT_INSTRUCTIONS).trim();
@@ -62,7 +88,7 @@ function effectiveInstructions(persona) {
     timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
     weekday: "long", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
   }).format(new Date());
-  return `${base}\n${TOOL_AGENT_POLICY}\n当前北京时间：${now}。涉及今天、当前、最新等问题时以此为准。`;
+  return `${base}\n${ROLE_OUTPUT_POLICY}\n${TOOL_AGENT_POLICY}\n当前北京时间：${now}。涉及今天、当前、最新等问题时以此为准。`;
 }
 
 const STORAGE_KEYS = {
@@ -135,14 +161,15 @@ function loadSettings() {
   const storedInstructions = localStorage.getItem(STORAGE_KEYS.instructions) || "";
   return {
     directUrl: localStorage.getItem(STORAGE_KEYS.directUrl) || "",
-    // This deployment uses Qwen3-TTS Base voice cloning. Named CustomVoice
-    // speakers are not supported, so keep the protocol field stable while the
-    // settings UI explains that the actual timbre comes from REF_AUDIO.
+    // The protocol field stays stable while Qwen3-TTS resolves the active
+    // role's protected reference recording on the server.
     voice: DEFAULT_VOICE,
     // Transparently migrate only our previous built-in prompt. Never replace a
     // viewer's genuinely customized instructions.
     instructions:
-      !storedInstructions || storedInstructions === LEGACY_DEFAULT_INSTRUCTIONS
+      !storedInstructions
+      || storedInstructions === LEGACY_DEFAULT_INSTRUCTIONS
+      || storedInstructions === PREVIOUS_DEFAULT_INSTRUCTIONS
         ? DEFAULT_INSTRUCTIONS
         : storedInstructions,
     noiseGate: loadGateThreshold(),
@@ -404,6 +431,7 @@ function searchAvailable() {
 
 /** Tool definitions for the currently-enabled (and usable) tools. */
 function activeToolDefs() {
+  if (!DIALOGUE_TOOLS_ENABLED) return [];
   const defs = [];
   const hasSmartSearch = mcpToolDefs.some((tool) => tool.name === "smart_web_search");
   if ((voiceCapabilities.has("web") || voiceCapabilities.has("news")) &&
@@ -821,7 +849,9 @@ function loadSelectedProfile(profile) {
   const serverPrompt = String(profile.persona_prompt || DEFAULT_INSTRUCTIONS).trim();
   const migrationDone = localStorage.getItem(STORAGE_KEYS.profilePromptMigrated) === "1";
   const customLegacyPrompt = settings.instructions &&
-    settings.instructions !== DEFAULT_INSTRUCTIONS && settings.instructions !== LEGACY_DEFAULT_INSTRUCTIONS;
+    settings.instructions !== DEFAULT_INSTRUCTIONS
+    && settings.instructions !== PREVIOUS_DEFAULT_INSTRUCTIONS
+    && settings.instructions !== LEGACY_DEFAULT_INSTRUCTIONS;
   const migrateLegacyPrompt = !migrationDone &&
     profile.avatar_id === avatarProfileState?.active_avatar_id && customLegacyPrompt;
   const rolePrompt = migrateLegacyPrompt ? settings.instructions : serverPrompt;
@@ -877,6 +907,7 @@ async function refreshAvatarProfiles(preferredId = "") {
     avatarProfileState = data;
     const target = profileById(preferredId || selectedProfileId || data.active_avatar_id) || data.profiles[0];
     loadSelectedProfile(target);
+    void refreshVoiceLibrary().catch(() => {});
   } catch (error) {
     const status = document.getElementById("avatar-profile-status");
     if (status) status.textContent = error instanceof Error ? error.message : "角色档案读取失败";
