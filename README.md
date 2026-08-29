@@ -78,7 +78,7 @@ flowchart LR
     N --> A
 ```
 
-音频不会在浏览器和数字人之间分别走两套播放器。TTS 音频进入 AVTR-1 后先与视频共用同一个封装时钟，再以 H.264 Baseline + Opus 发布到 MediaMTX。浏览器优先通过 WHEP 建立 WebRTC，使用 RTP 抖动缓冲、NACK、Opus FEC 和弱网统计；协商或 ICE 失败时自动回退到原有 HTTP-FLV。网关同时生成“语音原轨”和“语音加背景音乐”两种时间戳一致的直播变体；每位观众可用 LIVE 旁的喇叭独立选择，关闭音乐不会影响数字人语音，也不会改变其他观众。`AVATAR_TEE_PREROLL_MS` 提供整轮首播水位，欠载后动态提高恢复水位，连续稳定时再逐步回落。AVTR 仍按五帧一批推理，但发布层固定输出 25 FPS；推理偶尔迟到时复用上一张原始帧补齐时间轴，不再向 WebRTC 发送断裂的视频节拍。
+音频不会在浏览器和数字人之间分别走两套播放器。TTS 音频进入 AVTR-1 后先与视频共用同一个封装时钟，再以 H.264 Baseline + Opus 发布到 MediaMTX。浏览器优先通过 WHEP 建立 WebRTC，使用 RTP 抖动缓冲、NACK、Opus FEC 和弱网统计；协商或 ICE 失败时自动回退到原有 HTTP-FLV。网关同时生成“语音原轨”和“语音加背景音乐”两种时间戳一致的直播变体；每位观众可用 LIVE 旁的喇叭独立选择，关闭音乐不会影响数字人语音，也不会改变其他观众。`AVATAR_TEE_UPLOAD_PREROLL_MS` 控制上传到网关前的短缓冲，`AVTR1_OUTPUT_RESERVOIR_MS` 才是整轮首播水位；欠载后动态提高恢复水位，连续稳定时再逐步回落。AVTR 仍按五帧一批推理，但发布层固定输出 25 FPS；推理偶尔迟到时复用上一张原始帧补齐时间轴，不再向 WebRTC 发送断裂的视频节拍。
 
 ## 技术栈
 
@@ -266,10 +266,12 @@ SEARXNG_URL=
 | `TTS_TOP_P` | `0.85` | TTS 核采样范围 |
 | `TTS_DO_SAMPLE` | `1` | 保留自然采样；设为 `0` 会更固定但可能更机械 |
 | `TTS_REPETITION_PENALTY` | `1.05` | 声码重复惩罚 |
-| `AVATAR_TEE_PREROLL_MS` | `800` | 数字人整轮语音首播水位；必须覆盖 AVTR-1 约 405ms 的前瞻窗口和短时推理抖动 |
+| `AVATAR_TEE_UPLOAD_PREROLL_MS` | `320` | TTS 上传到网关前的短缓冲；真正开播水位看下面的 AVTR 输出水库 |
+| `AVATAR_TEE_SEGMENT_GAP_MS` | `1200` | 一句结束后再等这么久才收尾，避免慢续写把口型切断 |
+| `AVTR1_SPEECH_START_BUFFER_MS` | `600` | 网关开始对口型前至少攒这么多音频 |
 | `AVTR1_AUDIO_REBUFFER_STEP_MS` | `200` | 一轮语音发生欠载后，动态恢复水位的递增步长 |
 | `AVTR1_AUDIO_MAX_BUFFER_MS` | `1400` | 动态语音水位上限；连续稳定三轮后会逐步回落 |
-| `AVTR1_OUTPUT_RESERVOIR_MS` | `480` | AVTR 渲染后的同步音画输出水位目标 |
+| `AVTR1_OUTPUT_RESERVOIR_MS` | `800` | AVTR 渲染后的同步音画输出水位目标 |
 | `AVTR1_MAX_SPEECH_SECONDS` | `90` | 单轮数字人音频安全上限；主动新闻整轮预生成后播放，避免长播报裁掉开头 |
 | `AVTR1_H264_BITRATE` | `900000` | 直播视频码率，带宽不足时可适当降低 |
 | `WEBRTC_ENABLED` | `1` | WebRTC/WHEP 主播放；关闭后只使用 HTTP-FLV |
@@ -307,7 +309,7 @@ SEARXNG_URL=
 | `AVTR1_IDLE_BREATH_FADE_IN_STEP` | `0.08` | 静音后每个渲染块的呼吸淡入步长 |
 | `AVTR1_IDLE_BREATH_FADE_OUT_STEP` | `0.18` | 开始说话后每个渲染块的呼吸淡出步长 |
 | `BACKGROUND_MUSIC_ENABLED` | `1` | 循环播放背景纯音乐 |
-| `BACKGROUND_MUSIC_DIR` | `.` | MP3 播放列表目录；相对路径从项目根目录解析 |
+| `BACKGROUND_MUSIC_DIR` | `assets/music` | MP3 播放列表目录；相对路径从项目根目录解析 |
 | `BACKGROUND_MUSIC_VOLUME` | `0.16` | 无人说话时的背景音乐音量 |
 | `BACKGROUND_MUSIC_DUCK_VOLUME` | `0.04` | 数字人或用户说话时的背景音乐音量 |
 | `BACKGROUND_MUSIC_USER_RMS` | `450` | 触发用户说话闪避的麦克风 RMS 阈值 |
@@ -426,7 +428,7 @@ s2s/.venv/bin/python -m unittest discover -s tests -v
 <details>
 <summary><strong>声音先出来，口型随后才动怎么办？</strong></summary>
 
-确认状态显示 WebRTC 或 HTTP-FLV 兼容模式，而不是浏览器本地 TTS 音频；两种模式均使用统一音画链路。若服务器瞬时负载较高，可适当增大 `AVATAR_TEE_PREROLL_MS`，并检查 `logs/avatar_gw.log` 与 `logs/avtr1_renderer.log` 是否出现渲染积压。
+确认状态显示 WebRTC 或 HTTP-FLV 兼容模式，而不是浏览器本地 TTS 音频；两种模式均使用统一音画链路。若服务器瞬时负载较高，可适当增大 `AVTR1_OUTPUT_RESERVOIR_MS`，并检查 `logs/avatar_gw.log` 与 `logs/avtr1_renderer.log` 是否出现渲染积压。
 
 </details>
 
