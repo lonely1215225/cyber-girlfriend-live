@@ -22,6 +22,13 @@ HIDDEN_PROTOCOL_TAGS = frozenset(
     }
 )
 
+# Presentation markup is never valid spoken/live-room text. Protocol blocks
+# suppress their contents; formatting tags are removed while text is retained.
+PUBLIC_BREAK_TAGS = frozenset({"br", "p", "div", "li", "ul", "ol", "blockquote", "pre"})
+PUBLIC_INLINE_TAGS = frozenset(
+    {"span", "strong", "em", "b", "i", "u", "s", "a", "code", "small", "mark"}
+)
+
 
 class PublicOutputFilter:
     """Incrementally remove private XML-like blocks split across any chunks."""
@@ -65,6 +72,11 @@ class PublicOutputFilter:
                     self.suppressed_depth = max(0, self.suppressed_depth - 1)
                 elif not tag_body.endswith("/"):
                     self.suppressed_depth += 1
+            elif tag_name in PUBLIC_BREAK_TAGS:
+                if not self.suppressed_depth and tag_name in {"br", "p", "div", "li"}:
+                    output.append("\n")
+            elif tag_name in PUBLIC_INLINE_TAGS:
+                pass
             elif not self.suppressed_depth:
                 output.append(raw_tag)
             self.buffer = self.buffer[closing + 1 :]

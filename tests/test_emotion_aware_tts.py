@@ -185,9 +185,27 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(first_cue.delay_ms, 0)
         self.assertGreater(second_cue.delay_ms, 0)
 
+    def test_streamed_compact_control_is_not_eaten_as_legacy_fields(self) -> None:
+        control = DeliveryControlFilter()
+        visible = "".join(
+            (
+                control.feed("happy 0.58 neutral 0.08"),
+                control.feed(" none 1.00\n先说正事。"),
+            )
+        )
+        self.assertEqual(visible, "先说正事。")
+        cue = publish_expression(visible)
+        self.assertEqual(cue.source, "llm")
+        self.assertEqual(cue.profile, "happy")
+        self.assertEqual(cue.vocal_emotion, "neutral")
+        self.assertAlmostEqual(cue.vocal_intensity, 0.08)
+
     def test_natural_text_starting_with_profile_word_is_preserved(self) -> None:
         control = DeliveryControlFilter()
-        self.assertEqual(control.feed("wink at the camera。"), "wink at the camera。")
+        visible = control.feed("laugh 一下就好，别太认真。", final=True)
+        self.assertEqual(visible, "laugh 一下就好，别太认真。")
+        cue = publish_expression(visible)
+        self.assertEqual(cue.source, "fallback")
 
     def test_visual_hold_is_based_on_length_not_phrase_matching(self) -> None:
         self.assertEqual(cue_duration_ms("甲乙丙丁", "happy"), cue_duration_ms("春夏秋冬", "happy"))
