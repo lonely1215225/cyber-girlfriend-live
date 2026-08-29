@@ -5,6 +5,10 @@
 # Runtime state
 /logs/
 /run/
+/auto.crt
+/auto.key
+/speech.wav
+/artifacts/
 /data/*.sqlite3*
 /data/*.sqlite
 /data/*.db
@@ -14,6 +18,8 @@
 /assets/expressions/
 /docs/demos/avtr-expression-test/
 /.cache/
+.pytest_cache/
+.ruff_cache/
 
 # Downloaded models and generated environments
 /models/
