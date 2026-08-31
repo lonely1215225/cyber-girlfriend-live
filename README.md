@@ -183,7 +183,9 @@ WebRTC 媒体默认使用 `8189/UDP`，`8190/TCP` 是 UDP 被封时的次级 ICE
 | --- | ---: | --- |
 | `LLM_NAME` | `jaahas/qwen3.5-uncensored:9b` | Ollama 模型名 |
 | `LLM_NUM_CTX` | `4096` | 模型上下文窗口 token 数 |
-| `LLM_NUM_PREDICT` | `128` | 普通回复最大生成 token 数 |
+| `LLM_NUM_PREDICT` | `256` | 普通回复最大生成 token 数（含隐藏表演标签） |
+| `LLM_NEWS_NUM_PREDICT` | `256` | 无人连线新闻播报的最大生成 token 数 |
+| `LLM_LOCAL_CONVERSATION_NUM_PREDICT` | `160` | 本地闲聊/评论回复的最大生成 token 数 |
 | `GROK_ENABLED` | `0` | 使用本机 Grok CLI OAuth 会话作为高质量主模型；异常时自动降级到 Ollama |
 | `GROK_PROXY_BASE_URL` | `http://127.0.0.1:18080/v1` | 私有 Grok Responses 代理地址，只应监听 loopback |
 | `GROK_MODEL` | `grok-4.6` | Grok 主模型名称 |

@@ -18,6 +18,8 @@ from ollama_thinkless import (  # noqa: E402
     _is_proactive_broadcast_request,
     _is_public_comment_request,
     _num_predict_for_messages,
+    _should_finish_incomplete,
+    _spoken_text_is_incomplete,
     clean_model_output,
     completed_response,
     local_compaction,
@@ -123,6 +125,24 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         # The former 48-token cap could stop a welcome in the middle of a word.
         self.assertGreaterEqual(_num_predict_for_messages(messages), 96)
         self.assertFalse(_is_room_welcome_request([{"role": "user", "content": "普通聊天"}]))
+
+    def test_news_broadcast_gets_enough_tokens_for_a_complete_recap(self):
+        messages = [
+            {"role": "system", "content": "现在是无人连线时的直播间主动播报，不要回复某位观众。"},
+            {"role": "user", "content": "播报这条新闻"},
+        ]
+        self.assertGreaterEqual(_num_predict_for_messages(messages), 160)
+
+    def test_half_sentence_news_is_treated_as_incomplete(self):
+        text = (
+            "<e serious 0.62 serious 0.14 none 1.00>"
+            "啧……刚才看到新闻，心一下子揪起来了。"
+            "真的让人火大，大人明明在旁边却没"
+        )
+        self.assertTrue(_spoken_text_is_incomplete(text))
+        self.assertTrue(_should_finish_incomplete("length", text, []))
+        self.assertFalse(_should_finish_incomplete("stop", text + "管。", []))
+        self.assertFalse(_spoken_text_is_incomplete("你们怎么看？"))
 
     def test_translates_responses_api_tools_for_ollama(self):
         tools = to_ollama_tools(

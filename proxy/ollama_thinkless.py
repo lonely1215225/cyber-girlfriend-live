@@ -30,6 +30,17 @@ WELCOME_RETRY_NUM_PREDICT = max(
     WELCOME_NUM_PREDICT,
     int(os.environ.get("LLM_WELCOME_RETRY_NUM_PREDICT", "192")),
 )
+NEWS_NUM_PREDICT = max(160, int(os.environ.get("LLM_NEWS_NUM_PREDICT", "256")))
+NEWS_CONTINUE_NUM_PREDICT = max(
+    64, int(os.environ.get("LLM_NEWS_CONTINUE_NUM_PREDICT", "128"))
+)
+NEWS_RETRY_NUM_PREDICT = max(
+    NEWS_NUM_PREDICT,
+    int(os.environ.get("LLM_NEWS_RETRY_NUM_PREDICT", "256")),
+)
+DIALOGUE_CONTINUE_NUM_PREDICT = max(
+    48, int(os.environ.get("LLM_DIALOGUE_CONTINUE_NUM_PREDICT", "128"))
+)
 COMPACTION_MODE = os.environ.get("LLM_COMPACTION_MODE", "local").strip().lower()
 COMPACTION_MAX_CHARS = max(300, int(os.environ.get("LLM_COMPACTION_MAX_CHARS", "900")))
 GROK_ENABLED = os.environ.get("GROK_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -42,9 +53,13 @@ GROK_TIMEOUT_SECONDS = max(2.0, float(os.environ.get("GROK_TIMEOUT_SECONDS", "45
 LOCAL_READ_TIMEOUT_SECONDS = max(
     4.0, float(os.environ.get("LLM_LOCAL_READ_TIMEOUT_SECONDS", "12.0"))
 )
+BUFFERED_READ_TIMEOUT_SECONDS = max(
+    LOCAL_READ_TIMEOUT_SECONDS,
+    float(os.environ.get("LLM_BUFFERED_READ_TIMEOUT_SECONDS", "45")),
+)
 LOCAL_TIMEOUT_REPLY = "嗯？刚才没接稳，你再说一遍嘛。"
 LOCAL_CONVERSATION_NUM_PREDICT = max(
-    48, int(os.environ.get("LLM_LOCAL_CONVERSATION_NUM_PREDICT", "96"))
+    80, int(os.environ.get("LLM_LOCAL_CONVERSATION_NUM_PREDICT", "160"))
 )
 LOCAL_LEAD_ENABLED = os.environ.get("LOCAL_LEAD_ENABLED", "0").strip().lower() in {
     "1", "true", "yes", "on"
@@ -208,6 +223,158 @@ def _is_proactive_broadcast_request(messages: list[dict]) -> bool:
     )
 
 
+_SENTENCE_END_CHARS = frozenset("。！？!?～~…")
+_DELIVERY_TAG_RE = re.compile(r"<e\b[^>]*>", re.IGNORECASE)
+_DELIVERY_TAG_OPEN_RE = re.compile(r"<e\b[^>]*$", re.IGNORECASE)
+
+
+def _visible_spoken_text(text: str) -> str:
+    """Spoken prose after stripping protocol and hidden delivery tags."""
+    visible = clean_model_output(text)
+    visible = _DELIVERY_TAG_RE.sub("", visible)
+    visible = _DELIVERY_TAG_OPEN_RE.sub("", visible)
+    return visible.strip()
+
+
+def _spoken_text_is_incomplete(text: str) -> bool:
+    """Whether visible speech stops mid-clause instead of at a sentence end."""
+    visible = _visible_spoken_text(text)
+    if not visible:
+        return False
+    visible = visible.rstrip("\"'”’）)】」 \t")
+    return bool(visible) and visible[-1] not in _SENTENCE_END_CHARS
+
+
+def _should_finish_incomplete(done_reason: str, text: str, tool_calls: list | None) -> bool:
+    if tool_calls:
+        return False
+    if not _visible_spoken_text(text):
+        return False
+    return done_reason == "length" or _spoken_text_is_incomplete(text)
+
+
+def _shorter_complete_retry_messages(
+    messages: list[dict], raw_text: str, kind: str
+) -> list[dict]:
+    if kind == "welcome":
+        hint = (
+            "上一句因长度限制没有说完。请重新生成一句更短、语义完整的欢迎词；"
+            "仍遵守原要求，并用句号、问号、感叹号或波浪号自然收尾。"
+        )
+    elif kind == "news":
+        hint = (
+            "上一段因长度限制没有说完。请重新生成更短、语义完整的播报；"
+            "两到三句讲清事实，再加一句邀请，必须用句号、问号或感叹号收尾，不要半句。"
+        )
+    else:
+        hint = (
+            "上一段因长度限制没有说完。请重新生成更短、语义完整的回复；"
+            "仍遵守原要求，必须用句号、问号或感叹号收尾。"
+        )
+    return [
+        *messages,
+        {"role": "assistant", "content": raw_text},
+        {"role": "user", "content": hint},
+    ]
+
+
+def _continuation_messages(messages: list[dict], raw_text: str) -> list[dict]:
+    return [
+        *messages,
+        {"role": "assistant", "content": raw_text},
+        {
+            "role": "user",
+            "content": (
+                "上一段因长度限制在半句处停住了。从断开的最后一个字后面接着写完，"
+                "不要重复已经写出的内容，写完用句号、问号或感叹号收尾。"
+            ),
+        },
+    ]
+
+
+def _ollama_chat_json(
+    model: str,
+    messages: list[dict],
+    tools: list[dict] | None,
+    *,
+    num_predict: int | None = None,
+    timeout_s: float | None = None,
+) -> dict:
+    with ollama_chat(
+        model,
+        messages,
+        False,
+        tools,
+        num_predict_override=num_predict,
+        timeout_s=timeout_s,
+    ) as response:
+        return json.loads(response.read())
+
+
+def _finish_buffered_local_chat(
+    model: str,
+    messages: list[dict],
+    tools: list[dict] | None,
+    *,
+    kind: str,
+    first_limit: int,
+    retry_limit: int,
+    continue_limit: int | None = None,
+) -> tuple[dict, int, int]:
+    """Generate one complete turn before any token is exposed downstream."""
+    timeout_s = BUFFERED_READ_TIMEOUT_SECONDS
+    data = _ollama_chat_json(
+        model, messages, tools, num_predict=first_limit, timeout_s=timeout_s
+    )
+    message = data.get("message") or {}
+    raw_text = str(message.get("content") or "")
+    done_reason = str(data.get("done_reason") or "")
+    tool_calls = message.get("tool_calls") or []
+    in_tok = int(data.get("prompt_eval_count") or 0)
+    out_tok = int(data.get("eval_count") or 0)
+
+    if continue_limit and _should_finish_incomplete(done_reason, raw_text, tool_calls):
+        print(
+            f"[thinkless] {kind} incomplete (reason={done_reason or 'stop'}); continuing",
+            flush=True,
+        )
+        continued = _ollama_chat_json(
+            model,
+            _continuation_messages(messages, raw_text),
+            tools,
+            num_predict=continue_limit,
+            timeout_s=timeout_s,
+        )
+        extra = str((continued.get("message") or {}).get("content") or "")
+        raw_text = f"{raw_text}{extra}"
+        done_reason = str(continued.get("done_reason") or "")
+        in_tok += int(continued.get("prompt_eval_count") or 0)
+        out_tok += int(continued.get("eval_count") or 0)
+        message = dict(message)
+        message["content"] = raw_text
+        data = dict(data)
+        data["message"] = message
+        data["done_reason"] = done_reason
+
+    if _should_finish_incomplete(done_reason, raw_text, tool_calls):
+        print(
+            f"[thinkless] {kind} still incomplete; regenerating a shorter complete line",
+            flush=True,
+        )
+        data = _ollama_chat_json(
+            model,
+            _shorter_complete_retry_messages(messages, raw_text, kind),
+            tools,
+            num_predict=retry_limit,
+            timeout_s=timeout_s,
+        )
+        message = data.get("message") or {}
+        raw_text = str(message.get("content") or "")
+        in_tok += int(data.get("prompt_eval_count") or 0)
+        out_tok += int(data.get("eval_count") or 0)
+    return data, in_tok, out_tok
+
+
 def _is_public_comment_request(messages: list[dict]) -> bool:
     """Route room comments to the stronger conversational model.
 
@@ -300,11 +467,13 @@ def local_compaction(messages: list[dict]) -> str:
 
 def _num_predict_for_messages(messages: list[dict]) -> int:
     """Reserve enough output for both the hidden delivery plan and spoken text."""
-    num_predict = int(os.environ.get("LLM_NUM_PREDICT", "128"))
+    num_predict = int(os.environ.get("LLM_NUM_PREDICT", "256"))
     if _is_compaction_request(messages):
         return COMPACTION_NUM_PREDICT
     if _is_room_welcome_request(messages):
         return WELCOME_NUM_PREDICT
+    if _is_proactive_broadcast_request(messages):
+        return NEWS_NUM_PREDICT
     return num_predict
 
 
@@ -315,6 +484,7 @@ def ollama_chat(
     tools: list[dict] | None = None,
     *,
     num_predict_override: int | None = None,
+    timeout_s: float | None = None,
 ):
     # Default Ollama ctx for this 9B is 262144. Prompt eval then takes ~8s even
     # for a short line, and under GPU contention it exceeds the s2s 20s timeout.
@@ -323,6 +493,11 @@ def ollama_chat(
         max(1, int(num_predict_override))
         if num_predict_override is not None
         else _num_predict_for_messages(messages)
+    )
+    read_timeout = (
+        LOCAL_READ_TIMEOUT_SECONDS
+        if timeout_s is None
+        else max(LOCAL_READ_TIMEOUT_SECONDS, float(timeout_s))
     )
     payload = {
             "model": model,
@@ -347,7 +522,7 @@ def ollama_chat(
     # urllib applies this as a socket inactivity timeout. A healthy streaming
     # model keeps producing data; a wedged GPU/request is cut off before the
     # realtime pipeline's much slower 20-second outer timeout.
-    return urlopen(req, timeout=LOCAL_READ_TIMEOUT_SECONDS)
+    return urlopen(req, timeout=read_timeout)
 
 
 def grok_response(
@@ -1030,15 +1205,34 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[thinkless] route provider=ollama reason={reason}", flush=True)
             started = time.monotonic()
             try:
-                local_limit = (
-                    LOCAL_CONVERSATION_NUM_PREDICT
-                    if ordinary_no_tool_turn else None
-                )
-                with ollama_chat(
-                    model, messages, False, tools,
-                    num_predict_override=local_limit,
-                ) as r:
-                    data = json.loads(r.read())
+                if fast_welcome or proactive_broadcast:
+                    data, _, _ = _finish_buffered_local_chat(
+                        model,
+                        messages,
+                        tools,
+                        kind="welcome" if fast_welcome else "news",
+                        first_limit=(
+                            WELCOME_NUM_PREDICT if fast_welcome else NEWS_NUM_PREDICT
+                        ),
+                        retry_limit=(
+                            WELCOME_RETRY_NUM_PREDICT
+                            if fast_welcome
+                            else NEWS_RETRY_NUM_PREDICT
+                        ),
+                        continue_limit=(
+                            None if fast_welcome else NEWS_CONTINUE_NUM_PREDICT
+                        ),
+                    )
+                else:
+                    local_limit = (
+                        LOCAL_CONVERSATION_NUM_PREDICT
+                        if ordinary_no_tool_turn else None
+                    )
+                    with ollama_chat(
+                        model, messages, False, tools,
+                        num_predict_override=local_limit,
+                    ) as r:
+                        data = json.loads(r.read())
             except (TimeoutError, OSError, HTTPError, URLError, json.JSONDecodeError) as exc:
                 print(
                     f"[thinkless] local response fallback after "
@@ -1097,102 +1291,96 @@ class Handler(BaseHTTPRequestHandler):
         )
 
         local_done_reason = ""
+        raw_parts: list[str] = []
+
+        def emit_delta(piece: str) -> None:
+            nonlocal first_delta_at
+            if not piece:
+                return
+            if first_delta_at is None:
+                first_delta_at = time.monotonic()
+            full.append(piece)
+            sse(
+                "response.output_text.delta",
+                {
+                    "type": "response.output_text.delta",
+                    "delta": piece,
+                    "content_index": 0,
+                    "item_id": mid,
+                    "output_index": 0,
+                },
+            )
+
+        def consume_stream(chat_messages: list[dict], limit: int | None) -> None:
+            nonlocal in_tok, out_tok, local_done_reason
+            with ollama_chat(
+                model, chat_messages, True, tools,
+                num_predict_override=limit,
+            ) as response:
+                for raw in response:
+                    line = raw.decode("utf-8", "ignore").strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    in_tok = int(data.get("prompt_eval_count") or in_tok)
+                    out_tok = int(data.get("eval_count") or out_tok)
+                    if data.get("done"):
+                        local_done_reason = str(data.get("done_reason") or "")
+                    raw_piece = ((data.get("message") or {}).get("content")) or ""
+                    chunk_calls = ((data.get("message") or {}).get("tool_calls")) or []
+                    if chunk_calls:
+                        if first_delta_at is None:
+                            first_delta_at = time.monotonic()
+                        tool_calls.extend(chunk_calls)
+                    if raw_piece:
+                        raw_parts.append(raw_piece)
+                    emit_delta(sanitizer.feed(raw_piece))
+
         try:
-            # A welcome is short, but it must be delivered atomically. Buffer
-            # it until Ollama reports a clean finish so a token-limit response
-            # can never become a half-spoken greeting. Normal dialogue keeps
-            # the existing token stream and therefore its minimum TTFT.
-            if fast_welcome:
-                with ollama_chat(model, messages, False, tools) as r:
-                    data = json.loads(r.read())
+            # Welcomes and unattended news must be complete before any token
+            # is exposed. A token-limit cutoff previously reached the room as
+            # a half sentence. Interactive dialogue keeps the live stream.
+            if fast_welcome or proactive_broadcast:
+                kind = "welcome" if fast_welcome else "news"
+                data, in_tok, out_tok = _finish_buffered_local_chat(
+                    model,
+                    messages,
+                    tools,
+                    kind=kind,
+                    first_limit=(
+                        WELCOME_NUM_PREDICT if fast_welcome else NEWS_NUM_PREDICT
+                    ),
+                    retry_limit=(
+                        WELCOME_RETRY_NUM_PREDICT
+                        if fast_welcome
+                        else NEWS_RETRY_NUM_PREDICT
+                    ),
+                    continue_limit=(
+                        None if fast_welcome else NEWS_CONTINUE_NUM_PREDICT
+                    ),
+                )
                 msg = data.get("message") or {}
                 raw_text = str(msg.get("content") or "")
                 local_done_reason = str(data.get("done_reason") or "")
-                in_tok = int(data.get("prompt_eval_count") or 0)
-                out_tok = int(data.get("eval_count") or 0)
-                if local_done_reason == "length":
-                    print(
-                        "[thinkless] welcome hit output limit; regenerating a shorter complete line",
-                        flush=True,
-                    )
-                    retry_messages = [
-                        *messages,
-                        {"role": "assistant", "content": raw_text},
-                        {
-                            "role": "user",
-                            "content": (
-                                "上一句因长度限制没有说完。请重新生成一句更短、语义完整的欢迎词；"
-                                "仍遵守原要求，并用句号、问号、感叹号或波浪号自然收尾。"
-                            ),
-                        },
-                    ]
-                    with ollama_chat(
-                        model,
-                        retry_messages,
-                        False,
-                        tools,
-                        num_predict_override=WELCOME_RETRY_NUM_PREDICT,
-                    ) as r:
-                        data = json.loads(r.read())
-                    msg = data.get("message") or {}
-                    raw_text = str(msg.get("content") or "")
-                    local_done_reason = str(data.get("done_reason") or "")
-                    in_tok += int(data.get("prompt_eval_count") or 0)
-                    out_tok += int(data.get("eval_count") or 0)
-                piece = sanitizer.feed(raw_text)
-                if piece:
-                    first_delta_at = time.monotonic()
-                    full.append(piece)
-                    sse(
-                        "response.output_text.delta",
-                        {
-                            "type": "response.output_text.delta",
-                            "delta": piece,
-                            "content_index": 0,
-                            "item_id": mid,
-                            "output_index": 0,
-                        },
-                    )
+                emit_delta(sanitizer.feed(raw_text))
                 tool_calls.extend(msg.get("tool_calls") or [])
             else:
                 local_limit = (
                     LOCAL_CONVERSATION_NUM_PREDICT
                     if ordinary_no_tool_turn else None
                 )
-                with ollama_chat(
-                    model, messages, True, tools,
-                    num_predict_override=local_limit,
-                ) as r:
-                    for raw in r:
-                        line = raw.decode("utf-8", "ignore").strip()
-                        if not line:
-                            continue
-                        data = json.loads(line)
-                        in_tok = int(data.get("prompt_eval_count") or in_tok)
-                        out_tok = int(data.get("eval_count") or out_tok)
-                        if data.get("done"):
-                            local_done_reason = str(data.get("done_reason") or "")
-                        raw_piece = ((data.get("message") or {}).get("content")) or ""
-                        chunk_calls = ((data.get("message") or {}).get("tool_calls")) or []
-                        if chunk_calls:
-                            if first_delta_at is None:
-                                first_delta_at = time.monotonic()
-                            tool_calls.extend(chunk_calls)
-                        piece = sanitizer.feed(raw_piece)
-                        if piece:
-                            if first_delta_at is None:
-                                first_delta_at = time.monotonic()
-                            full.append(piece)
-                            sse(
-                                "response.output_text.delta",
-                                {
-                                    "type": "response.output_text.delta",
-                                    "delta": piece,
-                                    "content_index": 0,
-                                    "item_id": mid,
-                                    "output_index": 0,
-                                },
-                            )
+                consume_stream(messages, local_limit)
+                raw_text = "".join(raw_parts)
+                if _should_finish_incomplete(local_done_reason, raw_text, tool_calls):
+                    print(
+                        "[thinkless] dialogue incomplete "
+                        f"(reason={local_done_reason or 'stop'}); continuing",
+                        flush=True,
+                    )
+                    consume_stream(
+                        _continuation_messages(messages, raw_text),
+                        DIALOGUE_CONTINUE_NUM_PREDICT,
+                    )
         except (TimeoutError, OSError, HTTPError, URLError, json.JSONDecodeError) as exc:
             if not full and not tool_calls:
                 first_delta_at = time.monotonic()
