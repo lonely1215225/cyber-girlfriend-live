@@ -147,9 +147,34 @@ sudo -E ./install.sh
 
 浏览器访问 `https://你的公网IP:19800/`。首次访问需要接受自签名证书提示并允许浏览器使用麦克风。页面加载后即可观看直播；申请连线后，排到队首并确认即可开始语音交流。
 
-WebRTC 媒体默认使用 `8189/UDP`，`8190/TCP` 是 UDP 被封时的次级 ICE 通道。Docker 部署必须同时发布这些端口，例如 `-p 19800:19800 -p 8189:8189/udp -p 8190:8190`；只发布网页端口时页面仍能打开，但播放器会自动退回 HTTP-FLV。
+WebRTC 媒体默认使用 `8189/UDP`，`8190/TCP` 是 UDP 被封时的次级 ICE 通道。使用 Docker 时容器采用 host 网络，这两个端口会直接出现在宿主机上；如果改成桥接网络，必须同时发布 `19800/TCP`、`8189/UDP` 和 `8190/TCP`，只发布网页端口时页面仍能打开，但播放器会自动退回 HTTP-FLV。
 
-### 4. 运维命令
+### 4. Docker 一键部署
+
+需要 NVIDIA GPU、Docker Compose v2 和 [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。不要和宿主机上已经在跑的 `./scripts/start.sh` 抢同一组端口。
+
+```bash
+git clone https://github.com/lonely1215225/cyber-girlfriend-live.git
+cd cyber-girlfriend-live
+cp config.env.example config.env   # 按需修改 PUBLIC_IP、密码和 TTS
+./scripts/docker-up.sh
+```
+
+也可以直接：
+
+```bash
+docker compose up -d --build
+```
+
+首次启动会在容器内执行 `install.sh`：下载模型并为当前 GPU 编译 TensorRT，可能需要数十分钟到数小时。代码、`config.env`、模型、引擎和数据都挂在当前仓库目录，停掉容器后仍然保留。停止：
+
+```bash
+./scripts/docker-down.sh
+```
+
+这台机器如果已经用 `TTS_BACKEND=voxcpm_shared` 复用本机 `:10102` 的 VoxCPM，host 网络下容器可以直接访问它。全新服务器请保持示例配置里的 `TTS_BACKEND=fish_s2`，让容器自己拉起 Fish S2。
+
+### 5. 运维命令
 
 ```bash
 ./scripts/status.sh       # 查看各服务端口状态
@@ -381,30 +406,26 @@ assets/ref16k.wav             # 首次注册的 Qwen3-TTS 系统默认参考音�
 
 ```text
 cyber-girlfriend-live/
-├── *.mp3                           # 共享直播背景纯音乐播放列表
-├── assets/                         # 默认形象、背景与参考音色
-├── docs/images/                    # README 演示素材
-├── data/                           # 运行时 SQLite 用户与记忆数据库（不提交 Git）
-├── apps/speech/                    # 语音管线：STT 适配与数字人音频分流
+├── apps/
+│   ├── web/                        # 直播间 FastAPI、房间、评论与前端
+│   └── speech/                     # STT 适配与数字人音频分流
 ├── services/
 │   ├── avatar/                     # AVTR-1 会话、口型与 HTTP-FLV 网关
 │   ├── tts/                        # Fish S2 / 共享 VoxCPM 与节奏控制
 │   └── llm/                        # Ollama thinkless、记忆压缩与输出过滤
 ├── deploy/
 │   ├── nginx/nginx.conf.tpl        # 公网反向代理模板
-│   └── mediamtx/mediamtx.yml.tpl   # WHEP、ICE 端口与只读直播路径配置
-├── apps/web/
-│   ├── server.py                   # FastAPI 页面、房间、鉴权与实时代理
-│   ├── room_manager.py             # 在线观众、连线队列与租约状态机
-│   ├── mention_reply.py            # @小麻 语音回复调度器
-│   ├── mcp_gateway.py              # MCP 工具发现、调用与裁剪
-│   ├── room.js                     # 直播间前端交互
-│   └── index.html / style.css      # 响应式直播页面
+│   ├── mediamtx/mediamtx.yml.tpl   # WHEP、ICE 端口与只读直播路径配置
+│   └── docker/                     # GPU 容器镜像与入口
+├── docker-compose.yml              # 一键 Docker 部署
+├── assets/                         # 默认形象、背景与参考音色
+├── docs/images/                    # README 演示素材
+├── data/                           # 运行时 SQLite（不提交 Git）
 ├── third_party/avtr-1/             # AVTR-1 渲染器源码及独立许可文件
 ├── tests/                          # 房间、记忆、MCP、回复队列等单元测试
 ├── config.env.example              # 完整配置模板
 ├── install.sh                      # 新服务器一键安装
-└── scripts/                        # 启动、停止、状态与发布脚本
+└── scripts/                        # 启动、停止、状态、Docker 与发布脚本
 ```
 
 模型权重、TensorRT 产物、虚拟环境、缓存、日志和 PID 文件不会进入 Git：
@@ -477,7 +498,7 @@ s2s/.venv/bin/python -m unittest discover -s tests -v
 - [ ] 管理员控制台与运行指标面板
 - [ ] 可选的持久化用户记忆与隐私控制
 - [x] WebRTC/WHEP 主播放、弱网指标与 HTTP-FLV 自动回退
-- [ ] Docker / Compose 标准化部署
+- [x] Docker / Compose 标准化部署
 - [ ] 更多语言、音色与数字人预设
 
 ## 贡献
