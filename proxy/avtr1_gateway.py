@@ -145,20 +145,20 @@ IDLE_EXPRESSION_ENABLED = os.environ.get(
     "AVTR1_IDLE_EXPRESSION_ENABLED", "1"
 ).lower() not in {"0", "false", "off", "no"}
 IDLE_EXPRESSION_MIN_SECONDS = min(
-    60.0, max(6.0, float(os.environ.get("AVTR1_IDLE_EXPRESSION_MIN_SECONDS", "6")))
+    60.0, max(3.0, float(os.environ.get("AVTR1_IDLE_EXPRESSION_MIN_SECONDS", "3.5")))
 )
 IDLE_EXPRESSION_MAX_SECONDS = min(
     90.0,
     max(
         IDLE_EXPRESSION_MIN_SECONDS,
-        float(os.environ.get("AVTR1_IDLE_EXPRESSION_MAX_SECONDS", "14")),
+        float(os.environ.get("AVTR1_IDLE_EXPRESSION_MAX_SECONDS", "8")),
     ),
 )
 IDLE_EXPRESSION_INTENSITY = min(
-    0.9, max(0.2, float(os.environ.get("AVTR1_IDLE_EXPRESSION_INTENSITY", "0.58")))
+    0.9, max(0.2, float(os.environ.get("AVTR1_IDLE_EXPRESSION_INTENSITY", "0.64")))
 )
 IDLE_EXPRESSION_QUIET_SECONDS = max(
-    1.5, float(os.environ.get("AVTR1_IDLE_EXPRESSION_QUIET_SECONDS", "3.0"))
+    1.5, float(os.environ.get("AVTR1_IDLE_EXPRESSION_QUIET_SECONDS", "1.8"))
 )
 MOTION_CONFIG_PATH = os.path.realpath(
     os.environ.get(
@@ -187,8 +187,8 @@ MOTION_FIELDS = {
     "idle_noise_alpha": ("float", 0.0, 4.0),
     "idle_noise_trunc_z": ("float", 0.0, 2.0),
     "idle_expression_enabled": ("bool", None, None),
-    "idle_expression_min_seconds": ("float", 6.0, 60.0),
-    "idle_expression_max_seconds": ("float", 8.0, 90.0),
+    "idle_expression_min_seconds": ("float", 3.0, 60.0),
+    "idle_expression_max_seconds": ("float", 5.0, 90.0),
     "idle_expression_intensity": ("float", 0.2, 0.9),
     "speaking_blink_interval_scale": ("float", 0.35, 1.2),
     "speaking_blink_strength": ("float", 0.0, 1.5),
@@ -1299,31 +1299,52 @@ def _schedule_idle_expression(now: float) -> None:
         (
             "thinking_pout",
             (
-                (0.0, "expression", "one_brow", 0.72, 0.04, duration(1500, 2100)),
-                (2.4, "expression", "pout", 0.84, 0.12, duration(1500, 2100)),
+                (0.0, "expression", "one_brow", 0.72, 0.04, duration(3200, 4600)),
+                (3.6, "expression", "pout", 0.84, 0.12, duration(3400, 4800)),
             ),
         ),
         (
             "cute_double_blink",
             (
                 (0.0, "blink_double", "neutral", 0.0, 0.0, 0),
-                (0.55, "expression", "shy", 0.76, 0.05, duration(1600, 2200)),
+                (0.55, "expression", "shy", 0.76, 0.05, duration(3400, 5000)),
             ),
         ),
         (
             "cheeky_puff",
             (
-                (0.0, "expression", "cheek_puff", 0.88, 0.15, duration(1700, 2300)),
-                (2.5, "blink", "neutral", 0.0, 0.0, 0),
-                (2.85, "expression", "smirk", 0.62, 0.06, duration(1200, 1700)),
+                (0.0, "expression", "cheek_puff", 0.88, 0.15, duration(3200, 4600)),
+                (3.5, "blink", "neutral", 0.0, 0.0, 0),
+                (3.9, "expression", "smirk", 0.68, 0.06, duration(2800, 4000)),
             ),
         ),
         (
             "sleepy_cute",
             (
                 (0.0, "blink", "neutral", 0.0, 0.0, 0),
-                (0.4, "expression", "pout", 0.68, 0.10, duration(1300, 1900)),
-                (2.25, "blink_double", "neutral", 0.0, 0.0, 0),
+                (0.4, "expression", "pout", 0.68, 0.10, duration(3000, 4400)),
+                (3.6, "blink_double", "neutral", 0.0, 0.0, 0),
+            ),
+        ),
+        (
+            "playful_wink",
+            (
+                (0.0, "expression", "wink", 0.82, 0.04, duration(2600, 3800)),
+                (2.8, "expression", "smirk", 0.70, 0.06, duration(3000, 4400)),
+            ),
+        ),
+        (
+            "happy_peek",
+            (
+                (0.0, "expression", "happy", 0.78, 0.08, duration(3400, 5000)),
+                (3.2, "blink", "neutral", 0.0, 0.0, 0),
+            ),
+        ),
+        (
+            "tease_laugh",
+            (
+                (0.0, "expression", "cute_annoyed", 0.74, 0.10, duration(2800, 4000)),
+                (3.2, "expression", "laugh", 0.72, 0.12, duration(2400, 3600)),
             ),
         ),
     )
