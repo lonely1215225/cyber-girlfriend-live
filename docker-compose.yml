@@ -1,5 +1,8 @@
 name: cyber-girlfriend
 
+# Mount the checkout at the same host path AND at /opt/cyber-girlfriend.
+# Host-built uv/pixi shebangs keep working, and the image entrypoint can
+# still find the tree if ROOT is left at the image default.
 services:
   live:
     build:
@@ -8,13 +11,19 @@ services:
     image: cyber-girlfriend-live:latest
     container_name: cyber-girlfriend-live
     restart: unless-stopped
+    init: true
     network_mode: host
     ipc: host
     shm_size: 8gb
     gpus: all
+    working_dir: ${COMPOSE_PROJECT_DIR}
     environment:
+      ROOT: ${COMPOSE_PROJECT_DIR}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    ulimits:
+      memlock: -1
+      stack: 67108864
     volumes:
-      - .:/opt/cyber-girlfriend
-    working_dir: /opt/cyber-girlfriend
+      - ${COMPOSE_PROJECT_DIR}:${COMPOSE_PROJECT_DIR}
+      - ${COMPOSE_PROJECT_DIR}:/opt/cyber-girlfriend

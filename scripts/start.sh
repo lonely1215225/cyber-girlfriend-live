@@ -714,7 +714,7 @@ wait_port "$S2S_PORT" "speech-to-speech" 300
 
 # 6) frontend
 start_bg web "$RUN/web.pid" "$LOG/web.log" \
-  "$S2S_VENV/bin/uvicorn" server:app --app-dir "$FRONTEND" \
+  "$S2S_VENV/bin/python" -m uvicorn server:app --app-dir "$FRONTEND" \
     --host 127.0.0.1 --port "$WEB_PORT" --no-access-log
 wait_port "$WEB_PORT" "frontend" 30
 

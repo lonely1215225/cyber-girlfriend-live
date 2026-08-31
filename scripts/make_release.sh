@@ -35,7 +35,8 @@ fi
 mkdir -p "$STAGE/cyber-girlfriend/models" "$STAGE/cyber-girlfriend/logs" "$STAGE/cyber-girlfriend/run" \
   "$STAGE/cyber-girlfriend/deploy/certs"
 chmod +x "$STAGE/cyber-girlfriend/install.sh" \
-  "$STAGE/cyber-girlfriend/scripts/"*.sh
+  "$STAGE/cyber-girlfriend/scripts/"*.sh \
+  "$STAGE/cyber-girlfriend/deploy/docker/entrypoint.sh"
 
 need=(
   apps/web/avatar-sync.js
@@ -55,7 +56,12 @@ need=(
   assets/avatars/sauna_portrait.jpg
   assets/looks/pasteback_mask_soft.png
   deploy/nginx/nginx.conf.tpl
+  deploy/docker/Dockerfile
+  deploy/docker/entrypoint.sh
+  docker-compose.yml
   services/avatar/avtr1_gateway.py
+  apps/speech/s2s_with_avatar_tee.py
+  services/llm/ollama_thinkless.py
   assets/libgrid_sample_3d_plugin.so
 )
 for rel in "${need[@]}"; do

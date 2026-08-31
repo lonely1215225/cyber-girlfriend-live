@@ -32,8 +32,11 @@ COPY . /opt/cyber-girlfriend
 
 RUN chmod +x /opt/cyber-girlfriend/install.sh \
       /opt/cyber-girlfriend/scripts/*.sh \
-      /opt/cyber-girlfriend/deploy/docker/entrypoint.sh
+      /opt/cyber-girlfriend/deploy/docker/entrypoint.sh \
+    && cp /opt/cyber-girlfriend/deploy/docker/entrypoint.sh \
+      /usr/local/bin/cyber-girlfriend-entry \
+    && chmod +x /usr/local/bin/cyber-girlfriend-entry
 
 EXPOSE 19800 8189/udp 8190
 
-ENTRYPOINT ["/opt/cyber-girlfriend/deploy/docker/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/cyber-girlfriend-entry"]

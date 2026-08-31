@@ -156,7 +156,6 @@ WebRTC 媒体默认使用 `8189/UDP`，`8190/TCP` 是 UDP 被封时的次级 ICE
 ```bash
 git clone https://github.com/lonely1215225/cyber-girlfriend-live.git
 cd cyber-girlfriend-live
-cp config.env.example config.env   # 按需修改 PUBLIC_IP、密码和 TTS
 ./scripts/docker-up.sh
 ```
 
@@ -166,7 +165,9 @@ cp config.env.example config.env   # 按需修改 PUBLIC_IP、密码和 TTS
 docker compose up -d --build
 ```
 
-首次启动会在容器内执行 `install.sh`：下载模型并为当前 GPU 编译 TensorRT，可能需要数十分钟到数小时。代码、`config.env`、模型、引擎和数据都挂在当前仓库目录，停掉容器后仍然保留。停止：
+不要先把 `config.env.example` 原样复制成 `config.env` 再启动：安装脚本看到已有配置就不会写入探测到的公网 IP，直播地址会停在 `127.0.0.1`。需要改密码或 TTS 时，等首次安装生成 `config.env` 后再改，或复制后务必改好 `PUBLIC_IP`。
+
+首次启动会在容器内执行 `install.sh`：下载模型并为当前 GPU 编译 TensorRT，可能需要数十分钟到数小时。仓库会按宿主机绝对路径挂进容器，所以这台机器上已经装好的 `s2s/.venv` 和 Pixi 环境可以直接用。停止：
 
 ```bash
 ./scripts/docker-down.sh
