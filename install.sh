@@ -179,7 +179,6 @@ if [[ ! -f "$ROOT/config.env" ]]; then
       -e "s|^PUBLIC_HTTP_PORT=.*|PUBLIC_HTTP_PORT=$LISTEN_HTTP_PORT|" \
       -e "s|^PUBLIC_WS_URL=.*|PUBLIC_WS_URL=wss://${PUBLIC_IP}:${LISTEN_HTTP_PORT}/v1/realtime|" \
       -e "s|^TTS_MODEL=.*|TTS_MODEL=$TTS_DIR|" \
-      -e "s|^REF_AUDIO=.*|REF_AUDIO=$ROOT/assets/ref16k.wav|" \
       "$ROOT/config.env.example" > "$ROOT/config.env"
 else
   say "已有 config.env，未覆盖"

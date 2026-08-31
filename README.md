@@ -221,7 +221,9 @@ docker compose up -d --build
 | `AGENT_TIMEZONE` | `Asia/Shanghai` | 传给模型的当前时间所属时区，供“今天、当前、最新”等问题使用 |
 | `LLM_CHAT_SIZE` | `12` | 保留的近期用户轮次数 |
 | `LLM_STREAM_BATCH_SENTENCES` | `1` | LLM 每生成一个完整中文句子就交给 TTS；不等待整段回复 |
-| `LLM_LOCAL_READ_TIMEOUT_SECONDS` | `4.0` | 本地模型流连续无数据时的首响应保险丝；超时返回角色化中文短句，不等待外层 20 秒 |
+| `LLM_LOCAL_READ_TIMEOUT_SECONDS` | `12` | 本地模型流连续无数据时的保险丝；过短会把 GPU 调度停顿误判成说完了 |
+| `LLM_NEWS_CONTINUE_NUM_PREDICT` | `128` | 新闻被截断时续写的 token 数 |
+| `LLM_BUFFERED_READ_TIMEOUT_SECONDS` | `45` | 整轮预生成（欢迎/新闻）等待完整回复的超时 |
 | `LLM_COMPACTION_MODE` | `local` | 第一层压缩模式；默认本地规则提取，不占用模型推理 |
 | `LLM_COMPACTION_MAX_CHARS` | `900` | 本地结构化摘要最大字符数 |
 | `MEMORY_SEMANTIC_ENABLED` | `1` | 开启第二层空闲语义整理 |
@@ -315,21 +317,21 @@ SEARXNG_URL=
 | `AVTR1_CFG_KP` | `3.0` | 原始人物关键点与身份姿态约束；过高可能显得僵硬 |
 | `AVTR1_NOISE_ALPHA` | `1.5` | 说话时随机运动的时间相关性，越高变化越连续 |
 | `AVTR1_NOISE_TRUNC_Z` | `1.0` | 说话时随机运动幅度上限 |
-| `AVTR1_IDLE_NOISE_ALPHA` | `2.0` | 静音动作时间相关性；恢复 AVTR-1 原生待机动态参数 |
-| `AVTR1_IDLE_NOISE_TRUNC_Z` | `1.2` | 静音随机运动幅度上限；恢复 AVTR-1 原生待机动作幅度 |
+| `AVTR1_IDLE_NOISE_ALPHA` | `6.0` | 静音动作时间相关性；越大越平滑，避免头部高频抖 |
+| `AVTR1_IDLE_NOISE_TRUNC_Z` | `0.45` | 静音随机运动幅度上限 |
 | `AVTR1_MOTION_AUDIO_RMS` | `80` | 进入说话动作模式的 PCM 音量阈值 |
 | `AVTR1_MOTION_LISTEN_RMS` | `450` | 连线者触发倾听动作的 PCM 阈值，过滤静音底噪 |
-| `AVTR1_MOTION_ACTIVE_HOLD_SECONDS` | `1.0` | 音频结束后保留说话动作参数的过渡时间 |
+| `AVTR1_MOTION_ACTIVE_HOLD_SECONDS` | `0.8` | 音频结束后保留说话动作参数的过渡时间 |
 | `AVTR1_BLINK_ENABLED` | `1` | 待机、倾听和说话时均启用自然眨眼 |
-| `AVTR1_BLINK_MIN_SECONDS` | `2.4` | 两次眨眼间隔的下限 |
-| `AVTR1_BLINK_MAX_SECONDS` | `6.8` | 两次眨眼间隔的上限；实际采用非均匀分布，避免节拍器感 |
-| `AVTR1_BLINK_STRENGTH` | `1.08` | 眨眼闭合幅度；降低强度可减少机械式重眨 |
+| `AVTR1_BLINK_MIN_SECONDS` | `2.6` | 两次眨眼间隔的下限 |
+| `AVTR1_BLINK_MAX_SECONDS` | `7.2` | 两次眨眼间隔的上限；实际采用非均匀分布，避免节拍器感 |
+| `AVTR1_BLINK_STRENGTH` | `1.45` | 眨眼闭合幅度；降低强度可减少机械式重眨 |
 | `AVTR1_BLINK_SPEECH_STRENGTH` | `1.08` | 说话时独立的眨眼闭合幅度 |
-| `AVTR1_BLINK_SPEECH_INTERVAL_SCALE` | `0.82` | 说话时的眨眼间隔倍率；低于 `1` 表示比待机更频繁 |
-| `AVTR1_BLINK_DOUBLE_PROBABILITY` | `0.08` | 偶发连续眨眼概率 |
-| `AVTR1_BLINK_PARTIAL_PROBABILITY` | `0.28` | 不完全闭眼的轻眨概率 |
+| `AVTR1_BLINK_SPEECH_INTERVAL_SCALE` | `0.72` | 说话时的眨眼间隔倍率；低于 `1` 表示比待机更频繁 |
+| `AVTR1_BLINK_DOUBLE_PROBABILITY` | `0.10` | 偶发连续眨眼概率 |
+| `AVTR1_BLINK_PARTIAL_PROBABILITY` | `0.16` | 不完全闭眼的轻眨概率 |
 | `AVTR1_IDLE_BREATH_ENABLED` | `1` | 待机时启用低频呼吸/重心微动，说话时平滑淡出 |
-| `AVTR1_IDLE_BREATH_POSE_DEGREES` | `0.65` | 待机摆头基础幅度 |
+| `AVTR1_IDLE_BREATH_POSE_DEGREES` | `0.14` | 待机摆头基础幅度 |
 | `AVTR1_IDLE_BREATH_PITCH_RATIO` | `0.08` | 上下点头比例；保持极低，避免画面上下浮动 |
 | `AVTR1_IDLE_BREATH_YAW_RATIO` | `1.0` | 左右摆头比例；作为待机附加动作的主方向 |
 | `AVTR1_IDLE_BREATH_ROLL_RATIO` | `-0.12` | 轻微侧倾比例，避免摆头像机械水平旋转 |
@@ -365,7 +367,7 @@ TTS 首次启动会把 `REF_AUDIO` 和 `REF_TEXT` 注册为不可删除的系统
 
 当前连线者持续安静达到随机等待时间后，浏览器会向受房间权限保护的接口请求一个主动话题。服务端从最新 RSS 资讯池中按照“新闻 → 科技 → 知识”轮换一条尚未讲过的内容，把带来源和时间的资料注入当前对话，再由数字人用两到三句口语讲述并询问对方看法。每个直播间/连线者分别保留最近 96 条播报历史，优先播完候选池后才允许重复。新闻获取期间如果用户重新开口，本次主动播报会取消；RSS 不可用时才回退到 `IDLE_PROMPT` 的普通轻松话题。
 
-无人连线、无人排队且没有待回复的 `@小麻` 评论时，服务端也会按较低频率轮换一条热点向全直播间主动播报。连线申请和评论回复始终拥有更高优先级，可以抢占尚未完成的主动播报。
+无人连线、无人排队、没有待回复的 `@小麻` 评论，并且直播间里至少有一名正在看的观众时，服务端才会按较低频率向全直播间播热点。空房间不会对空气讲话。连线申请和评论回复始终拥有更高优先级，可以抢占尚未完成的主动播报。
 
 ## MCP 工具
 

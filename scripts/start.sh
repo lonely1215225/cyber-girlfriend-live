@@ -185,7 +185,7 @@ fi
 # bridge. It runs concurrently with Grok and must be warm before a viewer asks
 # the first question; otherwise model loading would erase the latency win.
 local_lead_model="${LOCAL_LEAD_MODEL:-jaahas/qwen3.5-uncensored:9b}"
-if [[ "${LOCAL_LEAD_ENABLED:-1}" == "1" && -n "$local_lead_model" \
+if [[ "${LOCAL_LEAD_ENABLED:-0}" == "1" && -n "$local_lead_model" \
       && "$local_lead_model" != "$LLM_NAME" ]]; then
   [[ "$local_lead_model" =~ ^[A-Za-z0-9._:/-]+$ ]] \
     || die "LOCAL_LEAD_MODEL contains unsupported characters"
