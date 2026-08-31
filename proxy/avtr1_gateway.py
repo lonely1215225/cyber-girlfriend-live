@@ -735,6 +735,8 @@ class FlvMuxer:
         self.avc_header: bytes | None = None
         self.aac_header: bytes | None = None
         self.timestamp_ms = 0
+        self.audio_samples = 0
+        self.last_video_timestamp_ms = -1
         self.pcm_buf = bytearray()
         self._aac: av.CodecContext | None = None
 
@@ -783,6 +785,9 @@ class FlvMuxer:
         self, annexb: bytes, keyframe: bool, *, timestamp_ms: int | None = None
     ) -> list[bytes]:
         timestamp = self.timestamp_ms if timestamp_ms is None else max(0, timestamp_ms)
+        if timestamp <= self.last_video_timestamp_ms:
+            timestamp = self.last_video_timestamp_ms + 1
+        self.last_video_timestamp_ms = timestamp
         nalus = _split_annexb(annexb)
         if not nalus:
             return []
@@ -823,10 +828,17 @@ class FlvMuxer:
             flt = (pcm16.astype(np.float32) / 32768.0).reshape(1, -1)
             frame = av.AudioFrame.from_ndarray(flt, format="fltp", layout="mono")
             frame.sample_rate = SAMPLE_RATE
+            frame.pts = self.audio_samples
+            frame.time_base = Fraction(1, SAMPLE_RATE)
+            # Stamp AAC with the sample clock, not the 40ms video tick.
+            # 16 kHz AAC frames are 64ms; tagging them every 40ms made
+            # the WebRTC republisher stretch background music.
+            timestamp_ms = int(self.audio_samples * 1000 / SAMPLE_RATE)
             for packet in self._aac.encode(frame):
                 tags.append(
-                    self._tag(8, bytes((0xAE, 0x01)) + bytes(packet), self.timestamp_ms)
+                    self._tag(8, bytes((0xAE, 0x01)) + bytes(packet), timestamp_ms)
                 )
+            self.audio_samples += frame_size
         return tags
 
     def advance(self, ms: int = 40) -> None:
