@@ -393,7 +393,7 @@ cyber-girlfriend-live/
 │   ├── memory_compaction.py        # 本地结构化记忆压缩
 │   ├── tiered_memory.py            # 双层异步记忆管理
 │   └── nginx.conf.tpl              # 公网反向代理模板
-├── s2s/hf-realtime-voice/
+├── apps/web/
 │   ├── server.py                   # FastAPI 页面、房间、鉴权与实时代理
 │   ├── room_manager.py             # 在线观众、连线队列与租约状态机
 │   ├── mention_reply.py            # @小麻 语音回复调度器

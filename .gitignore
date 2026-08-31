@@ -14,7 +14,7 @@
 /data/*.db
 /data/*.json
 /data/voices/
-/s2s/hf-realtime-voice/tts-previews/
+/apps/web/tts-previews/
 /assets/expressions/
 /docs/demos/avtr-expression-test/
 /.cache/

@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "s2s" / "hf-realtime-voice"))
+sys.path.insert(0, str(ROOT / "apps" / "web"))
 
 from avatar_profiles import AvatarProfileStore  # noqa: E402
 

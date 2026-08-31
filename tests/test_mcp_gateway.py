@@ -7,7 +7,7 @@ from unittest import mock
 import httpx
 
 
-FRONTEND_DIR = Path(__file__).resolve().parents[1] / "s2s" / "hf-realtime-voice"
+FRONTEND_DIR = Path(__file__).resolve().parents[1] / "apps" / "web"
 sys.path.insert(0, str(FRONTEND_DIR))
 
 from mcp_gateway import McpGateway, _parse_rpc_response, _tool_output  # noqa: E402

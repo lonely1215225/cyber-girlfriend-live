@@ -10,7 +10,7 @@ LOG="$ROOT/logs"
 mkdir -p "$RUN" "$LOG"
 
 S2S_VENV="$ROOT/s2s/.venv"
-FRONTEND="$ROOT/s2s/hf-realtime-voice"
+FRONTEND="$ROOT/apps/web"
 
 # Allow relative paths in config.env
 [[ "${TTS_MODEL:-}" = /* ]] || TTS_MODEL="$ROOT/${TTS_MODEL:-models/fish-s2-pro}"

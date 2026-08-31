@@ -8,7 +8,7 @@ from unittest import mock
 from pathlib import Path
 
 
-FRONTEND_DIR = Path(__file__).resolve().parents[1] / "s2s" / "hf-realtime-voice"
+FRONTEND_DIR = Path(__file__).resolve().parents[1] / "apps" / "web"
 sys.path.insert(0, str(FRONTEND_DIR))
 
 from mention_reply import (  # noqa: E402

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 
-FRONTEND_DIR = Path(__file__).resolve().parents[1] / "s2s" / "hf-realtime-voice"
+FRONTEND_DIR = Path(__file__).resolve().parents[1] / "apps" / "web"
 sys.path.insert(0, str(FRONTEND_DIR))
 
 from smart_search import SearchHit, SmartSearchGateway  # noqa: E402

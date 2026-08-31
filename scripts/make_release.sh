@@ -15,8 +15,6 @@ rsync -a \
   --exclude '/.cache/' \
   --exclude 's2s/.venv/' \
   --exclude '__pycache__/' \
-  --exclude 's2s/hf-realtime-voice/.dockerignore' \
-  --exclude 's2s/hf-realtime-voice/.gitattributes' \
   --exclude 'third_party/avtr-1/.pixi/' \
   --exclude 'third_party/avtr-1/artifacts/' \
   --exclude 'third_party/avtr-1/.git/' \
@@ -25,11 +23,6 @@ rsync -a \
   --exclude 'proxy/certs/' \
   --exclude 'proxy/nginx.conf' \
   --exclude 'scripts/make_release.sh' \
-  --exclude 's2s/hf-realtime-voice/docs/' \
-  --exclude 's2s/hf-realtime-voice/CONTEXT.md' \
-  --exclude 's2s/hf-realtime-voice/DESIGN.md' \
-  --exclude 's2s/hf-realtime-voice/Dockerfile' \
-  --exclude 's2s/hf-realtime-voice/README.md' \
   --exclude 'config.env' \
   "$ROOT/" "$STAGE/cyber-girlfriend/"
 
@@ -44,9 +37,9 @@ chmod +x "$STAGE/cyber-girlfriend/install.sh" \
   "$STAGE/cyber-girlfriend/scripts/"*.sh
 
 need=(
-  s2s/hf-realtime-voice/avatar-sync.js
-  s2s/hf-realtime-voice/style.css
-  s2s/hf-realtime-voice/worklets/mic-capture.js
+  apps/web/avatar-sync.js
+  apps/web/style.css
+  apps/web/worklets/mic-capture.js
   third_party/avtr-1/src/avtr1_renderer/models/avtr1.py
   third_party/avtr-1/src/avtr1_renderer/models/decoder.py
   third_party/avtr-1/src/avtr1_renderer/models/warp.py

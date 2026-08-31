@@ -73,7 +73,7 @@ say "[3/7] 语音环境 speech-to-speech"
 S2S_VENV="$ROOT/s2s/.venv"
 uv python install 3.12
 [[ -x "$S2S_VENV/bin/python" ]] || uv venv --python 3.12 "$S2S_VENV"
-uv pip install --python "$S2S_VENV/bin/python" -r "$ROOT/s2s/hf-realtime-voice/requirements.txt"
+uv pip install --python "$S2S_VENV/bin/python" -r "$ROOT/apps/web/requirements.txt"
 uv pip install --python "$S2S_VENV/bin/python" "speech-to-speech[faster-whisper]==0.2.10" "faster-whisper==1.2.1" \
   "funasr==1.4.2" \
   "faster-qwen3-tts==0.3.2" "qwen-tts==0.1.1" "transformers==4.57.3" \

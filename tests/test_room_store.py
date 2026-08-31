@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 
 
-FRONTEND_DIR = Path(__file__).resolve().parents[1] / "s2s" / "hf-realtime-voice"
+FRONTEND_DIR = Path(__file__).resolve().parents[1] / "apps" / "web"
 sys.path.insert(0, str(FRONTEND_DIR))
 
 from room_store import RoomStore  # noqa: E402
