@@ -161,7 +161,7 @@ function loadSettings() {
   const storedInstructions = localStorage.getItem(STORAGE_KEYS.instructions) || "";
   return {
     directUrl: localStorage.getItem(STORAGE_KEYS.directUrl) || "",
-    // The protocol field stays stable while Qwen3-TTS resolves the active
+    // The protocol field stays stable while the active TTS backend resolves the
     // role's protected reference recording on the server.
     voice: DEFAULT_VOICE,
     // Transparently migrate only our previous built-in prompt. Never replace a

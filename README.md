@@ -32,7 +32,7 @@
 | MCP 工具 | 对话可调用 CoinGecko、Exa 与 GDELT，查询行情、网页内容和全球新闻 |
 | 双层记忆 | 热上下文保留近期原文，旧内容先本地结构化压缩，再于空闲期异步进行语义整理 |
 | 管理设置保护 | 右上角工具与设置需要密码解锁，带 HttpOnly 会话与失败频率限制 |
-| 本地 AI 栈 | SenseVoice、Ollama/Qwen、Qwen3-TTS 和 AVTR-1 全部运行在自己的 GPU 服务器上 |
+| 本地 AI 栈 | SenseVoice、Ollama/Qwen、Fish S2 或共享 VoxCPM，以及 AVTR-1 全部运行在自己的 GPU 服务器上 |
 
 ## 交互规则
 
@@ -67,7 +67,7 @@ flowchart LR
     M --> C[CoinGecko]
     M --> E[Exa]
     M --> G[GDELT]
-    L --> T[Qwen3-TTS]
+    L --> T[Fish S2 / 共享 VoxCPM]
     T --> P[音频 Tee / 预缓冲]
     P --> V[AVTR-1 Renderer]
     V --> F[H.264 + AAC HTTP-FLV]
@@ -86,7 +86,7 @@ flowchart LR
 - **公网入口：** Nginx、HTTPS、自签名证书
 - **语音识别：** FunASR `SenseVoiceSmall` + Silero VAD（中/英/粤/日/韩）
 - **大语言模型：** 可选 Grok 4.6 主模型 + Ollama `jaahas/qwen3.5-uncensored:9b` 自动降级
-- **语音合成：** Qwen3-TTS 1.7B，支持参考音频音色克隆。IndexTTS-2.5 低延迟克隆实验已失败并移除：官方只有按句整段合成，没有可用的 token 级流式，首包延迟达不到陪伴对话要求。
+- **语音合成：** 默认 Fish Speech S2 Pro 克隆；也可设 `TTS_BACKEND=voxcpm_shared` 复用本机已加载的 VoxCPM2，不再占第二份显存。上游 CLI 仍走 Qwen3 TTS 插槽，实际合成由 Fish / VoxCPM 客户端完成。
 - **数字人渲染与分发：** AVTR-1、TensorRT、H.264/Opus、MediaMTX WebRTC/WHEP、HTTP-FLV 回退
 - **工具调用：** Streamable HTTP MCP（CoinGecko、Exa、GDELT）
 - **运行环境：** Ubuntu、Python 3.12、CUDA 12.8、Pixi、uv
@@ -134,7 +134,7 @@ sudo -E ./install.sh
 
 1. 安装系统依赖、uv、Pixi 与 Ollama；
 2. 创建 Python 3.12 语音环境；
-3. 下载 SenseVoiceSmall、Silero VAD、Qwen3-TTS 和 AVTR-1 权重；
+3. 下载 SenseVoiceSmall、Silero VAD、Fish S2 Pro 和 AVTR-1 权重；
 4. 拉取默认 Qwen LLM；
 5. 为当前 GPU 编译 AVTR-1 TensorRT 引擎；
 6. 生成 `config.env` 与本地 HTTPS 证书。
@@ -284,7 +284,8 @@ SEARXNG_URL=
 | `MIN_SPEECH_MS` | `192` | 最短有效语音时长 |
 | `MIN_SILENCE_MS` | `700` | 结束一句话所需静音时间 |
 | `REOPEN_MS` | `1200` | 短暂停顿后重新合并窗口 |
-| `QWEN3_TTS_CHUNK_SIZE` | `4` | TTS 流式分块大小 |
+| `TTS_BACKEND` | `fish_s2` | `fish_s2` 拉起本机 Fish 工人；`voxcpm_shared` 复用 `:10102` 已有 VoxCPM |
+| `QWEN3_TTS_CHUNK_SIZE` | `4` | 适配层流式分块大小（名称沿用上游 CLI） |
 | `TTS_EMOTION_ENABLED` | `1` | 根据用户声学情绪和回复语义选择温柔、平静、轻快或沉稳语气 |
 | `TTS_STYLE_INSTRUCT_ENABLED` | `1` | 向 Base 克隆模型发送逐句风格指令；关闭后仍保留文本停顿优化 |
 | `TTS_PROSODY_ENABLED` | `1` | 为弱模型输出恢复称呼、转折、追问等自然口语停顿；只影响朗读，不改聊天文本 |
@@ -346,7 +347,7 @@ SEARXNG_URL=
 
 默认关闭自然语音打断，以保证长回复完整播放。数字人说话期间，当前连线者仍可点击页面中央圆圈手动打断；也可在管理员设置中打开自然打断。当前连线者的麦克风仅用于识别和驱动倾听动作，不会混入面向所有观众的直播声音。
 
-TTS 首次启动会把 `REF_AUDIO` 和 `REF_TEXT` 注册为不可删除的系统默认音色。管理员可在独立的“音色管理”中上传或录制 3～30 秒参考音频，服务端会解码、裁剪首尾静音、响度归一化并检查无声与削波；没有填写参考文本时，会在直播空闲时复用已经加载的 SenseVoice 异步识别，管理员校正并确认逐字文本后才能绑定。音频存放在权限受限且不公开静态访问的 `data/voices/`，浏览器和会话只使用不可伪造的 `voice_asset:<uuid>` 令牌。Qwen3-TTS 每次合成前解析当前角色音色并复用参考特征缓存，因此角色切换不需要重新加载模型。SenseVoice 的短期情绪仍参与当前回复的语气规划；LLM 与 TTS 保持中文标点感知的句级流式管线。
+TTS 首次启动会把 `REF_AUDIO` 和 `REF_TEXT` 注册为不可删除的系统默认音色。管理员可在独立的“音色管理”中上传或录制 3～30 秒参考音频，服务端会解码、裁剪首尾静音并检查无声与削波，保留 48 kHz，不再做 loudnorm。没有填写参考文本时，会在直播空闲时复用已经加载的 SenseVoice 异步识别，管理员校正并确认逐字文本后才能绑定。音频存放在权限受限且不公开静态访问的 `data/voices/`，浏览器和会话只使用不可伪造的 `voice_asset:<uuid>` 令牌。当前 TTS 后端每次合成前解析当前角色音色并复用参考特征，角色切换不需要重新加载模型。SenseVoice 的短期情绪仍参与当前回复的语气规划；LLM 与 TTS 保持中文标点感知的句级流式管线。
 
 背景音乐由服务端一次解码，分别输出带音乐和不带音乐的时间戳一致音轨；两者均发布为 WebRTC Opus，并保留 HTTP-FLV 版本。把纯音乐 `.mp3` 放进 `BACKGROUND_MUSIC_DIR` 后重启服务即可加入播放列表；多首音乐会按文件名顺序播放，播完后从头循环。观众的开关偏好保存在自己的浏览器中，切换只会快速重连该观众选择的音轨。
 
@@ -398,7 +399,8 @@ TTS 首次启动会把 `REF_AUDIO` 和 `REF_TEXT` 注册为不可删除的系统
 assets/looks/xiaoya.png       # AVTR-1 默认参考形象
 assets/avatars/xiaoya.jpg     # 兼容用形象素材
 assets/looks/xiaoya_idle.png  # 从 idle.mp4 选取的暖光正脸形象
-assets/ref16k.wav             # 首次注册的 Qwen3-TTS 系统默认参考音色
+assets/ref_fish.wav           # 系统默认克隆参考（由 ref16k.wav 裁剪得到）
+assets/ref16k.wav             # 原始参考；缺失 ref_fish.wav 时由启动脚本生成
 ```
 
 其他内置形象也保存在 `assets/looks/`。管理员验证后可在设置顶部编辑并切换角色档案；其中“暖光正脸”取自 `assets/idle.mp4` 的清晰正脸帧。所有在线观众通过服务端事件同步当前角色，事件连接断开时自动轮询恢复。这些默认形象不会被安装脚本或运行时清理；直播间中普通观众也不能修改角色、动作或音色。替换人物或声音素材前，请确认你拥有相应图片、声音和肖像的合法使用授权。
