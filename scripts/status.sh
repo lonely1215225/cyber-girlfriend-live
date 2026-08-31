@@ -44,9 +44,21 @@ check "${AVTR1_PORT:-18012}" AVTR-1-renderer
 check "${AVATAR_GW_PORT:-18011}" AVTR-1-gateway
 TTS_BACKEND="${TTS_BACKEND:-fish_s2}"
 if [[ "$TTS_BACKEND" == "voxcpm_shared" || "$TTS_BACKEND" == "voxcpm" ]]; then
-  if curl -sf --max-time 3 "${VOXCPM_SHARED_URL:-http://127.0.0.1:10102}/healthz" >/dev/null 2>&1 \
-      || curl -sf --max-time 3 -H "Authorization: Bearer ${VOXCPM_API_KEY:-}" \
-        "${VOXCPM_SHARED_URL:-http://127.0.0.1:10102}/healthz" >/dev/null 2>&1; then
+  if [[ -z "${VOXCPM_API_KEY:-}" ]]; then
+    voxcpm_pid="$(pgrep -f '/opt/localization/voxcpm_server.py' | head -n 1 || true)"
+    if [[ -n "$voxcpm_pid" && -r "/proc/${voxcpm_pid}/environ" ]]; then
+      VOXCPM_API_KEY="$(
+        tr '\0' '\n' <"/proc/${voxcpm_pid}/environ" \
+          | awk -F= '/^(VOXCPM_API_KEY|LOCALIZATION_GPU_API_KEY)=/{print substr($0, index($0,"=")+1); exit}'
+      )"
+    fi
+  fi
+  voxcpm_code="$(
+    curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \
+      ${VOXCPM_API_KEY:+-H "Authorization: Bearer ${VOXCPM_API_KEY}"} \
+      "${VOXCPM_SHARED_URL:-http://127.0.0.1:10102}/healthz" || echo ERR
+  )"
+  if [[ "$voxcpm_code" == "200" ]]; then
     echo "  tts        shared VoxCPM  OK"
   else
     echo "  tts        shared VoxCPM  DOWN"
