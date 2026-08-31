@@ -25,6 +25,7 @@ from speech_to_speech.api.openai_realtime import websocket_router
 
 from tiered_memory import cancel_semantic_refinements, install_tiered_memory
 from expression_director import begin_delivery_response, clear_delivery_state, cues_after
+from playback_policy import apply_websocket_playback_policy
 
 LOG = logging.getLogger("speech_to_speech.avatar_tee")
 LOG.setLevel(logging.INFO)
@@ -346,6 +347,10 @@ if TEE_URL:
             str(query_params.get("playback_mode", "interactive"))
             if hasattr(query_params, "get")
             else "interactive"
+        )
+        apply_websocket_playback_policy(
+            complete_audio=complete_audio,
+            playback_mode=playback_mode,
         )
         if is_preview:
             await original_send_events(ws, events)

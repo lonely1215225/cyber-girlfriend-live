@@ -11,10 +11,17 @@ if str(PROXY) not in sys.path:
 
 from emotion_aware_tts import (  # noqa: E402
     choose_tts_style,
+    is_leading_interjection,
     prepare_tts_text,
     remove_unspeechable_preserving_cjk,
     split_streaming_sentences,
 )
+from playback_policy import (  # noqa: E402
+    apply_websocket_playback_policy,
+    is_batch_tts,
+    set_batch_tts,
+)
+from fish_s2_tags import apply_fish_performance_tags, clean_public_fish_text  # noqa: E402
 from sensevoice_stt import SenseVoiceMetadata  # noqa: E402
 from expression_director import (  # noqa: E402
     DeliveryControlFilter,
@@ -31,36 +38,73 @@ class EmotionAwareTTSTests(unittest.TestCase):
     def setUp(self) -> None:
         clear_delivery_state()
         begin_delivery_generation()
+        set_batch_tts(False)
 
     def test_chinese_streaming_split_emits_completed_sentence_immediately(self) -> None:
         self.assertEqual(split_streaming_sentences("你好呀。你今天"), ["你好呀。", "你今天"])
         self.assertEqual(split_streaming_sentences("你好呀。"), ["你好呀。", ""])
 
-    def test_short_vocative_comma_is_an_early_streaming_boundary(self) -> None:
+    def test_vocative_and_comma_stay_inside_the_first_sentence(self) -> None:
         self.assertEqual(
             split_streaming_sentences("三丰，小米现在最新旗舰是小米十七系列。后面还有"),
-            ["三丰，", "小米现在最新旗舰是小米十七系列。", "后面还有"],
+            ["三丰，小米现在最新旗舰是小米十七系列。", "后面还有"],
         )
         self.assertEqual(
             split_streaming_sentences("价格是1,280.50元，今天有效"),
             ["价格是1,280.50元，今天有效"],
         )
 
-    def test_short_opening_clause_streams_without_a_phrase_dictionary(self) -> None:
+    def test_leading_hey_ai_you_are_not_their_own_tts_clip(self) -> None:
+        self.assertTrue(is_leading_interjection("嘿，"))
+        self.assertTrue(is_leading_interjection("[playful]哎，"))
+        self.assertTrue(is_leading_interjection("呦……"))
+        self.assertTrue(is_leading_interjection("嘿嘿。"))
+        self.assertFalse(is_leading_interjection("小麻呗。"))
         self.assertEqual(
             split_streaming_sentences("哎呦喂……你还真来了。"),
-            ["哎呦喂……", "你还真来了。", ""],
+            ["哎呦喂……你还真来了。", ""],
         )
         self.assertEqual(
             split_streaming_sentences("喂，你先听我说。"),
-            ["喂，", "你先听我说。", ""],
+            ["喂，你先听我说。", ""],
+        )
+        self.assertEqual(
+            split_streaming_sentences("嘿，我在这儿。下一句"),
+            ["嘿，我在这儿。", "下一句"],
+        )
+        self.assertEqual(
+            split_streaming_sentences("嘿嘿。叫我小麻就行。"),
+            ["嘿嘿。叫我小麻就行。", ""],
         )
         self.assertEqual(prepare_tts_text("喂，", "cheerful"), "喂，")
 
-    def test_first_model_comma_can_start_tts_before_distant_full_stop(self) -> None:
+    def test_news_batch_policy_keeps_the_whole_report_as_one_tts_request(self) -> None:
+        report = "嗯……刚看到新闻，中国人保上半年科技金融投了挺多。"
+        streamed = split_streaming_sentences(report)
+        self.assertEqual(streamed, [report, ""])
+        apply_websocket_playback_policy(complete_audio=True, playback_mode="proactive")
+        self.assertTrue(is_batch_tts())
+        self.assertEqual(split_streaming_sentences(report), [report])
+        apply_websocket_playback_policy(complete_audio=False, playback_mode="interactive")
+        self.assertFalse(is_batch_tts())
+        self.assertEqual(split_streaming_sentences(report), streamed)
+
+    def test_quoted_question_does_not_cut_a_joke_in_half(self) -> None:
+        joke = (
+            "听好了啊：有一天小明去拔牙，牙医说“别怕”，"
+            "小明说“那拔一半行吗？”牙医：“也行。”结果——半拔半留，笑死我了！"
+        )
+        self.assertEqual(split_streaming_sentences(joke), [joke, ""])
+        self.assertEqual(
+            split_streaming_sentences("还有啊？行吧行吧，那我可就不客气了。后面"),
+            ["还有啊？行吧行吧，那我可就不客气了。", "后面"],
+        )
+        self.assertEqual(split_streaming_sentences("还有啊？"), ["还有啊？"])
+
+    def test_comma_does_not_start_tts_before_the_sentence_ends(self) -> None:
         self.assertEqual(
             split_streaming_sentences("这条消息最重要的变化是，后面还有更多证据"),
-            ["这条消息最重要的变化是，", "后面还有更多证据"],
+            ["这条消息最重要的变化是，后面还有更多证据"],
         )
 
     def test_fallback_style_does_not_guess_semantics_from_words(self) -> None:
@@ -209,6 +253,41 @@ class EmotionAwareTTSTests(unittest.TestCase):
 
     def test_visual_hold_is_based_on_length_not_phrase_matching(self) -> None:
         self.assertEqual(cue_duration_ms("甲乙丙丁", "happy"), cue_duration_ms("春夏秋冬", "happy"))
+
+    def test_fish_tags_survive_speechable_filter_and_are_hidden_from_viewers(self) -> None:
+        spoken = "[laughing]嘿嘿，被你发现了。"
+        self.assertEqual(remove_unspeechable_preserving_cjk(spoken), spoken)
+        self.assertEqual(clean_public_fish_text(spoken), "嘿嘿，被你发现了。")
+        self.assertEqual(clean_public_fish_text("先听我说[whis"), "先听我说")
+
+    def test_delivery_plan_injects_fish_tags_without_duplicating_llm_tags(self) -> None:
+        self.assertEqual(
+            apply_fish_performance_tags(
+                "唉，那就这样吧。",
+                vocal_emotion="sad",
+                vocal_intensity=0.56,
+                nonverbal="sigh",
+            ),
+            "[sigh][sad]唉，那就这样吧。",
+        )
+        self.assertEqual(
+            apply_fish_performance_tags(
+                "[laughing]哈哈你别贫。",
+                vocal_emotion="happy",
+                vocal_intensity=0.6,
+                nonverbal="laugh",
+            ),
+            "[laughing]哈哈你别贫。",
+        )
+        self.assertEqual(
+            apply_fish_performance_tags(
+                "今天天气不错。",
+                vocal_emotion="happy",
+                vocal_intensity=0.1,
+                nonverbal="none",
+            ),
+            "今天天气不错。",
+        )
 
 
 if __name__ == "__main__":
