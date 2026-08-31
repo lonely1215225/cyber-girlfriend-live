@@ -13,9 +13,19 @@ S2S_VENV="$ROOT/s2s/.venv"
 FRONTEND="$ROOT/s2s/hf-realtime-voice"
 
 # Allow relative paths in config.env
-[[ "${TTS_MODEL:-}" = /* ]] || TTS_MODEL="$ROOT/${TTS_MODEL:-models/qwen3tts/Qwen3-TTS-12Hz-1.7B-Base}"
-[[ "${REF_AUDIO:-}" = /* ]] || REF_AUDIO="$ROOT/${REF_AUDIO:-assets/ref16k.wav}"
-export TTS_MODEL REF_AUDIO REF_TEXT
+[[ "${TTS_MODEL:-}" = /* ]] || TTS_MODEL="$ROOT/${TTS_MODEL:-models/fish-s2-pro}"
+[[ "${REF_AUDIO:-}" = /* ]] || REF_AUDIO="$ROOT/${REF_AUDIO:-assets/ref_fish.wav}"
+FISH_S2_PORT="${FISH_S2_PORT:-18781}"
+FISH_S2_URL="${FISH_S2_URL:-http://127.0.0.1:${FISH_S2_PORT}}"
+FISH_REPO="$ROOT/third_party/fish-speech"
+FISH_VENV="${FISH_VENV:-$FISH_REPO/.venv}"
+TTS_BACKEND="${TTS_BACKEND:-fish_s2}"
+VOXCPM_SHARED_URL="${VOXCPM_SHARED_URL:-http://127.0.0.1:10102}"
+export TTS_MODEL REF_AUDIO REF_TEXT FISH_S2_PORT FISH_S2_URL TTS_BACKEND VOXCPM_SHARED_URL
+export VOXCPM_TARGET_HANZI_PER_SEC="${VOXCPM_TARGET_HANZI_PER_SEC:-4.5}"
+export VOXCPM_PACE_FAST_THRESHOLD="${VOXCPM_PACE_FAST_THRESHOLD:-5.0}"
+export VOXCPM_MIN_ATEMPO="${VOXCPM_MIN_ATEMPO:-0.86}"
+export PYTHONPATH="$ROOT/proxy${PYTHONPATH:+:$PYTHONPATH}"
 SENSEVOICE_MODEL="${SENSEVOICE_MODEL:-models/sensevoice/SenseVoiceSmall}"
 if [[ "$SENSEVOICE_MODEL" == models/* ]]; then
   SENSEVOICE_MODEL="$ROOT/$SENSEVOICE_MODEL"
@@ -106,8 +116,18 @@ stop_bg() {
 }
 
 [[ -x "$S2S_VENV/bin/speech-to-speech" ]] || die "speech-to-speech is not installed；先运行 ./install.sh"
-[[ -s "$TTS_MODEL/config.json" ]] || die "Qwen3-TTS weight is missing at $TTS_MODEL；先运行 ./install.sh"
 [[ -d "$FRONTEND" ]] || die "frontend is missing"
+if [[ "$TTS_BACKEND" == "voxcpm_shared" || "$TTS_BACKEND" == "voxcpm" ]]; then
+  say "TTS backend: shared VoxCPM at $VOXCPM_SHARED_URL (no second model load)"
+else
+  [[ -s "$TTS_MODEL/codec.pth" ]] || die "Fish S2 Pro weight is missing at $TTS_MODEL"
+  [[ -x "$FISH_VENV/bin/python" ]] || die "Fish S2 venv is missing at $FISH_VENV"
+fi
+SOURCE_REF="$ROOT/assets/ref16k.wav"
+if [[ ! -f "$REF_AUDIO" && -f "$SOURCE_REF" ]]; then
+  "$S2S_VENV/bin/python" "$ROOT/scripts/prepare_fish_ref.py" \
+    --src "$SOURCE_REF" --dst "$REF_AUDIO" --tail-seconds 6
+fi
 [[ -f "$REF_AUDIO" ]] || die "missing ref audio $REF_AUDIO"
 mkdir -p "$ROOT/proxy/certs"
 if [[ ! -f "$ROOT/proxy/certs/server.crt" ]]; then
@@ -229,7 +249,12 @@ export BACKGROUND_MUSIC_VOLUME="${BACKGROUND_MUSIC_VOLUME:-0.16}"
 export BACKGROUND_MUSIC_DUCK_VOLUME="${BACKGROUND_MUSIC_DUCK_VOLUME:-0.04}"
 export BACKGROUND_MUSIC_USER_RMS="${BACKGROUND_MUSIC_USER_RMS:-450}"
 export DIALOGUE_TOOLS_ENABLED="${DIALOGUE_TOOLS_ENABLED:-0}"
-export LLM_LOCAL_CONVERSATION_NUM_PREDICT="${LLM_LOCAL_CONVERSATION_NUM_PREDICT:-96}"
+export LLM_LOCAL_CONVERSATION_NUM_PREDICT="${LLM_LOCAL_CONVERSATION_NUM_PREDICT:-160}"
+export LLM_NEWS_NUM_PREDICT="${LLM_NEWS_NUM_PREDICT:-256}"
+export LLM_NEWS_CONTINUE_NUM_PREDICT="${LLM_NEWS_CONTINUE_NUM_PREDICT:-128}"
+export LLM_NEWS_RETRY_NUM_PREDICT="${LLM_NEWS_RETRY_NUM_PREDICT:-256}"
+export LLM_DIALOGUE_CONTINUE_NUM_PREDICT="${LLM_DIALOGUE_CONTINUE_NUM_PREDICT:-128}"
+export LLM_BUFFERED_READ_TIMEOUT_SECONDS="${LLM_BUFFERED_READ_TIMEOUT_SECONDS:-45}"
 export MCP_ENABLED="${MCP_ENABLED:-1}"
 export MCP_COINGECKO_URL="${MCP_COINGECKO_URL:-https://mcp.api.coingecko.com/mcp}"
 export MCP_EXA_URL="${MCP_EXA_URL:-https://mcp.exa.ai/mcp}"
@@ -282,6 +307,7 @@ export MEDIAMTX_RTSP_PORT="${MEDIAMTX_RTSP_PORT:-18554}"
 export MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT:-19997}"
 export MEDIAMTX_METRICS_PORT="${MEDIAMTX_METRICS_PORT:-19998}"
 export WEBRTC_OPUS_BITRATE="${WEBRTC_OPUS_BITRATE:-48000}"
+export WEBRTC_MUSIC_OPUS_BITRATE="${WEBRTC_MUSIC_OPUS_BITRATE:-64000}"
 export WEBRTC_PACKET_LOSS_PERCENT="${WEBRTC_PACKET_LOSS_PERCENT:-5}"
 export STARTUP_GREETING="${STARTUP_GREETING:-}"
 export IDLE_PROMPT="${IDLE_PROMPT:-}"
@@ -302,6 +328,8 @@ export LOCAL_LEAD_MODEL="${LOCAL_LEAD_MODEL:-jaahas/qwen3.5-uncensored:9b}"
 export LOCAL_LEAD_TIMEOUT_SECONDS="${LOCAL_LEAD_TIMEOUT_SECONDS:-1.4}"
 export LOCAL_LEAD_MAX_CHARS="${LOCAL_LEAD_MAX_CHARS:-24}"
 export OLLAMA_URL LLM_NAME THINKLESS_PORT LLM_NUM_CTX LLM_NUM_PREDICT LLM_KEEP_ALIVE LLM_PREWARM
+export LLM_NEWS_NUM_PREDICT LLM_NEWS_CONTINUE_NUM_PREDICT LLM_NEWS_RETRY_NUM_PREDICT
+export LLM_DIALOGUE_CONTINUE_NUM_PREDICT LLM_BUFFERED_READ_TIMEOUT_SECONDS
 export LLM_LOCAL_READ_TIMEOUT_SECONDS="${LLM_LOCAL_READ_TIMEOUT_SECONDS:-12}"
 export LLM_CHAT_SIZE="${LLM_CHAT_SIZE:-12}"
 export LLM_STREAM_BATCH_SENTENCES="${LLM_STREAM_BATCH_SENTENCES:-1}"
@@ -401,10 +429,10 @@ export AVTR1_IDLE_BREATH_DRIFT_MIX="${AVTR1_IDLE_BREATH_DRIFT_MIX:-0.30}"
 export AVTR1_IDLE_BREATH_FADE_IN_STEP="${AVTR1_IDLE_BREATH_FADE_IN_STEP:-0.08}"
 export AVTR1_IDLE_BREATH_FADE_OUT_STEP="${AVTR1_IDLE_BREATH_FADE_OUT_STEP:-0.18}"
 export AVTR1_IDLE_EXPRESSION_ENABLED="${AVTR1_IDLE_EXPRESSION_ENABLED:-1}"
-export AVTR1_IDLE_EXPRESSION_MIN_SECONDS="${AVTR1_IDLE_EXPRESSION_MIN_SECONDS:-6}"
-export AVTR1_IDLE_EXPRESSION_MAX_SECONDS="${AVTR1_IDLE_EXPRESSION_MAX_SECONDS:-14}"
-export AVTR1_IDLE_EXPRESSION_INTENSITY="${AVTR1_IDLE_EXPRESSION_INTENSITY:-0.58}"
-export AVTR1_IDLE_EXPRESSION_QUIET_SECONDS="${AVTR1_IDLE_EXPRESSION_QUIET_SECONDS:-3.0}"
+export AVTR1_IDLE_EXPRESSION_MIN_SECONDS="${AVTR1_IDLE_EXPRESSION_MIN_SECONDS:-3.5}"
+export AVTR1_IDLE_EXPRESSION_MAX_SECONDS="${AVTR1_IDLE_EXPRESSION_MAX_SECONDS:-8}"
+export AVTR1_IDLE_EXPRESSION_INTENSITY="${AVTR1_IDLE_EXPRESSION_INTENSITY:-0.64}"
+export AVTR1_IDLE_EXPRESSION_QUIET_SECONDS="${AVTR1_IDLE_EXPRESSION_QUIET_SECONDS:-1.8}"
 export AVTR1_URL="http://127.0.0.1:${AVTR1_PORT:-18012}"
 export AVTR1_EXPRESSION_DIR="${AVTR1_EXPRESSION_DIR:-$ROOT/assets/expressions/xiaoya_locket}"
 export AVTR1_EXPRESSION_RETARGET_GAIN="${AVTR1_EXPRESSION_RETARGET_GAIN:-4.0}"
@@ -547,7 +575,39 @@ if [[ "$WEBRTC_ENABLED" != "0" ]]; then
     || die "WebRTC publishers are not ready; see $LOG/webrtc_*.log"
 fi
 
-# 4) speech-to-speech
+# 4) TTS worker. Shared VoxCPM reuses the localization process already in VRAM.
+export FISH_S2_URL FISH_S2_PORT
+if [[ "$TTS_BACKEND" == "voxcpm_shared" || "$TTS_BACKEND" == "voxcpm" ]]; then
+  if [[ -z "${VOXCPM_API_KEY:-}" ]]; then
+    voxcpm_pid="$(pgrep -f '/opt/localization/voxcpm_server.py' | head -n 1 || true)"
+    if [[ -n "$voxcpm_pid" && -r "/proc/${voxcpm_pid}/environ" ]]; then
+      VOXCPM_API_KEY="$(
+        tr '\0' '\n' <"/proc/${voxcpm_pid}/environ" \
+          | awk -F= '/^(VOXCPM_API_KEY|LOCALIZATION_GPU_API_KEY)=/{print substr($0, index($0,"=")+1); exit}'
+      )"
+    fi
+  fi
+  [[ -n "${VOXCPM_API_KEY:-}" ]] || die "shared VoxCPM needs VOXCPM_API_KEY (or a running localization worker)"
+  export VOXCPM_API_KEY
+  voxcpm_code="$(
+    curl -sS -o /tmp/voxcpm_healthz -w '%{http_code}' --max-time 5 \
+      -H "Authorization: Bearer ${VOXCPM_API_KEY}" \
+      "${VOXCPM_SHARED_URL}/healthz" || echo ERR
+  )"
+  [[ "$voxcpm_code" == "200" ]] || die "shared VoxCPM is not ready at ${VOXCPM_SHARED_URL} (HTTP ${voxcpm_code})"
+  say "shared VoxCPM ready; Fish S2 will not be started"
+else
+  start_bg fish_s2 "$RUN/fish_s2.pid" "$LOG/fish_s2.log" \
+    bash -lc "cd \"$FISH_REPO\" && exec env HF_HUB_DISABLE_TELEMETRY=1 \
+      \"$FISH_VENV/bin/python\" tools/api_server.py \
+      --llama-checkpoint-path \"$TTS_MODEL\" \
+      --decoder-checkpoint-path \"$TTS_MODEL/codec.pth\" \
+      --listen \"127.0.0.1:${FISH_S2_PORT}\" \
+      --half --compile --workers 1"
+  wait_port "$FISH_S2_PORT" "Fish S2 Pro" 180
+fi
+
+# 5) speech-to-speech
 STT_BACKEND="${STT_BACKEND:-sensevoice}"
 case "$STT_BACKEND" in
   sensevoice)
@@ -594,16 +654,32 @@ fi
 # tees audio to the local avatar gateway.
 if alive "$RUN/s2s.pid"; then
   s2s_pid="$(cat "$RUN/s2s.pid")"
-  if [[ -r "/proc/${s2s_pid}/environ" ]] \
-      && ! tr '\0' '\n' <"/proc/${s2s_pid}/environ" \
-        | grep -Fxq "AVTR1_LOCAL_TEE_URL=${AVTR1_LOCAL_TEE_URL}"; then
-    say "s2s is running without the avatar audio tee; restarting"
-    stop_bg s2s "$RUN/s2s.pid"
+  if [[ -r "/proc/${s2s_pid}/environ" ]]; then
+    s2s_env="$(tr '\0' '\n' <"/proc/${s2s_pid}/environ")"
+    if ! grep -Fxq "AVTR1_LOCAL_TEE_URL=${AVTR1_LOCAL_TEE_URL}" <<<"$s2s_env"; then
+      say "s2s is running without the avatar audio tee; restarting"
+      stop_bg s2s "$RUN/s2s.pid"
+    elif ! grep -Fxq "TTS_BACKEND=${TTS_BACKEND}" <<<"$s2s_env"; then
+      say "s2s is still on the old TTS worker; restarting"
+      stop_bg s2s "$RUN/s2s.pid"
+    elif [[ "$TTS_BACKEND" != "voxcpm_shared" && "$TTS_BACKEND" != "voxcpm" ]] \
+      && ! grep -Fxq "FISH_S2_URL=${FISH_S2_URL}" <<<"$s2s_env"; then
+      say "s2s is still on the old TTS worker; restarting"
+      stop_bg s2s "$RUN/s2s.pid"
+    fi
   fi
 fi
 
 start_bg s2s "$RUN/s2s.pid" "$LOG/s2s.log" \
   env LD_LIBRARY_PATH="$S2S_LD_LIBRARY_PATH" \
+      TTS_BACKEND="$TTS_BACKEND" \
+      FISH_S2_URL="$FISH_S2_URL" \
+      FISH_S2_PORT="$FISH_S2_PORT" \
+      VOXCPM_SHARED_URL="$VOXCPM_SHARED_URL" \
+      VOXCPM_API_KEY="${VOXCPM_API_KEY:-}" \
+      VOXCPM_TARGET_HANZI_PER_SEC="${VOXCPM_TARGET_HANZI_PER_SEC:-4.5}" \
+      VOXCPM_PACE_FAST_THRESHOLD="${VOXCPM_PACE_FAST_THRESHOLD:-5.0}" \
+      VOXCPM_MIN_ATEMPO="${VOXCPM_MIN_ATEMPO:-0.86}" \
   "$S2S_VENV/bin/python" "$ROOT/proxy/s2s_with_avatar_tee.py" \
     --device cuda \
     --mode realtime \
@@ -632,13 +708,13 @@ start_bg s2s "$RUN/s2s.pid" "$LOG/s2s.log" \
     --short_segment_merge_ms "$MERGE_MS"
 wait_port "$S2S_PORT" "speech-to-speech" 300
 
-# 5) frontend
+# 6) frontend
 start_bg web "$RUN/web.pid" "$LOG/web.log" \
   "$S2S_VENV/bin/uvicorn" server:app --app-dir "$FRONTEND" \
     --host 127.0.0.1 --port "$WEB_PORT" --no-access-log
 wait_port "$WEB_PORT" "frontend" 30
 
-# 6) nginx public proxy
+# 7) nginx public proxy
 NGINX_CONF="$RUN/nginx.conf"
 sed -e "s|__ROOT__|$ROOT|g" \
     -e "s|__LISTEN_PORT__|${LISTEN_HTTP_PORT}|g" \

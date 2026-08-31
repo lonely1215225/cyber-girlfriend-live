@@ -83,6 +83,7 @@ fi
 
 stop_pidfile web "$RUN/web.pid"
 stop_pidfile s2s "$RUN/s2s.pid"
+stop_pidfile fish_s2 "$RUN/fish_s2.pid"
 stop_pidfile webrtc_music "$RUN/webrtc_music.pid"
 stop_pidfile webrtc_voice "$RUN/webrtc_voice.pid"
 stop_pidfile mediamtx "$RUN/mediamtx.pid"
@@ -96,6 +97,7 @@ stop_pidfile log_guard "$RUN/log_guard.pid"
 # fallbacks make stop.sh idempotent without touching similarly named services
 # belonging to another checkout.
 stop_matching s2s "$ROOT/proxy/s2s_with_avatar_tee.py"
+stop_matching fish-s2 "$ROOT/third_party/fish-speech/.venv/bin/python tools/api_server.py"
 stop_matching frontend "uvicorn server:app --app-dir $ROOT/s2s/hf-realtime-voice"
 stop_matching webrtc-publisher "ffmpeg.*127.0.0.1:.*livestream.flv.*rtsp://127.0.0.1:.*/avatar_"
 stop_matching mediamtx "$ROOT/third_party/mediamtx/mediamtx $ROOT/run/mediamtx.yml"

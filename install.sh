@@ -98,13 +98,20 @@ snapshot_download(
 torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True, skip_validation=True)
 PY
 
-say "[4/7] 下载 Qwen3-TTS（约 8GB）"
-TTS_DIR="$ROOT/models/qwen3tts/Qwen3-TTS-12Hz-1.7B-Base"
-if [[ ! -f "$TTS_DIR/config.json" ]]; then
+say "[4/7] 下载 Fish S2 Pro（约 10GB）"
+TTS_DIR="$ROOT/models/fish-s2-pro"
+FISH_REPO="$ROOT/third_party/fish-speech"
+if [[ ! -d "$FISH_REPO/.git" ]]; then
+  git clone --depth 1 https://github.com/fishaudio/fish-speech.git "$FISH_REPO"
+fi
+if [[ ! -f "$TTS_DIR/codec.pth" ]]; then
   "$S2S_VENV/bin/python" - <<PY
 from huggingface_hub import snapshot_download
-snapshot_download("Qwen/Qwen3-TTS-12Hz-1.7B-Base", local_dir="$TTS_DIR")
+snapshot_download("fishaudio/s2-pro", local_dir="$TTS_DIR")
 PY
+fi
+if [[ ! -x "$FISH_REPO/.venv/bin/python" ]]; then
+  (cd "$FISH_REPO" && uv sync --python 3.12 --extra cu129)
 fi
 
 say "[5/7] AVTR-1 环境 + 权重"
