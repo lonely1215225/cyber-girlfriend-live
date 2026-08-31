@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ ! -f "$ROOT/config.env" ]]; then
+  echo "✗ missing $ROOT/config.env" >&2
+  exit 1
+fi
 # shellcheck disable=SC1091
 source "$ROOT/config.env"
 
@@ -38,6 +42,18 @@ if [[ "${GROK_ENABLED:-0}" == "1" ]]; then
 fi
 check "${AVTR1_PORT:-18012}" AVTR-1-renderer
 check "${AVATAR_GW_PORT:-18011}" AVTR-1-gateway
+TTS_BACKEND="${TTS_BACKEND:-fish_s2}"
+if [[ "$TTS_BACKEND" == "voxcpm_shared" || "$TTS_BACKEND" == "voxcpm" ]]; then
+  if curl -sf --max-time 3 "${VOXCPM_SHARED_URL:-http://127.0.0.1:10102}/healthz" >/dev/null 2>&1 \
+      || curl -sf --max-time 3 -H "Authorization: Bearer ${VOXCPM_API_KEY:-}" \
+        "${VOXCPM_SHARED_URL:-http://127.0.0.1:10102}/healthz" >/dev/null 2>&1; then
+    echo "  tts        shared VoxCPM  OK"
+  else
+    echo "  tts        shared VoxCPM  DOWN"
+  fi
+else
+  check "${FISH_S2_PORT:-18781}" Fish-S2
+fi
 if [[ "${WEBRTC_ENABLED:-1}" != "0" ]]; then
   check "${MEDIAMTX_WHEP_PORT:-18889}" MediaMTX-WHEP
   check "${MEDIAMTX_RTSP_PORT:-18554}" MediaMTX-RTSP

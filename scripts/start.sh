@@ -352,18 +352,25 @@ start_bg log_guard "$RUN/log_guard.pid" "$LOG/log_guard.log" \
 # Grok stays private on loopback.  The official CLI owns the OAuth file; the
 # proxy only reads it and persists refreshed credentials in an owner-only
 # runtime directory outside the Git checkout.
+if [[ "${ADMIN_SETTINGS_PASSWORD:-123456}" == "123456" ]]; then
+  say "warning: ADMIN_SETTINGS_PASSWORD is still the default; change it before public use"
+fi
+
 if [[ "$GROK_ENABLED" == "1" ]]; then
-  [[ -x /usr/local/bin/grok-reverse-proxy ]] || die "Grok proxy binary is missing"
-  [[ -f /root/.grok/auth.json ]] || die "Grok is not logged in; run: grok login --device-auth"
-  mkdir -p /root/.local/share/grok-reverse-proxy
-  chmod 700 /root/.local/share/grok-reverse-proxy
+  GROK_BIN="${GROK_PROXY_BIN:-/usr/local/bin/grok-reverse-proxy}"
+  GROK_AUTH_FILE="${GROK_AUTH_FILE:-$HOME/.grok/auth.json}"
+  GROK_STATE_DIR="${GROK_STATE_DIR:-$HOME/.local/share/grok-reverse-proxy}"
+  [[ -x "$GROK_BIN" ]] || die "Grok proxy binary is missing at $GROK_BIN"
+  [[ -f "$GROK_AUTH_FILE" ]] || die "Grok is not logged in; run: grok login --device-auth"
+  mkdir -p "$GROK_STATE_DIR"
+  chmod 700 "$GROK_STATE_DIR"
   start_bg grok_proxy "$RUN/grok_proxy.pid" "$LOG/grok_proxy.log" \
     env GROK_LISTEN_ADDR="127.0.0.1:${GROK_PROXY_PORT}" \
-      GROK_AUTH_FILES=/root/.grok/auth.json \
-      GROK_STATE_FILE=/root/.local/share/grok-reverse-proxy/accounts.json \
+      GROK_AUTH_FILES="$GROK_AUTH_FILE" \
+      GROK_STATE_FILE="$GROK_STATE_DIR/accounts.json" \
       GROK_REQUEST_TIMEOUT="${GROK_TIMEOUT_SECONDS}s" \
       GROK_MAX_CONCURRENCY_PER_ACCOUNT="$GROK_MAX_CONCURRENCY_PER_ACCOUNT" \
-      /usr/local/bin/grok-reverse-proxy
+      "$GROK_BIN"
   wait_port "$GROK_PROXY_PORT" "grok-proxy" 20
   curl -fsS "http://127.0.0.1:${GROK_PROXY_PORT}/healthz" >/dev/null \
     || die "Grok proxy health check failed"

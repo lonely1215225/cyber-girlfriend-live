@@ -33,13 +33,22 @@ stop_stack() {
 }
 trap stop_stack TERM INT
 
-# start.sh daemonizes nginx and the Python workers. Stay alive with them.
+alive_pidfile() {
+  local pidfile="$1"
+  local pid
+  [[ -f "$pidfile" ]] || return 1
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# start.sh daemonizes nginx and the Python workers. Stay alive only while the
+# public edge and the two processes that actually talk are still up.
 while true; do
-  nginx_pid=""
-  [[ -f "$ROOT/run/nginx.pid" ]] && nginx_pid="$(cat "$ROOT/run/nginx.pid" 2>/dev/null || true)"
-  if [[ "$nginx_pid" =~ ^[0-9]+$ ]] && kill -0 "$nginx_pid" 2>/dev/null; then
+  if alive_pidfile "$ROOT/run/nginx.pid" \
+      && alive_pidfile "$ROOT/run/web.pid" \
+      && alive_pidfile "$ROOT/run/s2s.pid"; then
     sleep 2
     continue
   fi
-  die "nginx exited; see $ROOT/logs"
+  die "nginx, web, or speech-to-speech exited; see $ROOT/logs"
 done

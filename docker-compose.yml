@@ -16,14 +16,14 @@ services:
     ipc: host
     shm_size: 8gb
     gpus: all
-    working_dir: ${COMPOSE_PROJECT_DIR}
+    working_dir: ${COMPOSE_PROJECT_DIR:-.}
     environment:
-      ROOT: ${COMPOSE_PROJECT_DIR}
+      ROOT: ${COMPOSE_PROJECT_DIR:-.}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
     ulimits:
       memlock: -1
       stack: 67108864
     volumes:
-      - ${COMPOSE_PROJECT_DIR}:${COMPOSE_PROJECT_DIR}
-      - ${COMPOSE_PROJECT_DIR}:/opt/cyber-girlfriend
+      - ${COMPOSE_PROJECT_DIR:-.}:${COMPOSE_PROJECT_DIR:-.}
+      - ${COMPOSE_PROJECT_DIR:-.}:/opt/cyber-girlfriend
