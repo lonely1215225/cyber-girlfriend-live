@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import contextlib
 import json
 import time
 import unittest
@@ -37,6 +38,9 @@ class MentionReplyTests(unittest.TestCase):
 
 class FakeRoom:
     async def can_bot_reply(self):
+        return True
+
+    async def can_start_proactive(self):
         return True
 
     async def publish_agent_job(self, job, **_kwargs):
@@ -263,6 +267,20 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(worker.enqueue_proactive("再讲一条新闻"))
         self.assertEqual(len(worker.pending), 1)
         self.assertTrue(worker.pending[0].proactive)
+
+    async def test_empty_room_drops_queued_idle_news(self):
+        class EmptyRoom(FakeRoom):
+            async def can_start_proactive(self):
+                return False
+
+        worker = MentionReplyWorker(EmptyRoom(), mock.Mock(), "ws://unused")
+        worker.enqueue_proactive("讲一条新闻")
+        worker._run_task = asyncio.create_task(worker._run())
+        await asyncio.sleep(0.05)
+        worker._run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker._run_task
+        self.assertEqual(len(worker.pending), 0)
 
     async def test_model_native_tool_calls_run_in_parallel_with_progress(self):
         class RecordingRoom(FakeRoom):

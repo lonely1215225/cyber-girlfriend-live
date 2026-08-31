@@ -18,6 +18,20 @@ from typing import Any
 
 from room_store import RoomStore
 
+try:
+    from fish_s2_tags import clean_public_fish_text
+except ImportError:
+    _FISH_TAG_RE = re.compile(r"\[[A-Za-z][^\[\]]{0,80}\]")
+
+    def clean_public_fish_text(text: str) -> str:
+        value = _FISH_TAG_RE.sub("", str(text or ""))
+        opening = value.rfind("[")
+        if opening >= 0:
+            tail = value[opening:]
+            if "]" not in tail and re.match(r"\[[A-Za-z]", tail):
+                value = value[:opening]
+        return value
+
 
 CHINESE_SURNAMES = (
     "林", "苏", "沈", "顾", "陆", "江", "叶", "夏", "白", "许", "周", "程",
@@ -115,6 +129,7 @@ def _clean_public_text(value: str, *, assistant: bool = False) -> str:
             if _looks_like_incomplete_delivery(text[index:].split()):
                 text = text[:index]
                 break
+        text = clean_public_fish_text(text)
     return _SPACE_RE.sub(" ", text).strip()
 
 
@@ -618,12 +633,17 @@ class LiveRoom:
             self._expire_active_locked()
             return self._active is None and not self._queue
 
+    def _watching_count_locked(self) -> int:
+        return sum(1 for person in self._participants.values() if person.connections > 0)
+
     async def can_start_proactive(self) -> bool:
-        """Do not interrupt an Agent query or the user's immediate follow-up window."""
+        """News only plays to a watched room, and never over a call or query."""
         async with self._lock:
             self._expire_active_locked()
             return (
-                self._active is None and not self._queue
+                self._watching_count_locked() >= 1
+                and self._active is None
+                and not self._queue
                 and time.monotonic() >= self._proactive_block_until
             )
 

@@ -29,7 +29,16 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
             await self.room.rename(self.cara.token, "独一无二")
         self.assertEqual(caught.exception.code, "name_taken")
 
+    async def test_proactive_news_needs_a_watching_viewer(self):
+        self.assertFalse(await self.room.can_start_proactive())
+        channel, arrived = await self.room.subscribe_presence(self.alice.token)
+        self.assertTrue(arrived)
+        self.assertTrue(await self.room.can_start_proactive())
+        await self.room.unsubscribe(channel)
+        self.assertFalse(await self.room.can_start_proactive())
+
     async def test_agent_updates_block_proactive_news_cooldown(self):
+        await self.room.subscribe_presence(self.alice.token)
         self.assertTrue(await self.room.can_start_proactive())
         await self.room.publish_agent_job({
             "id": "job-one", "message_id": "msg-one", "participant_id": self.alice.id,

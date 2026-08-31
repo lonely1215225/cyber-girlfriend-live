@@ -284,6 +284,9 @@ class MentionReplyWorker:
                     pass
                 continue
             request = self.pending.popleft()
+            if request.proactive and not await self.room.can_start_proactive():
+                logger.info("dropped idle news because the room is empty or busy")
+                continue
             self._active_request = request
             self._response_task = asyncio.create_task(self._respond(request))
             try:
@@ -586,8 +589,10 @@ class MentionReplyWorker:
                 if request.proactive:
                     instructions += (
                         "现在是无人连线时的直播间主动播报，不要假装在回复某位观众。"
+                        "房间里有人在看，只是没人连麦；对着观众说话，不要说直播间没人。"
                         "声音表演要先保证清晰、完整，再根据新闻本身决定轻快、认真、"
                         "惊讶或克制的情绪；严肃事件不撒娇、不发笑。"
+                        "必须说完整句子，用句号、问号或感叹号收尾，禁止半句截断。"
                     )
                     user_text = request.prompt
                 elif request.welcome:
