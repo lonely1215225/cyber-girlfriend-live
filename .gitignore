@@ -16,7 +16,6 @@
 /data/*.json
 /data/voices/
 /apps/web/tts-previews/
-/assets/expressions/
 /docs/demos/avtr-expression-test/
 /.cache/
 .pytest_cache/

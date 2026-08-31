@@ -55,6 +55,7 @@ need=(
   assets/looks/sauna_portrait.png
   assets/avatars/sauna_portrait.jpg
   assets/looks/pasteback_mask_soft.png
+  assets/expressions/xiaoya_locket/reference-happy.png
   deploy/nginx/nginx.conf.tpl
   deploy/docker/Dockerfile
   deploy/docker/entrypoint.sh

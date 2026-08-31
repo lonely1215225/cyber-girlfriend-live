@@ -404,6 +404,7 @@ assets/avatars/xiaoya.jpg     # 兼容用形象素材
 assets/looks/xiaoya_idle.png  # 从 idle.mp4 选取的暖光正脸形象
 assets/ref_fish.wav           # 系统默认克隆参考（由 ref16k.wav 裁剪得到）
 assets/ref16k.wav             # 原始参考；缺失 ref_fish.wav 时由启动脚本生成
+assets/expressions/xiaoya_locket/  # 待机表情参考图，启动时预加载到 AVTR
 ```
 
 其他内置形象也保存在 `assets/looks/`。管理员验证后可在设置顶部编辑并切换角色档案；其中“暖光正脸”取自 `assets/idle.mp4` 的清晰正脸帧。所有在线观众通过服务端事件同步当前角色，事件连接断开时自动轮询恢复。这些默认形象不会被安装脚本或运行时清理；直播间中普通观众也不能修改角色、动作或音色。替换人物或声音素材前，请确认你拥有相应图片、声音和肖像的合法使用授权。
