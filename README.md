@@ -29,7 +29,7 @@
 | 沉浸式公屏 | 左下角无边框渐隐聊天，桌面端可展开，移动端默认只显示最近三条，减少画面遮挡 |
 | `@小麻` 语音回复 | 无人连线时，公屏提及会进入独立 FIFO 队列，由数字人口播并展示引用关系 |
 | 主动交互 | 连线成功主动欢迎；双方安静一段时间后，会主动询问近况或发起动漫、动物、音乐等话题 |
-| MCP 工具 | 对话可调用 CoinGecko、Exa 与 GDELT，查询行情、网页内容和全球新闻 |
+| MCP 工具 | 默认关闭。主动新闻仍走 RSS；把 `DIALOGUE_TOOLS_ENABLED=1` 后，连线和 `@小麻` 才可调用搜索与 MCP |
 | 双层记忆 | 热上下文保留近期原文，旧内容先本地结构化压缩，再于空闲期异步进行语义整理 |
 | 管理设置保护 | 右上角工具与设置需要密码解锁，带 HttpOnly 会话与失败频率限制 |
 | 本地 AI 栈 | SenseVoice、Ollama/Qwen、Fish S2 或共享 VoxCPM，以及 AVTR-1 全部运行在自己的 GPU 服务器上 |
@@ -63,7 +63,7 @@ flowchart LR
     STT --> L[Responses LLM Router]
     L -->|primary| GX[Grok 4.6]
     L -. automatic fallback .-> O[Ollama + Qwen 9B]
-    L <--> M[MCP Gateway]
+    L -. DIALOGUE_TOOLS_ENABLED=1 .-> M[MCP Gateway]
     M --> C[CoinGecko]
     M --> E[Exa]
     M --> G[GDELT]
@@ -198,6 +198,7 @@ docker compose up -d --build
 | `LIVE_ROOM_JOIN_TIMEOUT` | `60` | 队首获得席位后的确认时间，单位秒 |
 | `LIVE_ROOM_MAX_CALL_SECONDS` | `600` | 单次连线最长时间，单位秒 |
 | `MENTION_REPLY_QUEUE_LIMIT` | `30` | `@小麻` 待回复队列上限 |
+| `DIALOGUE_TOOLS_ENABLED` | `0` | 连线 / `@小麻` 是否向模型暴露搜索和 MCP。默认关闭，只做陪伴聊天 |
 | `ADMIN_SETTINGS_PASSWORD` | `123456` | 右上角工具与设置的初始密码，公网部署务必修改 |
 | `ADMIN_SESSION_TTL_SECONDS` | `1800` | 管理解锁会话有效期，单位秒 |
 | `ROOM_DB_PATH` | `data/live_room.sqlite3` | 用户、浏览器会话、聊天、个人记忆和管理审计数据库 |
@@ -266,7 +267,7 @@ SEARXNG_URL=
 | `SMART_SEARCH_CACHE_SECONDS` | `180` | 相同查询的结果缓存时间，减少免费额度消耗 |
 | `SMART_SEARCH_COOLDOWN_SECONDS` | `60` | 同一供应商连续失败后的熔断时间 |
 
-没有配置任何搜索 Key 时，项目仍能正常启动，并继续使用 RSS、CoinGecko 和已有 MCP。配置 Key 后运行 `./scripts/start.sh` 重启服务即可自动出现 `smart_web_search` 工具。Tavily 正常返回时不会再调用 Exa，避免一次提问同时消耗两家的免费额度；连续失败的来源会临时熔断并自动恢复。
+没有配置任何搜索 Key 时，项目仍能正常启动，主动话题继续使用 RSS。即使配置了 Key，也必须把 `DIALOGUE_TOOLS_ENABLED=1` 并重启，连线对话才会出现 `smart_web_search`；前端同样有硬开关，避免旧页面把搜索工具塞回语音会话。Tavily 正常返回时不会再调用 Exa，避免一次提问同时消耗两家的免费额度；连续失败的来源会临时熔断并自动恢复。
 
 在线状态、连线排队和未完成回复仍只保存在内存，因为这些状态在进程重启后已经失效。管理员解锁采用数据库中的随机独立会话，每个浏览器分别授权、分别过期和撤销；全局形象修改会写入审计日志。
 
@@ -368,7 +369,9 @@ TTS 首次启动会把 `REF_AUDIO` 和 `REF_TEXT` 注册为不可删除的系统
 
 ## MCP 工具
 
-`@小麻` 使用统一的模型原生工具循环，不再维护“价格、新闻、涨跌原因”等关键词路由。模型可连续进行最多三轮工具调用；同一轮的独立调用会并行执行，工具结果作为结构化观察返回给同一会话，再由模型决定继续查询还是给出答案。
+默认 `DIALOGUE_TOOLS_ENABLED=0`：连线和评论回复只做陪伴聊天，不会调用搜索、行情或 MCP。主动播报仍使用下面的 RSS 池，不经过这套工具循环。
+
+打开后，`@小麻` 与当前连线者使用统一的模型原生工具循环，不再维护“价格、新闻、涨跌原因”等关键词路由。模型可连续进行最多三轮工具调用；同一轮的独立调用会并行执行，工具结果作为结构化观察返回给同一会话，再由模型决定继续查询还是给出答案。
 
 主动话题默认使用无需 API Key 的中文 AnyFeeder RSS 池：新闻类包括 iDaily 每日环球视野、中国新闻网国际新闻、澎湃新闻和人民日报；科技类包括极客公园、cnBeta 和 IT之家；知识类使用知乎日报。固定源采用受控并发拉取，单源失败只跳过该源，不会拖垮整批播报。Google News 查询 RSS 仅用于观众主动提出的具体新闻检索，不参与日常主动话题池。聚合器只保留标题、发布时间、简短摘要、来源和原文链接，按相关性与发布时间去重排序；不抓取或转载新闻全文。
 
@@ -475,7 +478,7 @@ s2s/.venv/bin/python -m unittest discover -s tests -v
 <details>
 <summary><strong>MCP 工具没有被调用怎么办？</strong></summary>
 
-确认 `MCP_ENABLED=1`、服务器能访问对应 MCP 地址，并在管理员工具面板查看工具是否加载成功。模型只会在问题确实需要外部信息时调用工具，普通闲聊不会强制调用。
+先确认 `DIALOGUE_TOOLS_ENABLED=1` 并重启，否则连线里根本不会挂工具。然后再看 `MCP_ENABLED=1`、服务器能否访问对应 MCP 地址，以及管理员工具面板是否加载成功。默认陪伴模式下模型被明确要求不调用外部工具。
 
 </details>
 
