@@ -15,7 +15,7 @@ nvidia-smi >/dev/null || die "GPU 驱动不可用"
 
 LISTEN_HTTP_PORT="${LISTEN_HTTP_PORT:-19800}"
 export HF_HOME="${HF_HOME:-$ROOT/.cache/huggingface}"
-mkdir -p "$HF_HOME" "$ROOT/models" "$ROOT/logs" "$ROOT/run" "$ROOT/proxy/certs"
+mkdir -p "$HF_HOME" "$ROOT/models" "$ROOT/logs" "$ROOT/run" "$ROOT/deploy/certs"
 
 if [[ -f /workspace/.hf_token ]]; then
   export HF_TOKEN
@@ -184,15 +184,18 @@ if [[ ! -f "$ROOT/config.env" ]]; then
 else
   say "已有 config.env，未覆盖"
 fi
-if [[ ! -f "$ROOT/proxy/certs/server.crt" ]]; then
+if [[ ! -f "$ROOT/deploy/certs/server.crt" && -f "$ROOT/proxy/certs/server.crt" ]]; then
+  cp -a "$ROOT/proxy/certs/." "$ROOT/deploy/certs/"
+fi
+if [[ ! -f "$ROOT/deploy/certs/server.crt" ]]; then
   if [[ "$PUBLIC_IP" =~ ^[0-9a-fA-F:.]+$ ]]; then
     SAN="IP:${PUBLIC_IP}"
   else
     SAN="DNS:${PUBLIC_IP}"
   fi
   openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "$ROOT/proxy/certs/server.key" \
-    -out "$ROOT/proxy/certs/server.crt" \
+    -keyout "$ROOT/deploy/certs/server.key" \
+    -out "$ROOT/deploy/certs/server.crt" \
     -days 3650 \
     -subj "/CN=${PUBLIC_IP}" \
     -addext "subjectAltName=${SAN}"

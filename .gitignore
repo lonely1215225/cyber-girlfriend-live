@@ -1,6 +1,7 @@
 # Local configuration and credentials
 /config.env
 /proxy/certs/
+/deploy/certs/
 
 # Runtime state
 /logs/

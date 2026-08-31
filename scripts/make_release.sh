@@ -21,6 +21,7 @@ rsync -a \
   --exclude 'third_party/avtr-1/**/__pycache__/' \
   --exclude 'third_party/avtr-1/tests/' \
   --exclude 'proxy/certs/' \
+  --exclude 'deploy/certs/' \
   --exclude 'proxy/nginx.conf' \
   --exclude 'scripts/make_release.sh' \
   --exclude 'config.env' \
@@ -32,7 +33,7 @@ if [[ -f "$PLUGIN_SO" ]]; then
 fi
 
 mkdir -p "$STAGE/cyber-girlfriend/models" "$STAGE/cyber-girlfriend/logs" "$STAGE/cyber-girlfriend/run" \
-  "$STAGE/cyber-girlfriend/proxy/certs"
+  "$STAGE/cyber-girlfriend/deploy/certs"
 chmod +x "$STAGE/cyber-girlfriend/install.sh" \
   "$STAGE/cyber-girlfriend/scripts/"*.sh
 
@@ -53,7 +54,7 @@ need=(
   assets/looks/sauna_portrait.png
   assets/avatars/sauna_portrait.jpg
   assets/looks/pasteback_mask_soft.png
-  proxy/nginx.conf.tpl
+  deploy/nginx/nginx.conf.tpl
   proxy/avtr1_gateway.py
   assets/libgrid_sample_3d_plugin.so
 )

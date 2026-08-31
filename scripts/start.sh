@@ -129,16 +129,20 @@ if [[ ! -f "$REF_AUDIO" && -f "$SOURCE_REF" ]]; then
     --src "$SOURCE_REF" --dst "$REF_AUDIO" --tail-seconds 6
 fi
 [[ -f "$REF_AUDIO" ]] || die "missing ref audio $REF_AUDIO"
-mkdir -p "$ROOT/proxy/certs"
-if [[ ! -f "$ROOT/proxy/certs/server.crt" ]]; then
+CERT_DIR="$ROOT/deploy/certs"
+mkdir -p "$CERT_DIR"
+if [[ ! -f "$CERT_DIR/server.crt" && -f "$ROOT/proxy/certs/server.crt" ]]; then
+  cp -a "$ROOT/proxy/certs/." "$CERT_DIR/"
+fi
+if [[ ! -f "$CERT_DIR/server.crt" ]]; then
   if [[ "${PUBLIC_IP}" =~ ^[0-9a-fA-F:.]+$ ]]; then
     SAN="IP:${PUBLIC_IP}"
   else
     SAN="DNS:${PUBLIC_IP}"
   fi
   openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "$ROOT/proxy/certs/server.key" \
-    -out "$ROOT/proxy/certs/server.crt" \
+    -keyout "$CERT_DIR/server.key" \
+    -out "$CERT_DIR/server.crt" \
     -days 3650 \
     -subj "/CN=${PUBLIC_IP}" \
     -addext "subjectAltName=${SAN}"
@@ -526,7 +530,7 @@ if [[ "$WEBRTC_ENABLED" != "0" ]]; then
       -e "s|__WEBRTC_UDP_PORT__|$WEBRTC_UDP_PORT|g" \
       -e "s|__WEBRTC_TCP_PORT__|$WEBRTC_TCP_PORT|g" \
       -e "s|__WEBRTC_PUBLIC_HOST__|$WEBRTC_PUBLIC_HOST|g" \
-    "$ROOT/proxy/mediamtx.yml.tpl" > "$MEDIAMTX_CONF_TMP"
+    "$ROOT/deploy/mediamtx/mediamtx.yml.tpl" > "$MEDIAMTX_CONF_TMP"
   if grep -qE '__[A-Z0-9_]+__' "$MEDIAMTX_CONF_TMP"; then
     rm -f "$MEDIAMTX_CONF_TMP"
     die "MediaMTX template substitution left unresolved placeholders"
@@ -717,13 +721,14 @@ wait_port "$WEB_PORT" "frontend" 30
 # 7) nginx public proxy
 NGINX_CONF="$RUN/nginx.conf"
 sed -e "s|__ROOT__|$ROOT|g" \
+    -e "s|__CERT_DIR__|$CERT_DIR|g" \
     -e "s|__LISTEN_PORT__|${LISTEN_HTTP_PORT}|g" \
     -e "s|__NGINX_WORKERS__|${NGINX_WORKERS:-4}|g" \
     -e "s|__AVATAR_GW_PORT__|${AVATAR_GW_PORT:-18011}|g" \
     -e "s|__MEDIAMTX_WHEP_PORT__|${MEDIAMTX_WHEP_PORT:-18889}|g" \
     -e "s|__S2S_PORT__|${S2S_PORT}|g" \
     -e "s|__WEB_PORT__|${WEB_PORT}|g" \
-  "$ROOT/proxy/nginx.conf.tpl" > "$NGINX_CONF"
+  "$ROOT/deploy/nginx/nginx.conf.tpl" > "$NGINX_CONF"
 if [[ -f "$RUN/nginx.pid" ]] && kill -0 "$(cat "$RUN/nginx.pid")" 2>/dev/null; then
   nginx -c "$NGINX_CONF" -s reload
   say "nginx reloaded"

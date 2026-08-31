@@ -385,14 +385,15 @@ cyber-girlfriend-live/
 ├── assets/                         # 默认形象、背景与参考音色
 ├── docs/images/                    # README 演示素材
 ├── data/                           # 运行时 SQLite 用户与记忆数据库（不提交 Git）
+├── deploy/
+│   ├── nginx/nginx.conf.tpl        # 公网反向代理模板
+│   └── mediamtx/mediamtx.yml.tpl   # WHEP、ICE 端口与只读直播路径配置
 ├── proxy/
 │   ├── avtr1_gateway.py            # AVTR-1 会话、音画封装与 HTTP-FLV 网关
-│   ├── mediamtx.yml.tpl             # WHEP、ICE 端口与只读直播路径配置
 │   ├── s2s_with_avatar_tee.py      # TTS 音频分流、预缓冲与完整性控制
 │   ├── ollama_thinkless.py         # Ollama Responses 兼容及推理标签过滤
 │   ├── memory_compaction.py        # 本地结构化记忆压缩
-│   ├── tiered_memory.py            # 双层异步记忆管理
-│   └── nginx.conf.tpl              # 公网反向代理模板
+│   └── tiered_memory.py            # 双层异步记忆管理
 ├── apps/web/
 │   ├── server.py                   # FastAPI 页面、房间、鉴权与实时代理
 │   ├── room_manager.py             # 在线观众、连线队列与租约状态机

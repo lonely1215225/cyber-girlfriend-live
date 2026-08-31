@@ -24,8 +24,8 @@ http {
         listen __LISTEN_PORT__ ssl;
         server_name _;
 
-        ssl_certificate     __ROOT__/proxy/certs/server.crt;
-        ssl_certificate_key __ROOT__/proxy/certs/server.key;
+        ssl_certificate     __CERT_DIR__/server.crt;
+        ssl_certificate_key __CERT_DIR__/server.key;
         ssl_protocols TLSv1.2 TLSv1.3;
 
         proxy_http_version 1.1;
