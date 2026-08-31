@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
+from tests.import_paths import add_service_paths
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "proxy"))
+add_service_paths()
 
 from avtr1_gateway import FlvMuxer, SAMPLE_RATE  # noqa: E402
 

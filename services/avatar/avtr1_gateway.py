@@ -163,7 +163,7 @@ IDLE_EXPRESSION_QUIET_SECONDS = max(
 MOTION_CONFIG_PATH = os.path.realpath(
     os.environ.get(
         "AVTR1_MOTION_CONFIG_PATH",
-        os.path.join(os.path.dirname(__file__), "..", "data", "avtr_motion.json"),
+        os.path.join(os.path.dirname(__file__), "..", "..", "data", "avtr_motion.json"),
     )
 )
 

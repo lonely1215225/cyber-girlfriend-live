@@ -1,11 +1,9 @@
-import sys
 import asyncio
 import unittest
-from pathlib import Path
 
+from tests.import_paths import add_service_paths
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "proxy"))
+add_service_paths()
 
 import avtr1_gateway as gateway  # noqa: E402
 

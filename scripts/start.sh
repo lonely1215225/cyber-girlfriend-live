@@ -25,7 +25,7 @@ export TTS_MODEL REF_AUDIO REF_TEXT FISH_S2_PORT FISH_S2_URL TTS_BACKEND VOXCPM_
 export VOXCPM_TARGET_HANZI_PER_SEC="${VOXCPM_TARGET_HANZI_PER_SEC:-4.5}"
 export VOXCPM_PACE_FAST_THRESHOLD="${VOXCPM_PACE_FAST_THRESHOLD:-5.0}"
 export VOXCPM_MIN_ATEMPO="${VOXCPM_MIN_ATEMPO:-0.86}"
-export PYTHONPATH="$ROOT/proxy${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$ROOT/apps/speech:$ROOT/services/tts:$ROOT/services/avatar:$ROOT/services/llm${PYTHONPATH:+:$PYTHONPATH}"
 SENSEVOICE_MODEL="${SENSEVOICE_MODEL:-models/sensevoice/SenseVoiceSmall}"
 if [[ "$SENSEVOICE_MODEL" == models/* ]]; then
   SENSEVOICE_MODEL="$ROOT/$SENSEVOICE_MODEL"
@@ -371,7 +371,7 @@ fi
 
 # 0) Ollama think=false shim (Ollama /v1/responses ignores think and stalls 20s+)
 start_bg thinkless "$RUN/thinkless.pid" "$LOG/thinkless.log" \
-  "$S2S_VENV/bin/python" "$ROOT/proxy/ollama_thinkless.py"
+  "$S2S_VENV/bin/python" "$ROOT/services/llm/ollama_thinkless.py"
 wait_port "${THINKLESS_PORT:-11435}" "ollama-thinkless" 20
 if ! curl -sf "$LLM_BASE_URL/models" >/dev/null 2>&1; then
   die "thinkless proxy is not serving $LLM_BASE_URL/models"
@@ -502,7 +502,7 @@ else
 fi
 wait_port "${AVTR1_PORT:-18012}" "AVTR-1 renderer" 180
 start_bg avatar_gw "$RUN/avatar_gw.pid" "$LOG/avatar_gw.log" \
-  "$AVTR1_PY" "$ROOT/proxy/avtr1_gateway.py"
+  "$AVTR1_PY" "$ROOT/services/avatar/avtr1_gateway.py"
 wait_port "${AVATAR_GW_PORT:-18011}" "avatar-gateway" 60
 
 # 2) Low-latency WebRTC edge. Video is copied bit-for-bit from AVTR's H.264
@@ -684,7 +684,7 @@ start_bg s2s "$RUN/s2s.pid" "$LOG/s2s.log" \
       VOXCPM_TARGET_HANZI_PER_SEC="${VOXCPM_TARGET_HANZI_PER_SEC:-4.5}" \
       VOXCPM_PACE_FAST_THRESHOLD="${VOXCPM_PACE_FAST_THRESHOLD:-5.0}" \
       VOXCPM_MIN_ATEMPO="${VOXCPM_MIN_ATEMPO:-0.86}" \
-  "$S2S_VENV/bin/python" "$ROOT/proxy/s2s_with_avatar_tee.py" \
+  "$S2S_VENV/bin/python" "$ROOT/apps/speech/s2s_with_avatar_tee.py" \
     --device cuda \
     --mode realtime \
     --ws_host 127.0.0.1 \

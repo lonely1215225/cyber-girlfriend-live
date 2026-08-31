@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
+from tests.import_paths import add_service_paths
 
-PROXY = Path(__file__).resolve().parents[1] / "proxy"
-if str(PROXY) not in sys.path:
-    sys.path.insert(0, str(PROXY))
+add_service_paths()
 
 from output_harness import PublicOutputFilter, clean_public_output  # noqa: E402
 

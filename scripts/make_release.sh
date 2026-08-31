@@ -55,7 +55,7 @@ need=(
   assets/avatars/sauna_portrait.jpg
   assets/looks/pasteback_mask_soft.png
   deploy/nginx/nginx.conf.tpl
-  proxy/avtr1_gateway.py
+  services/avatar/avtr1_gateway.py
   assets/libgrid_sample_3d_plugin.so
 )
 for rel in "${need[@]}"; do

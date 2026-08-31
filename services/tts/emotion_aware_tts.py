@@ -366,7 +366,7 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
                 if not row:
                     raise ValueError("voice asset is not ready")
                 voice_dir = Path(os.environ.get(
-                    "VOICE_ASSET_DIR", str(Path(__file__).resolve().parents[1] / "data" / "voices")
+                    "VOICE_ASSET_DIR", str(Path(__file__).resolve().parents[2] / "data" / "voices")
                 )).resolve()
                 audio_path = (voice_dir / row["file_name"]).resolve()
                 if audio_path.parent != voice_dir.resolve() or not audio_path.is_file():
