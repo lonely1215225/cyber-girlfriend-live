@@ -1,0 +1,20 @@
+name: cyber-girlfriend
+
+services:
+  live:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+    image: cyber-girlfriend-live:latest
+    container_name: cyber-girlfriend-live
+    restart: unless-stopped
+    network_mode: host
+    ipc: host
+    shm_size: 8gb
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    volumes:
+      - .:/opt/cyber-girlfriend
+    working_dir: /opt/cyber-girlfriend
