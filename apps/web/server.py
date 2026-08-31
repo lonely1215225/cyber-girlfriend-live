@@ -1,43 +1,10 @@
 """
-Tiny server for the speech-to-speech demo.
+Live-room HTTP server: the page, SSE, admin, queue, and @mention voice.
 
-The demo used to ship as a `sdk: static` Space, but the web-search tool needs a
-search key the browser must NOT see. A static Space has no runtime process, so it
-can't hold a secret the front-end uses. This server fixes that: it serves the
-unchanged front-end AND exposes a same-origin `/api/search` proxy that holds the
-Serper key server-side (see docs/adr/0001).
-
-Everything lives in one container; the speech-to-speech backend stays a separate,
-load-balanced service the browser talks to over WebSocket as before. The load
-balancer's address is a secret too (like the Serper key): the browser never sees
-it. `/api/session` proxies the session handshake server-side so only the
-per-session compute URL the LB hands back (which the browser must dial) is exposed.
-
-On the deployed Space the server also meters conversation time by HF login tier
-(anonymous / signed-in / PRO) — see `limiter.py` and `auth.py`. That whole feature
-is off unless BOTH `LOAD_BALANCER_URL` and `SPACE_ID` are set, so it runs only on
-the live Space, never locally (even with the LB exported for testing).
-
-`SPEECH_TO_SPEECH_URL` overrides everything: when set, the LB logic above is
-disabled entirely (no session proxy, no queue, no metering, no sign-in) and the
-browser connects directly to that URL, shown read-only in Settings.
-
-Endpoints:
-  GET  /api/config           -> { search, lb, allowDirect, s2sUrl, auth }
-  GET  /api/me               -> login + tier + remaining budget (LB mode only)
-  POST /api/search           -> { results, answer }  Google via Serper.dev
-  POST /api/session          -> proxies <LB>/session: a grant, or a queue ticket
-  GET  /api/queue/{id}       -> proxies <LB>/queue/{id}: position, or a grant on claim
-  DELETE /api/queue/{id}     -> leave the queue (explicit "Leave queue" button)
-  POST /api/queue/end        -> leave the queue (sendBeacon on teardown)
-  POST /api/session/heartbeat-> extend the reservation; { expired }
-  POST /api/session/end      -> reconcile + refund (sendBeacon on teardown)
-  /*                         -> static files (index.html, main.js, ...)
-
-When every compute slot is busy the load balancer hands back a queue ticket
-instead of a grant; the browser polls /api/queue/{id} until it reaches the front
-and a slot frees. Waiting reserves nothing — the daily budget is only reserved at
-the moment a slot is actually claimed (a grant), never while queued.
+`LOAD_BALANCER_URL` / `SPACE_ID` still gate leftover Hugging Face Space
+session, OAuth, and talk-time limiter paths. The live stack sets the load
+balancer to disabled, so those routes stay inert. `/api/search` is the old
+Serper proxy and is unused while `DIALOGUE_TOOLS_ENABLED` is off.
 """
 
 import asyncio

@@ -1,5 +1,9 @@
 """
-Per-day talk-time budget for the speech-to-speech demo.
+Leftover Hugging Face Space per-day talk-time budget.
+
+Inactive unless both LOAD_BALANCER_URL and SPACE_ID are set. The live
+room does not meter viewers this way.
+
 
 Our server isn't in the audio path (the browser dials the compute WebSocket
 directly), so it can't cut a live stream. What it *can* do is meter time with a

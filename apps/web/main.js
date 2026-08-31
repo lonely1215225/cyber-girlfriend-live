@@ -1253,7 +1253,13 @@ settingsBtn.addEventListener("click", () => void requestAdminPanel("settings"));
 
 /** Reflect the current tool state into the panel controls. */
 function syncToolsUi() {
-  const avail = searchAvailable();
+  if (!DIALOGUE_TOOLS_ENABLED) {
+    toolWebRow.hidden = true;
+    if (mcpToolStatus) {
+      mcpToolStatus.textContent = "陪伴模式：连线不调用搜索和 MCP";
+    }
+  }
+  const avail = DIALOGUE_TOOLS_ENABLED && searchAvailable();
   toolWebSwitch.checked = toolsEnabled.web_search && avail;
   toolWebSwitch.disabled = !avail;
   toolWebRow.classList.toggle("disabled", !avail);
@@ -1271,10 +1277,10 @@ function syncToolsUi() {
   } else {
     searchKeyInput.disabled = false;
     searchKeyInput.value = userSearchKey;
-    searchKeyInput.placeholder = "Paste a Serper key to enable web search";
-    toolWebHint.textContent = userSearchKey
-      ? "Using your key — stored in this browser only."
-      : "No server key configured. Add your own Serper key to enable web search.";
+    searchKeyInput.placeholder = "陪伴模式不使用浏览器内搜索 Key";
+    toolWebHint.textContent = DIALOGUE_TOOLS_ENABLED
+      ? (userSearchKey ? "Using your key — stored in this browser only." : "No server search key configured.")
+      : "DIALOGUE_TOOLS_ENABLED=0，连线不会走这条搜索。";
   }
 }
 

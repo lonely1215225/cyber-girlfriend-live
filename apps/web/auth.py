@@ -1,5 +1,9 @@
 """
-HF OAuth + per-request identity for the duration limiter.
+Leftover Hugging Face Space OAuth + identity for the duration limiter.
+
+The live room does not enable this path. It stays imported so old Space
+env vars still work if someone points LOAD_BALANCER_URL at a balancer.
+
 
 Login uses Hugging Face's native Spaces OAuth via `huggingface_hub`
 (`attach_huggingface_oauth` / `parse_huggingface_oauth`). The OAuth env
