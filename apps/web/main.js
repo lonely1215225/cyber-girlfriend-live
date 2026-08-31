@@ -1343,7 +1343,9 @@ searchKeyInput.addEventListener("input", () => {
   }
   toolWebHint.textContent = userSearchKey
     ? "Using your key — stored in this browser only."
-    : "No server key configured. Add your own Serper key to enable web search.";
+    : (DIALOGUE_TOOLS_ENABLED
+        ? "No server search key configured."
+        : "DIALOGUE_TOOLS_ENABLED=0，连线不会走这条搜索。");
 });
 
 // ── Camera ──────────────────────────────────────────────────────────────────
