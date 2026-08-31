@@ -1006,7 +1006,8 @@ function renderVoiceLibrary() {
     title.textContent = voice.name;
     const meta = document.createElement("small");
     const stateLabel = voice.status === "ready" ? "可绑定" : voice.status === "transcribing" ? "正在自动识别" : "请确认参考文本";
-    meta.textContent = `${(voice.duration_ms / 1000).toFixed(1)} 秒 · ${stateLabel}${voice.system ? " · 系统" : ""}`;
+    const rateLabel = voice.sample_rate ? ` · ${Math.round(Number(voice.sample_rate) / 1000)} kHz` : "";
+    meta.textContent = `${(voice.duration_ms / 1000).toFixed(1)} 秒${rateLabel} · ${stateLabel}${voice.system ? " · 系统" : ""}`;
     info.append(title, meta);
     if (voice.status === "draft") {
       const transcript = document.createElement("textarea"); transcript.rows = 2; transcript.maxLength = 1000;

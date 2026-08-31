@@ -455,7 +455,7 @@
 
     <dialog id="voice-manager-modal" class="modal voice-manager-modal">
       <div class="modal-content voice-manager-card">
-        <header class="modal-header"><div><h2>音色管理</h2><p>上传或录制同一个人的清晰语音，并填写音频中逐字一致的参考文本。</p></div><button id="voice-manager-close" class="icon-btn" type="button" aria-label="关闭">×</button></header>
+        <header class="modal-header"><div><h2>音色管理</h2><p>上传 48 kHz（或 44.1 kHz）清晰人声 WAV/MP3，3～15 秒，并填写录音里逐字一致的参考文本。采样率越高，克隆越透亮。</p></div><button id="voice-manager-close" class="icon-btn" type="button" aria-label="关闭">×</button></header>
         <div class="voice-create-grid">
           <label class="field"><span>音色名称</span><input id="voice-upload-name" maxlength="48" placeholder="例如：小雅温柔音色" /></label>
           <label class="field"><span>准确参考文本</span><textarea id="voice-upload-text" rows="3" maxlength="1000" placeholder="请逐字填写录音里说出的内容，确认后音色才能绑定"></textarea></label>
@@ -537,6 +537,6 @@
     <script src="/vendor/mpegts.min.js"></script>
     <script src="/avatar-sync.js?v=20260828a"></script>
     <script type="module" src="room.js?v=20260825d"></script>
-    <script type="module" src="main.js?v=20260829a"></script>
+    <script type="module" src="main.js?v=20260901a"></script>
   </body>
 </html>

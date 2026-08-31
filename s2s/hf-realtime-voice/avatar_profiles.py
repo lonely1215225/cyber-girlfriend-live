@@ -98,7 +98,7 @@ class AvatarProfileStore:
                     file_name TEXT NOT NULL UNIQUE,
                     ref_text TEXT NOT NULL DEFAULT '',
                     duration_ms INTEGER NOT NULL DEFAULT 0,
-                    sample_rate INTEGER NOT NULL DEFAULT 24000,
+                    sample_rate INTEGER NOT NULL DEFAULT 48000,
                     source TEXT NOT NULL DEFAULT 'upload',
                     status TEXT NOT NULL DEFAULT 'draft',
                     checksum TEXT NOT NULL DEFAULT '',
@@ -220,7 +220,7 @@ class AvatarProfileStore:
                 rate = audio.getframerate()
                 return int(audio.getnframes() * 1000 / max(1, rate)), rate
         except (OSError, wave.Error):
-            return 0, 24000
+            return 0, 48000
 
     @staticmethod
     def _wav_quality(path: Path) -> tuple[float, float]:
@@ -249,7 +249,11 @@ class AvatarProfileStore:
             "voice": {"id": row["voice_id"], "name": row["voice_name"], "duration_ms": row["duration_ms"],
                       "status": row["voice_status"]},
             "tts": {
-                "provider": "qwen3",
+                "provider": (
+                    "voxcpm"
+                    if os.environ.get("TTS_BACKEND", "fish_s2") in {"voxcpm", "voxcpm_shared"}
+                    else "fish"
+                ),
                 "config_revision": row["tts_config_revision"],
                 "emotion_reference_count": len(emotion_refs),
             },
@@ -428,11 +432,17 @@ class AvatarProfileStore:
         target = self.voice_dir / f"{voice_id}.wav"
         incoming.write_bytes(data)
         try:
-            command = ["ffmpeg", "-v", "error", "-y", "-i", str(incoming), "-af",
-                       "silenceremove=start_periods=1:start_silence=0.15:start_threshold=-45dB,"
-                       "areverse,silenceremove=start_periods=1:start_silence=0.2:start_threshold=-45dB,areverse,"
-                       "loudnorm=I=-20:LRA=7:TP=-2,alimiter=limit=0.95",
-                       "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(target)]
+            # VoxCPM2 is 48 kHz. Keep that rate and avoid loudnorm, which
+            # flattens the highs that make a clone sound bright.
+            command = [
+                "ffmpeg", "-v", "error", "-y", "-i", str(incoming),
+                "-af",
+                "silenceremove=start_periods=1:start_silence=0.15:start_threshold=-45dB,"
+                "areverse,silenceremove=start_periods=1:start_silence=0.2:start_threshold=-45dB,areverse,"
+                "aresample=48000:resampler=soxr:precision=28,"
+                "alimiter=limit=0.95",
+                "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(target),
+            ]
             done = subprocess.run(command, capture_output=True, timeout=45, check=False)
             if done.returncode != 0 or not target.is_file():
                 raise ValueError("无法解码音频，请上传清晰的 WAV、MP3、M4A、WebM 或 Ogg")

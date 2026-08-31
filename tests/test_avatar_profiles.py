@@ -43,7 +43,7 @@ class AvatarProfileStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(two["view"]["size"], 110)
         self.assertNotEqual(one["persona_prompt"], two["persona_prompt"])
         self.assertEqual(two["persona_prompt"], "你叫阿月，性格活泼，喜欢音乐。")
-        self.assertEqual(two["tts"]["provider"], "qwen3")
+        self.assertEqual(two["tts"]["provider"], "fish")
         await self.store.set_pending("two")
         self.assertEqual((await self.store.active())["pending_avatar_id"], "two")
         await self.store.activate("two")
@@ -103,7 +103,7 @@ class AvatarProfileStoreTests(unittest.IsolatedAsyncioTestCase):
             output.writeframes(struct.pack(f"<{len(frames)}h", *frames))
         voice = await self.store.create_voice(source.read_bytes(), name="测试", ref_text="测试参考文本", source="upload", suffix=".wav")
         self.assertEqual(voice["status"], "ready")
-        self.assertEqual(voice["sample_rate"], 24000)
+        self.assertEqual(voice["sample_rate"], 48000)
         await self.store.update_profile("one", voice_asset_id=voice["id"])
         with self.assertRaises(ValueError):
             await self.store.archive_voice(voice["id"])
