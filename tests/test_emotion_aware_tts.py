@@ -171,13 +171,13 @@ class EmotionAwareTTSTests(unittest.TestCase):
     def test_local_model_attribute_serialization_and_closing_tag_are_hidden(self) -> None:
         control = DeliveryControlFilter()
         visible = control.feed(
-            '<e profile="happy" intensity=0.68 style=cheerful mouth=0.16>'
+            '<e profile="laugh" intensity=0.68 style=cheerful mouth=0.16>'
             '见到你当然开心呀。</e>'
         )
         self.assertEqual(visible, "见到你当然开心呀。")
         cue = publish_expression(visible)
         self.assertEqual(cue.source, "llm")
-        self.assertEqual(cue.profile, "happy")
+        self.assertEqual(cue.profile, "laugh")
         self.assertAlmostEqual(cue.intensity, 0.68)
 
     def test_bare_control_line_never_leaks_to_chat_or_tts(self) -> None:
@@ -205,7 +205,7 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(visible, "哟，敢不敢比？ 输了可别跑。")
         first = publish_expression(visible)
         timeline = cues_after(first.sequence - 1)
-        self.assertEqual([cue.profile for cue in timeline], ["smirk", "happy"])
+        self.assertEqual([cue.profile for cue in timeline], ["smirk", "neutral"])
 
     def test_inline_controls_advance_each_spoken_segment(self) -> None:
         control = DeliveryControlFilter()
@@ -219,7 +219,7 @@ class EmotionAwareTTSTests(unittest.TestCase):
 
     def test_later_tts_segment_keeps_absolute_response_timing(self) -> None:
         control = DeliveryControlFilter()
-        first_text = control.feed("<e happy 0.65 cheerful>第一句先开心地说完。")
+        first_text = control.feed("<e laugh 0.65 cheerful>第一句先开心地说完。")
         first_cue = publish_expression(first_text)
         second_text = control.feed("<e shy 0.60 gentle>第二句再慢慢害羞。")
         second_cue = publish_expression(second_text)
@@ -230,14 +230,14 @@ class EmotionAwareTTSTests(unittest.TestCase):
         control = DeliveryControlFilter()
         visible = "".join(
             (
-                control.feed("happy 0.58 neutral 0.08"),
+                control.feed("laugh 0.58 neutral 0.08"),
                 control.feed(" none 1.00\n先说正事。"),
             )
         )
         self.assertEqual(visible, "先说正事。")
         cue = publish_expression(visible)
         self.assertEqual(cue.source, "llm")
-        self.assertEqual(cue.profile, "happy")
+        self.assertEqual(cue.profile, "laugh")
         self.assertEqual(cue.vocal_emotion, "neutral")
         self.assertAlmostEqual(cue.vocal_intensity, 0.08)
 
@@ -248,8 +248,23 @@ class EmotionAwareTTSTests(unittest.TestCase):
         cue = publish_expression(visible)
         self.assertEqual(cue.source, "fallback")
 
+    def test_retired_faces_are_remapped_away_from_dropped_portraits(self) -> None:
+        control = DeliveryControlFilter()
+        visible = control.feed("<e happy 0.68 cheerful>见到你真好。")
+        self.assertEqual(visible, "见到你真好。")
+        happy_cue = publish_expression(visible)
+        self.assertEqual(happy_cue.profile, "neutral")
+        self.assertEqual(happy_cue.intensity, 0.0)
+
+        begin_delivery_generation()
+        visible = control.feed("<e serious 0.62 serious>先把正事说清楚。")
+        self.assertEqual(visible, "先把正事说清楚。")
+        serious_cue = publish_expression(visible)
+        self.assertEqual(serious_cue.profile, "neutral")
+        self.assertEqual(serious_cue.intensity, 0.0)
+
     def test_visual_hold_is_based_on_length_not_phrase_matching(self) -> None:
-        self.assertEqual(cue_duration_ms("甲乙丙丁", "happy"), cue_duration_ms("春夏秋冬", "happy"))
+        self.assertEqual(cue_duration_ms("甲乙丙丁", "laugh"), cue_duration_ms("春夏秋冬", "laugh"))
 
     def test_fish_tags_survive_speechable_filter_and_are_hidden_from_viewers(self) -> None:
         spoken = "[laughing]嘿嘿，被你发现了。"

@@ -133,7 +133,7 @@ class ModelOutputSanitizerTests(unittest.TestCase):
 
     def test_half_sentence_news_is_treated_as_incomplete(self):
         text = (
-            "<e serious 0.62 serious 0.14 none 1.00>"
+            "<e one_brow 0.62 serious 0.14 none 1.00>"
             "啧……刚才看到新闻，心一下子揪起来了。"
             "真的让人火大，大人明明在旁边却没"
         )

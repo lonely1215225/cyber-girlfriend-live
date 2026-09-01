@@ -199,7 +199,7 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
         self.assertEqual(gateway._render_avatar_for_expression("xiaoya"), "xiaoya")
 
     def test_mild_everyday_expression_stays_on_base_portrait(self):
-        gateway.expression_profile = "happy"
+        gateway.expression_profile = "laugh"
         gateway.expression_gain = 0.2
         gateway.expression_target = 0.34
         self.assertEqual(
@@ -208,12 +208,12 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
         )
 
     def test_profile_switch_uses_gradual_release_before_replacing_basis(self):
-        gateway.expression_profile = "happy"
+        gateway.expression_profile = "laugh"
         gateway.expression_gain = 0.5
         gateway.expression_target = 0.0
         gateway.expression_pending = ("one_brow", 0.45, 0.08, 900, "dialogue")
         gateway._expression_frame_weights(100.0)
-        self.assertEqual(gateway.expression_profile, "happy")
+        self.assertEqual(gateway.expression_profile, "laugh")
         self.assertGreater(gateway.expression_gain, 0.0)
         for _ in range(3):
             gateway._expression_frame_weights(100.0)
@@ -258,7 +258,7 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
             (100.0, "blink", "neutral", 0.0, 0.0, 0)
         )
 
-        gateway._apply_expression("happy", 0.6, 0.05, 1200)
+        gateway._apply_expression("laugh", 0.6, 0.05, 1200)
 
         self.assertFalse(gateway.idle_expression_actions)
         self.assertEqual(gateway.expression_pending[-1], "dialogue")
