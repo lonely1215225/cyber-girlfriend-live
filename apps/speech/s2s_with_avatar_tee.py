@@ -104,6 +104,12 @@ class LocalAvatarTee:
         if not pcm:
             return
         now = time.monotonic()
+        if self.done:
+            # The 14s segment-gap finish can fire while idle. New PCM must
+            # reopen the turn; otherwise the pump drains one preroll packet
+            # and the gateway restarts H.264 on a 300ms clip.
+            self.done = False
+            self.finished_at = None
         if self.started_at is None:
             self.started_at = now
             self.finished_at = None
@@ -182,6 +188,10 @@ class LocalAvatarTee:
     def finish(self, *, complete: bool = False) -> None:
         self.done = True
         self.complete_flush = bool(complete)
+        gap_task = self.segment_gap_task
+        self.segment_gap_task = None
+        if gap_task is not None:
+            gap_task.cancel()
         if self.started_at is not None and self.finished_at is None:
             self.finished_at = time.monotonic()
         if self.pending and self.pump_task is None:

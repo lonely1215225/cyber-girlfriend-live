@@ -45,7 +45,7 @@ class SpeechReservoirTests(unittest.TestCase):
         self.assertEqual(len(played), gateway.CURRENT_SAMPLES * 2)
         self.assertEqual(before - len(buf), gateway.CURRENT_SAMPLES * 2)
 
-    def test_one_underrun_enters_rebuffering_and_raises_watermark(self):
+    def test_sentence_gap_holds_without_raising_the_watermark(self):
         buf = bytearray(b"\x01\x00" * (gateway.WINDOW_SAMPLES - 1))
         gateway.speech_turn_active = True
         gateway.speech_playing = True
@@ -55,18 +55,15 @@ class SpeechReservoirTests(unittest.TestCase):
 
         self.assertFalse(has_speech)
         self.assertEqual(bytes(buf), before)
-        self.assertTrue(gateway.speech_rebuffering)
-        self.assertEqual(gateway.speech_buffer_underruns, 1)
+        self.assertFalse(gateway.speech_rebuffering)
+        self.assertEqual(gateway.speech_buffer_underruns, 0)
         self.assertEqual(
             gateway.speech_dynamic_buffer_bytes,
-            gateway.SPEECH_START_BUFFER_BYTES + gateway.SPEECH_REBUFFER_STEP_BYTES,
+            gateway.SPEECH_START_BUFFER_BYTES,
         )
+        self.assertTrue(gateway.speech_playing)
 
-        # Repeated renderer ticks while waiting must not count as new underruns.
-        gateway._window_from_speech(buf)
-        self.assertEqual(gateway.speech_buffer_underruns, 1)
-
-        buf.extend(b"\x01\x00" * (gateway.speech_dynamic_buffer_bytes // 2))
+        buf.extend(b"\x01\x00" * 8)
         _cur, _future, _played, has_speech = gateway._window_from_speech(buf)
         self.assertTrue(has_speech)
         self.assertFalse(gateway.speech_rebuffering)
@@ -128,7 +125,7 @@ class AuthoritativeAudioClockTests(unittest.TestCase):
         self.assertFalse(gateway.speech_output_pcm)
         self.assertEqual(gateway.audio_output_underruns, 0)
 
-    def test_real_pcm_starvation_reenters_buffering_only_once(self):
+    def test_sentence_gap_keeps_the_output_clock_ready(self):
         gateway.speech_output_active = True
         gateway.speech_output_ready = True
 
@@ -136,11 +133,12 @@ class AuthoritativeAudioClockTests(unittest.TestCase):
 
         self.assertFalse(had_speech)
         self.assertEqual(set(b"".join(chunks)), {0})
-        self.assertFalse(gateway.speech_output_ready)
-        self.assertTrue(gateway.speech_output_rebuffering)
-        self.assertEqual(gateway.audio_output_underruns, 1)
+        self.assertTrue(gateway.speech_output_ready)
+        self.assertFalse(gateway.speech_output_rebuffering)
+        self.assertEqual(gateway.audio_output_underruns, 0)
         gateway._take_output_audio()
-        self.assertEqual(gateway.audio_output_underruns, 1)
+        self.assertTrue(gateway.speech_output_ready)
+        self.assertEqual(gateway.audio_output_underruns, 0)
 
     def test_proactive_turn_uses_deeper_video_reservoir_and_copies_pcm(self):
         pcm = b"\x01\x00" * gateway.SAMPLE_RATE

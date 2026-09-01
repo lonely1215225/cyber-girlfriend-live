@@ -973,12 +973,10 @@ def _take_output_audio() -> tuple[tuple[bytes, bytes], bool]:
         _apply_deferred_silent_expression()
         return (packet, packet), False
 
-    # A genuine upstream PCM starvation is the only remaining reason to emit
-    # silence. Re-enter buffering once, rather than alternating speech/silence
-    # every renderer tick; rendered-video misses never take this branch.
-    audio_output_underruns += 1
-    speech_output_ready = False
-    speech_output_rebuffering = True
+    # The next VoxCPM sentence is still cloning. Hold the 40ms clock with
+    # silence and keep the turn ready so returning PCM does not wait through
+    # another 800ms render reservoir. Rebuffering here is what froze the
+    # picture between clauses.
     return (packet, packet), False
 
 
@@ -992,7 +990,8 @@ async def encode_video_loop() -> None:
             continue
         if epoch != active_epoch:
             active_epoch = epoch
-            h264_encoder = None
+            # Keep the encoder across speech/idle turns. Recreating it inserts
+            # an IDR and makes the picture hitch every time TTS pauses.
         if h264_encoder is None or (h264_encoder.width, h264_encoder.height) != (
             width,
             height,
@@ -1203,15 +1202,9 @@ def _window_from_speech(buf: bytearray) -> tuple[bytes, bytes, bytes, bool]:
         window = bytes(buf[:need])
         del buf[: CURRENT_SAMPLES * 2]
     elif not speech_finished:
-        speech_playing = False
-        speech_rebuffering = True
-        speech_turn_underruns += 1
-        speech_buffer_underruns += 1
+        # Hold the last mouth while the next clause clones. Raising the
+        # watermark forced another start delay and a visible hitch.
         speech_silence_inserted_ms += 200
-        speech_dynamic_buffer_bytes = min(
-            SPEECH_MAX_BUFFER_BYTES,
-            speech_dynamic_buffer_bytes + SPEECH_REBUFFER_STEP_BYTES,
-        )
         return silence()
     elif buf:
         window = bytes(buf[:need]) + bytes(max(0, need - len(buf)))
