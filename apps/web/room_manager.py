@@ -63,6 +63,7 @@ _PRIVATE_PROTOCOL_OPEN_RE = re.compile(
 _PRIVATE_PROTOCOL_CLOSE_RE = re.compile(
     r"</(?:tool_call|toolcall|function_call|functioncall)\s*>", re.IGNORECASE
 )
+# happy/serious remain here only so leftover model tags stay hidden from chat.
 _DELIVERY_PROFILES = (
     "neutral", "happy", "surprised", "serious", "pout", "one_brow",
     "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",

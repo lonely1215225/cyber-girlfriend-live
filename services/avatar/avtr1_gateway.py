@@ -428,8 +428,12 @@ flv_muxer_music: FlvMuxer | None = None
 flv_muxer_voice: FlvMuxer | None = None
 
 EXPRESSION_PROFILES = {
-    "neutral", "happy", "surprised", "serious", "pout", "one_brow",
+    "neutral", "surprised", "pout", "one_brow",
     "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",
+}
+RETIRED_EXPRESSION_ALIASES = {
+    "happy": "neutral",
+    "serious": "neutral",
 }
 expression_profile = "neutral"
 expression_gain = 0.0
@@ -1334,13 +1338,6 @@ def _schedule_idle_expression(now: float) -> None:
             ),
         ),
         (
-            "happy_peek",
-            (
-                (0.0, "expression", "happy", 0.78, 0.08, duration(3400, 5000)),
-                (3.2, "blink", "neutral", 0.0, 0.0, 0),
-            ),
-        ),
-        (
             "tease_laugh",
             (
                 (0.0, "expression", "cute_annoyed", 0.74, 0.10, duration(2800, 4000)),
@@ -2011,6 +2008,7 @@ async def handle_expression(request):
     try:
         body = await request.json()
         profile = str(body.get("profile") or "neutral").strip().lower().replace("-", "_")
+        profile = RETIRED_EXPRESSION_ALIASES.get(profile, profile)
         if profile not in EXPRESSION_PROFILES:
             raise ValueError("unknown expression profile")
         intensity = min(1.0, max(0.0, float(body.get("intensity", 0.0))))
@@ -2055,6 +2053,7 @@ def _apply_expression(
     global expression_mouth_strength, expression_expires_at, expression_owner
     if owner == "dialogue":
         _cancel_idle_expression()
+    profile = RETIRED_EXPRESSION_ALIASES.get(profile, profile)
     if profile == "neutral" or intensity <= 0.0:
         expression_pending = None
         expression_target = 0.0

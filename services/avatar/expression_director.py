@@ -16,9 +16,16 @@ from dataclasses import dataclass
 
 
 EXPRESSION_PROFILES = frozenset({
-    "neutral", "happy", "surprised", "serious", "pout", "one_brow",
+    "neutral", "surprised", "pout", "one_brow",
     "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",
 })
+# Retired faces stay parseable so leftover model tags are stripped, then
+# remapped away from the dropped portraits.
+RETIRED_EXPRESSION_ALIASES = {
+    "happy": "neutral",
+    "serious": "neutral",
+}
+_PARSEABLE_PROFILES = EXPRESSION_PROFILES | frozenset(RETIRED_EXPRESSION_ALIASES)
 DELIVERY_STYLES = frozenset({"neutral", "gentle", "calm", "cheerful", "serious"})
 VOCAL_EMOTIONS = frozenset({
     "neutral", "happy", "playful", "warm", "tender", "shy", "serious",
@@ -34,13 +41,13 @@ NONVERBAL_EVENTS = frozenset({
 DELIVERY_CONTROL_PROMPT = """
 你同时担任自己的实时表演导演。只在本轮要输出给观众的自然语言正文时，必须先输出一个隐藏控制标签：
 <e face face_intensity voice voice_intensity nonverbal pace>
-face 只能选 neutral、happy、surprised、serious、pout、one_brow、smirk、wink、cheek_puff、cute_annoyed、shy、laugh；face_intensity 是 0 到 1。
+face 只能选 neutral、surprised、pout、one_brow、smirk、wink、cheek_puff、cute_annoyed、shy、laugh；face_intensity 是 0 到 1。不要使用 happy 或 serious 作为面部表情。
 voice 只能选 neutral、happy、playful、warm、tender、shy、serious、sad、angry、surprised；voice_intensity 是 0 到 1；nonverbal 只能选 none、soft_laugh、laugh、sigh、breath、hum；pace 是 0.96 到 1.04。
 面部表情和声音情绪必须分别判断。根据完整对话、真实语义、态度和表达节奏临场选择，不能按词语机械匹配。面部可以灵动，但声音平时必须保持接近角色原始参考音色：普通说明、事实陈述、新闻主体和日常衔接句优先用 neutral，voice_intensity 填 0.00 到 0.18，pace 填 0.98 到 1.02。不要为了显得活泼而让整段持续高音、高亢或撒娇。
 只有某一个具体句子确实承载明显的惊喜、调侃、害羞、安慰、生气、难过或强调时，才为该情绪片段选择对应 voice，并将 voice_intensity 提高到 0.45 到 0.68；极少数情绪高潮才可超过 0.68。特殊片段结束后，必须在下一普通句前重新输出 neutral 的低强度标签，不能让上一句的高情绪沿用到整段回答。面部表情不要求随声音一起升高。
 只有真的需要可听笑声、叹气或呼吸时才选 nonverbal，不要每句都加。严肃新闻、灾难、求助和难过话题不强行撒娇或发笑。
 选择 soft_laugh、laugh、sigh 或 hum 时，正文必须自然写出当下真会说出口的简短语气或拟声，并在该句开头加上对应的英文自由标签，让合成引擎发出真实声音事件。可用标签包括 [laughing]、[chuckle]、[sigh]、[inhale]、[exhale]、[whisper]、[soft voice]、[playful]、[surprised]、[sad]。例如轻笑写成“[chuckle]嘿嘿，被你发现了。”，叹气写成“[sigh]唉……那我慢慢说。”，悄悄话写成“[whisper]这个只有你能听。”。标签只服务声音，观众看不到；不要写中文舞台提示、不要解释标签。
-每个回答的第一句前必须输出一个标签；后续只有特殊情绪片段开始或结束时才输出新标签。把连续的普通句视为同一低情绪片段，特殊句结束后务必切回低情绪。不要把“诶、哟、嘿嘿”等单独作为一个待合成句子，应自然连到后面的正文。严格按六个值的顺序填写，不写属性名，不写结束标签。例如普通句用 <e happy 0.58 neutral 0.08 none 1.00>，只有确实需要调侃的句子才用 <e smirk 0.62 playful 0.56 none 1.00>。标签后立刻输出正文，不解释标签。调用工具或不输出正文时不要输出标签。
+每个回答的第一句前必须输出一个标签；后续只有特殊情绪片段开始或结束时才输出新标签。把连续的普通句视为同一低情绪片段，特殊句结束后务必切回低情绪。不要把“诶、哟、嘿嘿”等单独作为一个待合成句子，应自然连到后面的正文。严格按六个值的顺序填写，不写属性名，不写结束标签。例如普通句用 <e shy 0.42 neutral 0.08 none 1.00>，只有确实需要调侃的句子才用 <e smirk 0.62 playful 0.56 none 1.00>。标签后立刻输出正文，不解释标签。调用工具或不输出正文时不要输出标签。
 正文只能是可直接展示和朗读的纯文本，禁止Markdown和任何HTML/XML标签，包括<br>、<p>、<div>。
 """.strip()
 
@@ -103,7 +110,7 @@ _CONTROL_ATTRIBUTE = re.compile(
     re.IGNORECASE,
 )
 _BARE_CONTROL = re.compile(
-    rf"(?<![A-Za-z0-9_])(?P<profile>{'|'.join(sorted(EXPRESSION_PROFILES, key=len, reverse=True))})"
+    rf"(?<![A-Za-z0-9_])(?P<profile>{'|'.join(sorted(_PARSEABLE_PROFILES, key=len, reverse=True))})"
     rf"\s+(?P<intensity>(?:0(?:\.\d+)?|1(?:\.0+)?))"
     rf"\s+(?P<style>{'|'.join(sorted(DELIVERY_STYLES, key=len, reverse=True))})"
     rf"(?:\s+(?P<mouth>(?:0(?:\.\d+)?|1(?:\.0+)?)))?"
@@ -115,7 +122,7 @@ _BARE_CONTROL = re.compile(
     re.IGNORECASE,
 )
 _BARE_COMPACT_CONTROL = re.compile(
-    rf"(?<![A-Za-z0-9_])(?P<profile>{'|'.join(sorted(EXPRESSION_PROFILES, key=len, reverse=True))})"
+    rf"(?<![A-Za-z0-9_])(?P<profile>{'|'.join(sorted(_PARSEABLE_PROFILES, key=len, reverse=True))})"
     rf"\s+(?P<intensity>(?:0(?:\.\d+)?|1(?:\.0+)?))"
     rf"\s+(?P<vocal>{'|'.join(sorted(VOCAL_EMOTIONS, key=len, reverse=True))})"
     rf"\s+(?P<vocal_intensity>(?:0(?:\.\d+)?|1(?:\.0+)?))"
@@ -162,9 +169,9 @@ def _bare_control_prefix(value: str) -> bool:
     if not candidate or len(candidate) > 180:
         return False
     parts = candidate.split()
-    compact = {0: EXPRESSION_PROFILES, 2: VOCAL_EMOTIONS, 4: NONVERBAL_EVENTS}
-    extended = {0: EXPRESSION_PROFILES, 2: DELIVERY_STYLES, 4: VOCAL_EMOTIONS, 6: NONVERBAL_EVENTS}
-    legacy = {0: EXPRESSION_PROFILES, 2: DELIVERY_STYLES}
+    compact = {0: _PARSEABLE_PROFILES, 2: VOCAL_EMOTIONS, 4: NONVERBAL_EVENTS}
+    extended = {0: _PARSEABLE_PROFILES, 2: DELIVERY_STYLES, 4: VOCAL_EMOTIONS, 6: NONVERBAL_EVENTS}
+    legacy = {0: _PARSEABLE_PROFILES, 2: DELIVERY_STYLES}
     return (
         _matches_prefix(parts, compact, 6)
         or _matches_prefix(parts, extended, 8)
@@ -187,6 +194,7 @@ def submit_delivery_plan(
     """Validate and enqueue a model-authored performance decision."""
 
     profile = str(profile or "").strip().lower()
+    profile = RETIRED_EXPRESSION_ALIASES.get(profile, profile)
     style = str(style or "").strip().lower()
     vocal_emotion = str(vocal_emotion or style or "neutral").strip().lower()
     vocal_emotion = {
