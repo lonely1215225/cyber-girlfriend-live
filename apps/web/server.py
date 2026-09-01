@@ -711,6 +711,7 @@ def config(request: Request):
         "idlePromptMinSeconds": IDLE_PROMPT_MIN_SECONDS,
         "idlePromptMaxSeconds": IDLE_PROMPT_MAX_SECONDS,
         "mcp": mcp_gateway.enabled,
+        "dialogueTools": DIALOGUE_TOOLS_ENABLED,
         "auth": AUTH_ENABLED,
         "requireLogin": REQUIRE_LOGIN,
     }
@@ -1784,16 +1785,26 @@ async def session_end(request: Request):
     return {"ok": True}
 
 
+def _dialogue_tool_policy() -> str:
+    if DIALOGUE_TOOLS_ENABLED:
+        return (
+            "普通闲聊、情绪表达、吐槽、承接上下文和角色互动直接回答，不调用工具。"
+            "只有用户明确要求查询，或问题确实依赖最新外部事实时，才静默调用一次"
+            " request_external_capabilities 并选择最少的能力。外部查询取得证据后必须在本轮给出结论。"
+        )
+    return (
+        "当前是纯陪伴聊天模式。直接回应对方，不调用搜索、新闻、价格、网页、RSS、MCP、视觉或"
+        "其他外部工具，也不要说正在查询、核对来源或稍后告诉对方。遇到依赖实时外部资料的问题，"
+        "坦率说明现在只陪对方聊天，不猜测、不编造。"
+    )
+
+
 def _role_instructions(persona_prompt: str, display_name: str, personal_memory: str = "",
                        active_news: str = "") -> str:
     """Compose the server-owned role prompt shared by every live voice turn."""
     instructions = str(persona_prompt or DEFAULT_PERSONA_PROMPT).strip()
     identity = f"当前正在与你连线的观众名字是“{display_name}”。请自然地用这个名字称呼对方。"
-    tool_policy = (
-        "当前是纯陪伴聊天模式。直接回应对方，不调用搜索、新闻、价格、网页、RSS、MCP、视觉或"
-        "其他外部工具，也不要说正在查询、核对来源或稍后告诉对方。遇到依赖实时外部资料的问题，"
-        "坦率说明现在只陪对方聊天，不猜测、不编造。"
-    )
+    tool_policy = _dialogue_tool_policy()
     additions = [
         item for item in (ROLE_IDENTITY_POLICY, ROLE_OUTPUT_POLICY, identity, tool_policy)
         if item not in instructions
@@ -1805,10 +1816,15 @@ def _role_instructions(persona_prompt: str, display_name: str, personal_memory: 
             f"{personal_memory}"
         )
     if active_news:
+        news_query = (
+            "涉及现在价格、最新进展或实时状态时再查询，不要猜测。"
+            if DIALOGUE_TOOLS_ENABLED
+            else "涉及现在价格、最新进展或实时状态时不要猜测，也不要继续联网查询。"
+        )
         additions.append(
-            "下面是直播间刚播报的公共话题，可用于承接讨论，但不要继续联网查询。"
+            "下面是直播间刚播报的公共话题，可用于承接讨论。"
             "只有对方说‘这个、刚才那条、它、为什么、后来呢’或明确提到相关主体时才使用；"
-            "无关问题必须忽略；涉及现在价格、最新进展或实时状态时不要猜测。\n"
+            f"无关问题必须忽略；{news_query}\n"
             f"{active_news}"
         )
     return "\n".join([instructions, *additions]).strip()
