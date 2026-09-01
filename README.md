@@ -300,7 +300,6 @@ SEARXNG_URL=
 | `TTS_REPETITION_PENALTY` | `1.05` | 声码重复惩罚 |
 | `AVATAR_TEE_UPLOAD_PREROLL_MS` | `320` | TTS 上传到网关前的短缓冲；真正开播水位看下面的 AVTR 输出水库 |
 | `VOXCPM_PLAY_RESERVOIR_SECONDS` | `1.2` | 对话在攒够这么多流式 PCM 后开始播放；新闻仍等整句再对节奏 |
-| `VOXCPM_DIALOGUE_TIMESTEPS` | `8` | 对话音色克隆步数；新闻仍走 20 步完整克隆 |
 | `AVATAR_TEE_SEGMENT_GAP_MS` | `14000` | 下一句还在克隆时保持口型回合；低于 8 秒会被抬到 8 秒 |
 | `AVTR1_SPEECH_START_BUFFER_MS` | `600` | 网关开始对口型前至少攒这么多音频 |
 | `AVTR1_AUDIO_REBUFFER_STEP_MS` | `200` | 一轮语音发生欠载后，动态恢复水位的递增步长 |

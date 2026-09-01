@@ -198,7 +198,7 @@ class SharedVoxCPMClientTests(unittest.TestCase):
         sent = stream.call_args.kwargs["data"]
         self.assertEqual(sent["text"], "[playful]嘿嘿，")
         self.assertNotIn("prompt_text", sent)
-        self.assertEqual(sent["inference_timesteps"], "8")
+        self.assertEqual(set(sent), {"text"})
 
     def test_http_error_is_surfaced(self) -> None:
         client = SharedVoxCPMClient(

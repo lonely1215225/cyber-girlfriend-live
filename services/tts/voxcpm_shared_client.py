@@ -2,13 +2,13 @@
 
 This process never loads VoxCPM weights. It queues on the existing
 inference lock (HTTP 429). Dialogue uses ``/v1/audio/speech/stream`` so
-the worker can emit PCM while cloning. Dialogue uses an 8-step timbre
-clone (about 0.8x realtime), so generation stays ahead of playback.
-Playing the
-first 0.4s chunk used to starve the avatar reservoir, so the mouth and
-picture hitched. Dialogue now holds a short reservoir and then forwards
-the rest of the stream; news still waits for the whole clip so it can
-match the reference pace. The original WAV route remains the fallback.
+the worker can emit PCM while cloning. Dialogue omits ``prompt_text`` so
+the existing worker uses its 10-step timbre clone. News still sends the
+reference transcript for hi-fi cloning. Playing the first 0.4s chunk
+used to starve the avatar reservoir, so the mouth and picture hitched.
+Dialogue now holds a short reservoir and then forwards the rest of the
+stream; news still waits for the whole clip so it can match the
+reference pace. The original WAV route remains the fallback.
 """
 
 from __future__ import annotations
@@ -42,9 +42,6 @@ PACE_FAST_THRESHOLD = max(
 )
 MIN_ATEMPO = min(0.98, max(0.80, float(os.environ.get("VOXCPM_MIN_ATEMPO", "0.86"))))
 MIN_PACE_HANZI = max(16, int(os.environ.get("VOXCPM_PACE_MIN_HANZI", "24")))
-DIALOGUE_TIMESTEPS = max(
-    4, min(20, int(os.environ.get("VOXCPM_DIALOGUE_TIMESTEPS", "8")))
-)
 
 
 def play_reservoir_samples(sample_rate: int) -> int:
@@ -298,8 +295,6 @@ class SharedVoxCPMClient:
         fields = {"text": text}
         if self._ref_text and not fast:
             fields["prompt_text"] = self._ref_text
-        if fast:
-            fields["inference_timesteps"] = str(DIALOGUE_TIMESTEPS)
         return fields
 
     def _queued_stream(
