@@ -2,8 +2,9 @@
 
 This process never loads VoxCPM weights. It queues on the existing
 inference lock (HTTP 429). Dialogue uses ``/v1/audio/speech/stream`` so
-the worker can emit PCM while cloning. VoxCPM2 clones at about 0.55x
-realtime: generation is faster than playback, not slower. Playing the
+the worker can emit PCM while cloning. Dialogue uses an 8-step timbre
+clone (about 0.8x realtime), so generation stays ahead of playback.
+Playing the
 first 0.4s chunk used to starve the avatar reservoir, so the mouth and
 picture hitched. Dialogue now holds a short reservoir and then forwards
 the rest of the stream; news still waits for the whole clip so it can
