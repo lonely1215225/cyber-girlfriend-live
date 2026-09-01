@@ -368,6 +368,10 @@ const motionSaveStatus = $("#motion-save-status");
 const motionInputs = [...settingsModal.querySelectorAll("[data-motion]")];
 const settingsTabs = [...settingsModal.querySelectorAll("[data-settings-tab]")];
 const settingsPanels = [...settingsModal.querySelectorAll("[data-settings-panel]")];
+const roomWeatherButtons = [...settingsModal.querySelectorAll("[data-room-mode]")];
+const roomWeatherStatus = $("#room-weather-status");
+const ROOM_MODES = new Set(["auto", "sun", "rain", "night", "rainbow"]);
+let roomDecorMode = "auto";
 /** @type {Record<string, boolean | number> | null} */
 let motionConfig = null;
 let avatarProfileState = null;
@@ -570,7 +574,80 @@ function openSettings() {
   updateRestartAvailability();
   void refreshAudioDeviceLists();
   void refreshAvatarProfiles();
+  void refreshRoomDecor();
   settingsModal.showModal();
+}
+
+function syncRoomWeatherButtons(mode) {
+  const next = ROOM_MODES.has(mode) ? mode : "auto";
+  roomDecorMode = next;
+  for (const button of roomWeatherButtons) {
+    const active = button.dataset.roomMode === next;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", active ? "true" : "false");
+  }
+}
+
+function roomDecorStatusText(decor) {
+  const scene = decor?.scene === "sun" ? "晴天"
+    : decor?.scene === "rain" ? "下雨"
+    : decor?.scene === "night" ? "夜里"
+    : decor?.scene === "rainbow" ? "彩虹"
+    : decor?.scene === "overcast" ? "阴天"
+    : "自动";
+  const source = decor?.source === "open-meteo" ? "天气" : "本地钟点";
+  const mode = decor?.mode === "auto" ? "自动" : "主播指定";
+  return `全体观众同步（${mode} · ${scene} · ${source}）。`;
+}
+
+async function refreshRoomDecor() {
+  if (roomWeatherStatus) {
+    roomWeatherStatus.textContent = "正在读取直播间天气…";
+  }
+  try {
+    const response = await fetch("/api/admin/room-decor", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.decor) throw new Error(data.detail || "天气读取失败");
+    syncRoomWeatherButtons(data.decor.mode);
+    if (roomWeatherStatus) roomWeatherStatus.textContent = roomDecorStatusText(data.decor);
+  } catch (error) {
+    syncRoomWeatherButtons(document.body.dataset.roomMode || "auto");
+    if (roomWeatherStatus) {
+      roomWeatherStatus.textContent = error instanceof Error ? error.message : "天气读取失败";
+    }
+  }
+}
+
+async function saveRoomDecor(mode) {
+  const previous = roomDecorMode;
+  syncRoomWeatherButtons(mode);
+  if (roomWeatherStatus) roomWeatherStatus.textContent = "正在保存天气场景…";
+  try {
+    const response = await fetch("/api/admin/room-decor", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.decor) throw new Error(data.detail || "天气保存失败");
+    syncRoomWeatherButtons(data.decor.mode);
+    if (roomWeatherStatus) roomWeatherStatus.textContent = roomDecorStatusText(data.decor);
+    setAutoSaveStatus("已自动保存");
+  } catch (error) {
+    syncRoomWeatherButtons(previous);
+    if (roomWeatherStatus) {
+      roomWeatherStatus.textContent = error instanceof Error ? error.message : "天气保存失败";
+    }
+    setAutoSaveStatus(error instanceof Error ? error.message : "天气保存失败", "error");
+  }
+}
+
+for (const button of roomWeatherButtons) {
+  button.addEventListener("click", () => {
+    const mode = button.dataset.roomMode || "";
+    if (!ROOM_MODES.has(mode) || mode === roomDecorMode) return;
+    void saveRoomDecor(mode);
+  });
 }
 
 function selectSettingsTab(name) {
