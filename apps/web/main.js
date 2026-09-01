@@ -74,12 +74,17 @@ const ROLE_IDENTITY_POLICY =
   "始终按当前角色档案交流；不要自称或暗示自己是AI、数字人、机器人、程序或助手。";
 const ROLE_OUTPUT_POLICY =
   "只输出可直接展示和朗读的纯文本；禁止Markdown和任何HTML/XML标签，包括<br>、<p>、<div>。";
-// External tools are intentionally unavailable in viewer dialogue. Keep this
-// client-side gate in addition to the server gate so a stale local setting can
-// never put a legacy web-search schema back into a live voice session.
-const DIALOGUE_TOOLS_ENABLED = false;
-const TOOL_AGENT_POLICY =
+// Fail closed until /api/config says the deploy turned tools on. A stale
+// local page must not put search schemas back into a live voice session.
+let dialogueToolsEnabled = false;
+const COMPANION_TOOL_POLICY =
   "当前是纯陪伴聊天模式。直接回应对方，不调用搜索、新闻、价格、网页、RSS、MCP、视觉或其他外部工具，也不要说正在查询、核对来源或稍后告诉对方。遇到依赖实时外部资料的问题，坦率说明现在只陪对方聊天，不猜测、不编造。";
+const NETWORK_TOOL_POLICY =
+  "普通闲聊、情绪表达、吐槽、承接上下文和角色互动直接回答，不调用工具。只有用户明确要求查询，或问题确实依赖最新外部事实时，才静默调用一次 request_external_capabilities 并选择最少的能力。外部查询取得证据后必须在本轮给出结论。";
+
+function toolPolicy() {
+  return dialogueToolsEnabled ? NETWORK_TOOL_POLICY : COMPANION_TOOL_POLICY;
+}
 
 function effectiveInstructions(persona) {
   const value = String(persona || DEFAULT_INSTRUCTIONS).trim();
@@ -88,7 +93,7 @@ function effectiveInstructions(persona) {
     timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
     weekday: "long", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
   }).format(new Date());
-  return `${base}\n${ROLE_OUTPUT_POLICY}\n${TOOL_AGENT_POLICY}\n当前北京时间：${now}。涉及今天、当前、最新等问题时以此为准。`;
+  return `${base}\n${ROLE_OUTPUT_POLICY}\n${toolPolicy()}\n当前北京时间：${now}。涉及今天、当前、最新等问题时以此为准。`;
 }
 
 const STORAGE_KEYS = {
@@ -435,7 +440,7 @@ function searchAvailable() {
 
 /** Tool definitions for the currently-enabled (and usable) tools. */
 function activeToolDefs() {
-  if (!DIALOGUE_TOOLS_ENABLED) return [];
+  if (!dialogueToolsEnabled) return [];
   const defs = [];
   const hasSmartSearch = mcpToolDefs.some((tool) => tool.name === "smart_web_search");
   if ((voiceCapabilities.has("web") || voiceCapabilities.has("news")) &&
@@ -1330,13 +1335,15 @@ settingsBtn.addEventListener("click", () => void requestAdminPanel("settings"));
 
 /** Reflect the current tool state into the panel controls. */
 function syncToolsUi() {
-  if (!DIALOGUE_TOOLS_ENABLED) {
+  if (!dialogueToolsEnabled) {
     toolWebRow.hidden = true;
     if (mcpToolStatus) {
       mcpToolStatus.textContent = "陪伴模式：连线不调用搜索和 MCP";
     }
+    return;
   }
-  const avail = DIALOGUE_TOOLS_ENABLED && searchAvailable();
+  toolWebRow.hidden = false;
+  const avail = searchAvailable();
   toolWebSwitch.checked = toolsEnabled.web_search && avail;
   toolWebSwitch.disabled = !avail;
   toolWebRow.classList.toggle("disabled", !avail);
@@ -1355,7 +1362,7 @@ function syncToolsUi() {
     searchKeyInput.disabled = false;
     searchKeyInput.value = userSearchKey;
     searchKeyInput.placeholder = "陪伴模式不使用浏览器内搜索 Key";
-    toolWebHint.textContent = DIALOGUE_TOOLS_ENABLED
+    toolWebHint.textContent = dialogueToolsEnabled
       ? (userSearchKey ? "Using your key — stored in this browser only." : "No server search key configured.")
       : "DIALOGUE_TOOLS_ENABLED=0，连线不会走这条搜索。";
   }
@@ -1420,7 +1427,7 @@ searchKeyInput.addEventListener("input", () => {
   }
   toolWebHint.textContent = userSearchKey
     ? "Using your key — stored in this browser only."
-    : (DIALOGUE_TOOLS_ENABLED
+    : (dialogueToolsEnabled
         ? "No server search key configured."
         : "DIALOGUE_TOOLS_ENABLED=0，连线不会走这条搜索。");
 });
@@ -1698,7 +1705,8 @@ async function fetchConfig() {
       idlePromptMinSeconds = Number(json.idlePromptMinSeconds) || 35;
       idlePromptMaxSeconds = Number(json.idlePromptMaxSeconds) || 55;
       loginRequired = !!json.requireLogin;
-      if (json.mcp) await fetchMcpTools();
+      dialogueToolsEnabled = !!json.dialogueTools;
+      if (dialogueToolsEnabled && json.mcp) await fetchMcpTools();
       // The conversation-time limiter rides on the LB being present.
       limiterOn = lbMode;
     }
