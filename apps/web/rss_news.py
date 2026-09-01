@@ -58,6 +58,11 @@ DEFAULT_FEEDS = (
     ("科技", "IT之家", "https://plink.anyfeeder.com/ithome/it"),
     ("知识", "知乎日报", "https://plink.anyfeeder.com/zhihu/daily"),
 )
+_GOOGLE_HEADLINE_FEEDS = (
+    ("新闻", "Google News 要闻", "https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
+    ("科技", "Google News 科技", "https://news.google.com/rss/search?q=%E7%A7%91%E6%8A%80&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
+    ("知识", "Google News 知识", "https://news.google.com/rss/search?q=%E7%A7%91%E5%AD%A6+OR+%E7%9F%A5%E8%AF%86&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
+)
 ALLOWED_FEED_HOSTS = {
     "news.google.com",
     "plink.anyfeeder.com",
@@ -413,26 +418,53 @@ class RssNewsAggregator:
         )
 
     async def _fetch_many(
-        self, sources: list[tuple[str, str, str, bool]]
+        self,
+        sources: list[tuple[str, str, str, bool]],
+        *,
+        overall_timeout: float | None = None,
     ) -> list[NewsItem]:
-        """Fetch with bounded concurrency so one host/network limit cannot sink the batch."""
+        """Fetch same-host feeds one at a time. AnyFeeder sits on one CDN, and
+        two parallel streams there regularly die with ConnectTimeout/SSLError."""
         headers = {"User-Agent": "CyberGirlfriendLive/1.0 RSS news reader"}
-        timeout = httpx.Timeout(self.timeout, connect=min(5.0, self.timeout))
-        semaphore = asyncio.Semaphore(2)
-        limits = httpx.Limits(max_connections=3, max_keepalive_connections=2)
+        timeout = httpx.Timeout(self.timeout, connect=min(8.0, self.timeout))
+        host_gates: dict[str, asyncio.Semaphore] = {}
+        limits = httpx.Limits(max_connections=4, max_keepalive_connections=2)
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=True, headers=headers, limits=limits
         ) as client:
-            async def guarded(source: tuple[str, str, str, bool]):
+            async def guarded(index_source: tuple[int, tuple[str, str, str, bool]]):
+                index, source = index_source
                 category, label, url, query_match = source
-                async with semaphore:
-                    return await self._fetch(
-                        client, category, label, url, query_match
+                host = (urlparse(url).hostname or label).lower()
+                gate = host_gates.setdefault(host, asyncio.Semaphore(1))
+                async with gate:
+                    items = await asyncio.wait_for(
+                        self._fetch(client, category, label, url, query_match),
+                        timeout=self.timeout + 2.0,
                     )
+                    return index, items
 
-            results = await asyncio.gather(
-                *(guarded(source) for source in sources), return_exceptions=True
+            tasks = [
+                asyncio.create_task(guarded((index, source)))
+                for index, source in enumerate(sources)
+            ]
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=overall_timeout,
+                return_when=asyncio.ALL_COMPLETED,
             )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            indexed: dict[int, list[NewsItem] | Exception] = {}
+            for task in done:
+                try:
+                    index, items = task.result()
+                    indexed[index] = items
+                except Exception as exc:  # noqa: BLE001
+                    indexed[index] = exc
+            results = [indexed.get(index, RuntimeError("cancelled")) for index in range(len(sources))]
 
         items: list[NewsItem] = []
         for (_, label, _, _), result in zip(sources, results):
@@ -483,11 +515,30 @@ class RssNewsAggregator:
         if cached and now - cached[0] <= self.cache_seconds:
             return cached[1]
 
-        sources = [
-            (category, label, url, False)
-            for category, label, url in self.feeds
-        ]
-        items = await self._fetch_many(sources)
+        items: list[NewsItem] = []
+        if self.google_enabled:
+            google_sources = [
+                (category, label, url, False)
+                for category, label, url in _GOOGLE_HEADLINE_FEEDS
+            ]
+            try:
+                items.extend(await self._fetch_many(google_sources, overall_timeout=14.0))
+            except RuntimeError:
+                items = []
+        try:
+            items.extend(
+                await self._fetch_many(
+                    [
+                        (category, label, url, False)
+                        for category, label, url in self.feeds
+                    ],
+                    overall_timeout=22.0,
+                )
+            )
+        except RuntimeError:
+            pass
+        if not items:
+            raise RuntimeError("所有 RSS 新闻源均不可用")
         oldest_timestamp = datetime.now(timezone.utc).timestamp() - self.max_age_hours * 3600
         timely = [
             item

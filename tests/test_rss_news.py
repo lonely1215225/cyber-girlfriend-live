@@ -8,6 +8,7 @@ sys.path.insert(0, str(FRONTEND_DIR))
 
 from rss_news import (  # noqa: E402
     IdleNewsRotator,
+    NewsItem,
     RssNewsAggregator,
     formatted_news_blocks,
     infer_topic_filters,
@@ -118,6 +119,31 @@ class RssNewsTests(unittest.TestCase):
 
 
 class RssDialogueQueryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_latest_topics_falls_back_to_google_headlines(self):
+        aggregator = RssNewsAggregator()
+        calls: list[list[tuple[str, str, str, bool]]] = []
+
+        async def fake_fetch_many(sources, *, overall_timeout=None):
+            calls.append(list(sources))
+            if sources and "Google News" in sources[0][1]:
+                return [
+                    NewsItem(
+                        title="Fallback story",
+                        link="https://example.com/g",
+                        source="Google News 要闻",
+                        published=None,
+                        category="新闻",
+                    )
+                ]
+            raise RuntimeError("所有 RSS 新闻源均不可用")
+
+        aggregator._fetch_many = fake_fetch_many
+        output = await aggregator.latest_topics()
+        self.assertIn("Fallback story", output)
+        self.assertTrue(
+            any("Google News" in source[1] for batch in calls for source in batch)
+        )
+
     async def test_filters_dialogue_query_by_category_and_source(self):
         aggregator = RssNewsAggregator()
 
