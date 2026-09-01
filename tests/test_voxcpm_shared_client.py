@@ -17,6 +17,7 @@ from voxcpm_shared_client import (  # noqa: E402
     SharedVoxCPMClient,
     clone_pace_factor,
     decode_wav,
+    play_reservoir_samples,
 )
 
 
@@ -77,6 +78,9 @@ class SharedVoxCPMClientTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def test_play_reservoir_is_larger_than_a_single_hitch_chunk(self) -> None:
+        self.assertGreaterEqual(play_reservoir_samples(48000), 48_000)
+
     def test_decode_wav_roundtrip(self) -> None:
         payload = _pcm16_wav(np.array([0.0, 0.5, -0.25], dtype=np.float32), 16000)
         audio, sr = decode_wav(payload)
@@ -91,6 +95,37 @@ class SharedVoxCPMClientTests(unittest.TestCase):
             ref_audio=str(self.ref),
         )
         self.assertEqual(list(client.stream_clone("  ")), [])
+
+    def test_live_stream_starts_after_the_playback_reservoir(self) -> None:
+        pcm = _pcm16_bytes(np.linspace(-0.2, 0.2, 12000, dtype=np.float32))
+        seen_second_half = []
+
+        def delayed_chunks():
+            seen_second_half.append(False)
+            yield pcm[:3000]
+            seen_second_half.append(True)
+            yield pcm[3000:]
+
+        ok = _stream_response(
+            200,
+            {"X-Sample-Rate": "48000", "X-VoxCPM-Format": "pcm_s16le"},
+            delayed_chunks(),
+        )
+        client = SharedVoxCPMClient(
+            base_url="http://127.0.0.1:10102",
+            api_key="secret",
+            ref_audio=str(self.ref),
+            timeout_s=5,
+        )
+        with patch("voxcpm_shared_client.play_reservoir_samples", return_value=960):
+            with patch("voxcpm_shared_client.httpx.stream", return_value=ok):
+                iterator = client.stream_clone("你好呀，今天过得怎么样？")
+                first = next(iterator)
+                self.assertEqual(seen_second_half, [False])
+                chunks = [first, *iterator]
+        self.assertEqual(seen_second_half, [False, True])
+        audio = np.concatenate([chunk[0] for chunk in chunks])
+        self.assertEqual(audio.size, 12000)
 
     def test_stream_route_buffers_the_sentence_before_playback_chunks(self) -> None:
         pcm = _pcm16_bytes(np.linspace(-0.2, 0.2, 9000, dtype=np.float32))

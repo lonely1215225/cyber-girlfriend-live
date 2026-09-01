@@ -2,11 +2,12 @@
 
 This process never loads VoxCPM weights. It queues on the existing
 inference lock (HTTP 429). Dialogue uses ``/v1/audio/speech/stream`` so
-the worker can emit PCM while cloning, then this client holds that
-sentence until the stream ends. VoxCPM2 clones at about 0.55x realtime;
-playing the first 0.4s chunk live starves the avatar reservoir, so the
-mouth and picture hitch on every clause. The original WAV route remains
-the fallback.
+the worker can emit PCM while cloning. VoxCPM2 clones at about 0.55x
+realtime: generation is faster than playback, not slower. Playing the
+first 0.4s chunk used to starve the avatar reservoir, so the mouth and
+picture hitched. Dialogue now holds a short reservoir and then forwards
+the rest of the stream; news still waits for the whole clip so it can
+match the reference pace. The original WAV route remains the fallback.
 """
 
 from __future__ import annotations
@@ -40,6 +41,13 @@ PACE_FAST_THRESHOLD = max(
 )
 MIN_ATEMPO = min(0.98, max(0.80, float(os.environ.get("VOXCPM_MIN_ATEMPO", "0.86"))))
 MIN_PACE_HANZI = max(16, int(os.environ.get("VOXCPM_PACE_MIN_HANZI", "24")))
+
+
+def play_reservoir_samples(sample_rate: int) -> int:
+    """How much PCM to hold before live dialogue playback starts."""
+
+    seconds = max(0.4, float(os.environ.get("VOXCPM_PLAY_RESERVOIR_SECONDS", "1.2")))
+    return max(1, int(max(1, int(sample_rate or 48000)) * seconds))
 
 
 class StreamUnavailable(RuntimeError):
@@ -257,7 +265,7 @@ class SharedVoxCPMClient:
         raise TimeoutError(f"shared VoxCPM is not ready at {self.base_url}: {last_error}")
 
     def stream_clone(
-        self, text: str, *, fast: bool = False
+        self, text: str, *, fast: bool = False, live: bool = True
     ) -> Iterator[tuple[np.ndarray, int, None]]:
         spoken = str(text or "").strip()
         if not spoken:
@@ -268,7 +276,7 @@ class SharedVoxCPMClient:
             raise RuntimeError("VoxCPM API key is missing")
         if self._use_stream:
             try:
-                yield from self._queued_stream(spoken, fast=fast)
+                yield from self._queued_stream(spoken, fast=fast, live=live)
                 return
             except StreamUnavailable:
                 self._use_stream = False
@@ -287,7 +295,9 @@ class SharedVoxCPMClient:
             fields["prompt_text"] = self._ref_text
         return fields
 
-    def _queued_stream(self, text: str, *, fast: bool = False) -> Iterator[tuple[np.ndarray, int, None]]:
+    def _queued_stream(
+        self, text: str, *, fast: bool = False, live: bool = True
+    ) -> Iterator[tuple[np.ndarray, int, None]]:
         deadline = time.monotonic() + self.timeout_s
         last_error = "no attempt"
         while True:
@@ -323,7 +333,10 @@ class SharedVoxCPMClient:
                             )
                         sample_rate = int(response.headers.get("X-Sample-Rate") or 48000)
                         leftover = b""
-                        parts: list[np.ndarray] = []
+                        held: list[np.ndarray] = []
+                        held_samples = 0
+                        started_live = False
+                        reservoir = play_reservoir_samples(sample_rate) if live else 10**12
                         for raw in response.iter_bytes():
                             if not raw:
                                 continue
@@ -331,15 +344,33 @@ class SharedVoxCPMClient:
                             usable = leftover[: len(leftover) - (len(leftover) % 2)]
                             leftover = leftover[len(usable) :]
                             audio = pcm16_to_float(usable)
-                            if audio.size:
-                                parts.append(audio)
-                        if not parts:
-                            raise RuntimeError("VoxCPM stream returned empty audio")
-                        full = parts[0] if len(parts) == 1 else np.concatenate(parts)
-                        full = match_reference_pace(full, sample_rate, text)
-                        for chunk in yield_audio_chunks(full, sample_rate):
+                            if not audio.size:
+                                continue
+                            if started_live:
+                                yielded = True
+                                yield from yield_audio_chunks(audio, sample_rate)
+                                continue
+                            held.append(audio)
+                            held_samples += audio.size
+                            if held_samples < reservoir:
+                                continue
+                            full = held[0] if len(held) == 1 else np.concatenate(held)
+                            held.clear()
+                            started_live = True
+                            LOG.info(
+                                "VoxCPM live yield after %.2fs reservoir",
+                                held_samples / float(sample_rate or 1),
+                            )
                             yielded = True
-                            yield chunk
+                            yield from yield_audio_chunks(full, sample_rate)
+                        if held:
+                            full = held[0] if len(held) == 1 else np.concatenate(held)
+                            if not started_live:
+                                full = match_reference_pace(full, sample_rate, text)
+                            yielded = True
+                            yield from yield_audio_chunks(full, sample_rate)
+                        elif not started_live:
+                            raise RuntimeError("VoxCPM stream returned empty audio")
             except StreamUnavailable:
                 raise
             except httpx.HTTPError as exc:
