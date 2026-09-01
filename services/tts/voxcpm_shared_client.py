@@ -41,6 +41,9 @@ PACE_FAST_THRESHOLD = max(
 )
 MIN_ATEMPO = min(0.98, max(0.80, float(os.environ.get("VOXCPM_MIN_ATEMPO", "0.86"))))
 MIN_PACE_HANZI = max(16, int(os.environ.get("VOXCPM_PACE_MIN_HANZI", "24")))
+DIALOGUE_TIMESTEPS = max(
+    4, min(20, int(os.environ.get("VOXCPM_DIALOGUE_TIMESTEPS", "8")))
+)
 
 
 def play_reservoir_samples(sample_rate: int) -> int:
@@ -294,6 +297,8 @@ class SharedVoxCPMClient:
         fields = {"text": text}
         if self._ref_text and not fast:
             fields["prompt_text"] = self._ref_text
+        if fast:
+            fields["inference_timesteps"] = str(DIALOGUE_TIMESTEPS)
         return fields
 
     def _queued_stream(
