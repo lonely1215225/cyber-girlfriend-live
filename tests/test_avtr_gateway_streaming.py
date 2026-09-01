@@ -251,6 +251,31 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
         self.assertEqual(gateway.expression_profile, "smirk")
         self.assertFalse(gateway.expression_timeline)
 
+    def test_idle_playful_faces_are_scheduled_often(self):
+        import random as random_module
+
+        random_module.seed(1)
+        gateway.IDLE_EXPRESSION_MIN_SECONDS = 2.0
+        gateway.IDLE_EXPRESSION_MAX_SECONDS = 4.5
+        names: list[str] = []
+        for index in range(80):
+            gateway.idle_expression_last_name = names[-1] if names else ""
+            gateway.idle_expression_actions.clear()
+            gateway._schedule_idle_expression(1000.0 + index)
+            names.append(gateway.idle_expression_last_name)
+        playful = {
+            "solo_wink", "playful_wink", "solo_pout", "thinking_pout",
+            "tease_side_eye", "naughty_lip_bite", "sleepy_cute",
+        }
+        self.assertGreaterEqual(sum(name in playful for name in names), 55)
+        self.assertIn("solo_wink", names)
+        self.assertIn("solo_pout", names)
+        self.assertIn("tease_side_eye", names)
+        repeats = sum(
+            left == right for left, right in zip(names, names[1:])
+        )
+        self.assertEqual(repeats, 0)
+
     def test_idle_expression_schedules_only_while_quiet(self):
         gateway.IDLE_EXPRESSION_ENABLED = True
         gateway.idle_expression_next_at = 99.0
