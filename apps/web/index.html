@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>小麻直播间</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%2378d99a'/><circle cx='11' cy='14' r='2' fill='%230b0d12'/><circle cx='21' cy='14' r='2' fill='%230b0d12'/><path d='M10 21c4 3 8 3 12 0' fill='none' stroke='%230b0d12' stroke-width='2' stroke-linecap='round'/></svg>" />
-    <link rel="stylesheet" href="style.css?v=20260828a" />
+    <link rel="stylesheet" href="style.css?v=20260901g" />
   </head>
   <!--
     `booting` disables transitions/animations until the first paint commits.
@@ -13,12 +13,35 @@
     because `state-idle` and the generic `.ind` defaults differ. The
     bootstrap script at the end of main.js strips the class after one rAF.
   -->
-  <body class="booting">
+  <body class="booting" data-room-scene="sun" data-room-mode="auto">
+    <div id="room-sky" aria-hidden="true">
+      <div class="room-sky-mask">
+        <div class="room-sun">
+          <span class="room-sun-rays"></span>
+          <span class="room-sun-core"></span>
+          <span class="room-sun-beam b1"></span>
+          <span class="room-sun-beam b2"></span>
+          <span class="room-sun-beam b3"></span>
+        </div>
+        <div class="room-moon">
+          <span class="room-moon-glow"></span>
+          <span class="room-moon-core"></span>
+        </div>
+        <canvas id="room-stars"></canvas>
+        <div class="room-rainbow"></div>
+        <div class="room-overcast"></div>
+      </div>
+    </div>
+    <canvas id="room-glass" aria-hidden="true"></canvas>
     <div id="app">
       <header class="topbar">
         <div class="room-heading">
           <div class="room-title">
             <span class="room-live-dot"></span><strong>小麻直播间</strong><span class="room-live-label">LIVE</span>
+            <span id="room-weather-badge" class="room-weather-badge" data-scene="sun" title="直播间天气">
+              <i class="wx-icon" aria-hidden="true"></i>
+              <b id="room-weather-badge-label">晴</b>
+            </span>
             <button id="background-music-toggle" class="background-music-toggle" type="button" aria-pressed="true" aria-label="关闭背景音乐" title="关闭我的背景音乐">
               <svg class="music-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.8 5.8a9 9 0 0 1 0 12.4" fill="none"/></svg>
               <svg class="music-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="m16 9 5 5m0-5-5 5" fill="none"/></svg>
@@ -275,6 +298,28 @@
               </label>
               <button id="avatar-view-reset" type="button" class="btn avatar-view-reset">恢复默认画面</button>
               <small>拖动时即时预览，停止调整后自动保存并同步给所有观众。</small>
+            </div>
+
+            <div class="field room-weather-setting">
+              <span>直播间天气</span>
+              <div class="room-weather-options" role="radiogroup" aria-label="直播间天气">
+                <button type="button" role="radio" aria-checked="false" data-room-mode="auto">
+                  <strong>自动</strong><small>跟天气和钟点</small>
+                </button>
+                <button type="button" role="radio" aria-checked="false" data-room-mode="sun">
+                  <strong>晴天</strong><small>太阳和暖光</small>
+                </button>
+                <button type="button" role="radio" aria-checked="false" data-room-mode="rain">
+                  <strong>下雨</strong><small>满屏雨和雨珠</small>
+                </button>
+                <button type="button" role="radio" aria-checked="false" data-room-mode="night">
+                  <strong>夜里</strong><small>月亮和繁星</small>
+                </button>
+                <button type="button" role="radio" aria-checked="false" data-room-mode="rainbow">
+                  <strong>彩虹</strong><small>雨过天晴</small>
+                </button>
+              </div>
+              <small id="room-weather-status">全体观众同步；下雨会铺到人像前面的玻璃上。</small>
             </div>
 
             <div class="field avatar-transport-setting">
@@ -537,6 +582,7 @@
     <script src="/vendor/mpegts.min.js"></script>
     <script src="/avatar-sync.js?v=20260828a"></script>
     <script type="module" src="room.js?v=20260825d"></script>
-    <script type="module" src="main.js?v=20260901c"></script>
+    <script type="module" src="room-decor.js?v=20260901g"></script>
+    <script type="module" src="main.js?v=20260901f"></script>
   </body>
 </html>
