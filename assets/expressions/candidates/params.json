@@ -1,0 +1,76 @@
+{
+  "note": "Preview only. Not wired into EXPRESSION_PROFILES or start.sh.",
+  "live_transition": {
+    "attack_ms": 960,
+    "release_ms": 1120,
+    "source_min_intensity": 0.48,
+    "fps": 25,
+    "preview_hold_ms": 1740
+  },
+  "already_live": [
+    "neutral", "surprised", "pout", "one_brow",
+    "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh"
+  ],
+  "candidates": [
+    {
+      "id": "soft_smile",
+      "file": "soft-smile",
+      "label": "闭口浅笑",
+      "intensity": 0.62,
+      "mouth_strength": 0.06,
+      "duration_ms": [2800, 4200],
+      "use": "普通暖一点的句子，不想用 laugh 那种张嘴笑时",
+      "idle": true
+    },
+    {
+      "id": "curious",
+      "file": "curious",
+      "label": "好奇",
+      "intensity": 0.70,
+      "mouth_strength": 0.08,
+      "duration_ms": [2400, 3600],
+      "use": "追问、听到新事、比 surprised 轻的「诶？」",
+      "idle": true
+    },
+    {
+      "id": "side_eye",
+      "file": "side-eye",
+      "label": "斜眼",
+      "intensity": 0.68,
+      "mouth_strength": 0.05,
+      "duration_ms": [2200, 3400],
+      "use": "调侃、吐槽、假装不屑",
+      "idle": false
+    },
+    {
+      "id": "lip_bite",
+      "file": "lip-bite",
+      "label": "咬唇",
+      "intensity": 0.66,
+      "mouth_strength": 0.10,
+      "duration_ms": [2000, 3200],
+      "use": "带一点坏或害羞的近距反应",
+      "idle": false
+    },
+    {
+      "id": "sleepy",
+      "file": "sleepy",
+      "label": "犯困",
+      "intensity": 0.58,
+      "mouth_strength": 0.04,
+      "duration_ms": [3200, 4800],
+      "use": "深夜、等很久、软软的待机",
+      "idle": true
+    },
+    {
+      "id": "tender",
+      "file": "tender",
+      "label": "心疼",
+      "intensity": 0.64,
+      "mouth_strength": 0.06,
+      "duration_ms": [2800, 4400],
+      "use": "安慰、难过新闻，补掉已去掉的 serious",
+      "idle": false
+    }
+  ]
+}

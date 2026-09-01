@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>表情候选预览 · 未接入直播</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111114;
+      --card: #1a1a1f;
+      --line: #2c2c33;
+      --text: #eeeef2;
+      --muted: #9a9aa6;
+      --accent: #c9a27a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 28px 24px 8px;
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+    header h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
+    header p { margin: 0; color: var(--muted); max-width: 68ch; }
+    .timing {
+      margin-top: 14px;
+      color: var(--accent);
+      font-size: 13px;
+    }
+    .reel {
+      max-width: 1180px;
+      margin: 20px auto 8px;
+      padding: 0 24px;
+    }
+    .reel video {
+      width: min(360px, 100%);
+      border-radius: 10px;
+      background: #000;
+      display: block;
+    }
+    .grid {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 16px 24px 48px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 18px;
+    }
+    article {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    article video, article img {
+      width: 100%;
+      aspect-ratio: 720 / 1280;
+      object-fit: cover;
+      background: #000;
+      display: block;
+    }
+    .meta { padding: 14px 16px 16px; }
+    .meta h2 {
+      margin: 0 0 4px;
+      font-size: 17px;
+      font-weight: 600;
+    }
+    .id { color: var(--accent); font-size: 12px; letter-spacing: 0.02em; }
+    dl {
+      display: grid;
+      grid-template-columns: 88px 1fr;
+      gap: 4px 10px;
+      margin: 12px 0 0;
+      font-size: 13px;
+    }
+    dt { color: var(--muted); }
+    dd { margin: 0; }
+    .tabs { display: flex; gap: 8px; margin: 10px 0 0; }
+    .tabs button {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 4px 10px;
+      cursor: pointer;
+    }
+    .tabs button.on { color: var(--text); border-color: var(--accent); }
+    .still { display: none; }
+    article.show-still video { display: none; }
+    article.show-still .still { display: block; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>6 个新表情候选 · 还没有进直播</h1>
+    <p>
+      视频按线上同一套过渡做：0.4 秒中性脸 → 0.96 秒淡入 → 停约 1.7 秒 → 1.12 秒淡回中性。
+      强度低于 0.48 时线上不会切到表情源图。你挑几个之后，我再接到调度里。
+    </p>
+    <p class="timing">attack 960ms · hold ~1740ms · release 1120ms · 25fps · 720×1280</p>
+  </header>
+  <section class="reel">
+    <p class="id">六条连在一起</p>
+    <video src="videos/all-candidates.mp4" controls playsinline loop></video>
+  </section>
+  <section class="grid" id="cards"></section>
+  <script>
+    const candidates = [
+      {
+        id: "soft_smile", file: "soft-smile", label: "闭口浅笑",
+        intensity: 0.62, mouth: 0.06, duration: "2800–4200 ms",
+        use: "普通暖一点的句子，不想用 laugh 那种张嘴笑时", idle: "可以进待机"
+      },
+      {
+        id: "curious", file: "curious", label: "好奇",
+        intensity: 0.70, mouth: 0.08, duration: "2400–3600 ms",
+        use: "追问、听到新事，比 surprised 轻的「诶？」", idle: "可以进待机"
+      },
+      {
+        id: "side_eye", file: "side-eye", label: "斜眼",
+        intensity: 0.68, mouth: 0.05, duration: "2200–3400 ms",
+        use: "调侃、吐槽、假装不屑", idle: "只对话"
+      },
+      {
+        id: "lip_bite", file: "lip-bite", label: "咬唇",
+        intensity: 0.66, mouth: 0.10, duration: "2000–3200 ms",
+        use: "带一点坏或害羞的近距反应", idle: "只对话"
+      },
+      {
+        id: "sleepy", file: "sleepy", label: "犯困",
+        intensity: 0.58, mouth: 0.04, duration: "3200–4800 ms",
+        use: "深夜、等很久、软软的待机", idle: "可以进待机"
+      },
+      {
+        id: "tender", file: "tender", label: "心疼",
+        intensity: 0.64, mouth: 0.06, duration: "2800–4400 ms",
+        use: "安慰、难过新闻，补掉已去掉的 serious", idle: "只对话"
+      }
+    ];
+    const cards = document.getElementById("cards");
+    for (const item of candidates) {
+      const article = document.createElement("article");
+      article.innerHTML = `
+        <video class="clip" src="videos/${item.file}.mp4" muted loop playsinline></video>
+        <img class="still" src="stills/${item.file}.png" alt="${item.label}" />
+        <div class="meta">
+          <div class="id">${item.id}</div>
+          <h2>${item.label}</h2>
+          <div class="tabs">
+            <button type="button" class="on" data-mode="video">过渡视频</button>
+            <button type="button" data-mode="still">静帧</button>
+          </div>
+          <dl>
+            <dt>intensity</dt><dd>${item.intensity}</dd>
+            <dt>mouth</dt><dd>${item.mouth}</dd>
+            <dt>duration</dt><dd>${item.duration}</dd>
+            <dt>待机</dt><dd>${item.idle}</dd>
+            <dt>什么时候用</dt><dd>${item.use}</dd>
+          </dl>
+        </div>`;
+      article.querySelectorAll(".tabs button").forEach((button) => {
+        button.addEventListener("click", () => {
+          article.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("on"));
+          button.classList.add("on");
+          article.classList.toggle("show-still", button.dataset.mode === "still");
+        });
+      });
+      const video = article.querySelector("video");
+      video.addEventListener("mouseenter", () => video.play());
+      cards.appendChild(article);
+    }
+  </script>
+</body>
+</html>
