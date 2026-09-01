@@ -247,7 +247,7 @@ async def _proactive_news_loop() -> None:
             continue
         try:
             headlines = await asyncio.wait_for(
-                mcp_gateway.rss_news.latest_topics(), timeout=16.0
+                mcp_gateway.rss_news.latest_topics(), timeout=40.0
             )
             topic = await _select_active_news_topic("__live_room__", headlines)
             if not await live_room.can_start_proactive() or mention_replies.pending:
@@ -266,7 +266,19 @@ async def _proactive_news_loop() -> None:
             )
             mention_replies.enqueue_proactive(prompt)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("room proactive news skipped: %s", exc)
+            logger.warning(
+                "room proactive news skipped: %s: %s",
+                type(exc).__name__,
+                exc or repr(exc),
+            )
+            # A watched room should still hear something when every RSS host
+            # is unreachable. Do not mention the fetch failure on air.
+            if await live_room.can_start_proactive() and not mention_replies.pending:
+                mention_replies.enqueue_proactive(
+                    "直播间现在有观众在看，暂时没有人连麦。请主动用一两句轻松口语跟观众聊个新话题，"
+                    "例如最近在做什么、喜欢的动漫、动物、音乐、电影、游戏或想去的地方。"
+                    "每句必须说完，用句号、问号或感叹号收尾。不要说这是系统要求，不要提新闻或查询。"
+                )
 
 
 async def _select_active_news_topic(audience: str, headlines: str) -> str:
