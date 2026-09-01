@@ -1,5 +1,5 @@
 {
-  "note": "The six newer faces stay on the live xiaoya_locket portrait. Only August-calibrated stills are used as swap sources."
+  "note": "Hard faces (side_eye, lip_bite, sleepy) swap to August plates. Soft new faces stay on the live portrait.",
   "live_transition": {
     "attack_ms": 960,
     "release_ms": 1120,

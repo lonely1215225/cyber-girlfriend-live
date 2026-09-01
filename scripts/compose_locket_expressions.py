@@ -114,17 +114,11 @@ def compose() -> dict[str, np.ndarray]:
     blend_region(curious, src["surprised"], "brows", 0.28, feather=0.38)
     blend_region(curious, src["surprised"], "mouth", 0.20, feather=0.45)
 
+    # Hard swap sources stay on a single August plate so identity cannot drift.
+    # Shy already looks aside; pout is the only safe closed-mouth bite stand-in.
     side_eye = src["shy"].copy()
-    blend_region(side_eye, src["smirk"], "mouth", 0.70, feather=0.40)
-    blend_region(side_eye, src["smirk"], "cheeks", 0.20, feather=0.50)
-
     lip_bite = src["pout"].copy()
-    blend_region(lip_bite, src["smirk"], "eyes", 0.22, feather=0.40)
-    blend_region(lip_bite, src["cheek-puff"], "mouth", 0.55, feather=0.40)
-    blend_region(lip_bite, src["cheek-puff"], "cheeks", 0.30, feather=0.48)
-
-    sleepy = droop_eyes(src["one-brow"].copy(), amount=0.92)
-    blend_region(sleepy, src["pout"], "mouth", 0.18, feather=0.45)
+    sleepy = droop_eyes(src["one-brow"].copy(), amount=0.70)
 
     tender = src["shy"].copy()
     blend_region(tender, src["pout"], "mouth", 0.48, feather=0.40)

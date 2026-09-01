@@ -433,10 +433,11 @@ EXPRESSION_PROFILES = {
     "soft_smile", "curious", "side_eye", "lip_bite", "sleepy", "tender",
 }
 SILENT_ONLY_PROFILES = frozenset({"lip_bite", "cheek_puff"})
-# These have no August-calibrated still. Drive them on the live portrait with
-# retargeted keypoints only — a generated source swap made her look uncanny.
+# Mild new faces stay on the live portrait. Hard ones swap to an August
+# plate (side_eye→shy, lip_bite→pout, sleepy→drooped one-brow), never a
+# generated face — those looked uncanny.
 PARAMETER_ONLY_PROFILES = frozenset({
-    "soft_smile", "curious", "side_eye", "lip_bite", "sleepy", "tender",
+    "soft_smile", "curious", "tender",
 })
 SPEAKABLE_SUBSTITUTES = {
     "lip_bite": "smirk",
@@ -1313,8 +1314,7 @@ def _schedule_idle_expression(now: float) -> None:
     global idle_expression_last_name, idle_expression_sequences, idle_expression_next_at
     strength = IDLE_EXPRESSION_INTENSITY * random.uniform(0.88, 1.08)
     duration = lambda low, high: random.randint(low, high)
-    # Wink/pout/shy are August stills, so source-swap is visible. There is no
-    # calibrated lip-bite plate; idle uses pout for that mouth beat.
+    # Hard idle faces swap to August plates: side_eye is shy, lip_bite is pout.
     choices: tuple[tuple[str, int, tuple[tuple[float, str, str, float, float, int], ...]], ...] = (
         (
             "solo_wink",
@@ -1346,7 +1346,7 @@ def _schedule_idle_expression(now: float) -> None:
             "tease_side_eye",
             4,
             (
-                (0.0, "expression", "shy", 0.84, 0.05, duration(2400, 3600)),
+                (0.0, "expression", "side_eye", 0.84, 0.05, duration(2400, 3600)),
                 (2.6, "expression", "smirk", 0.68, 0.06, duration(2200, 3200)),
             ),
         ),
@@ -1354,7 +1354,7 @@ def _schedule_idle_expression(now: float) -> None:
             "naughty_lip_bite",
             4,
             (
-                (0.0, "expression", "pout", 0.90, 0.10, duration(2400, 3400)),
+                (0.0, "expression", "lip_bite", 0.90, 0.10, duration(2400, 3400)),
                 (2.7, "blink", "neutral", 0.0, 0.0, 0),
             ),
         ),
@@ -1414,7 +1414,7 @@ def _schedule_idle_expression(now: float) -> None:
             1,
             (
                 (0.0, "blink", "neutral", 0.0, 0.0, 0),
-                (0.45, "expression", "sleepy", 0.72, 0.04, duration(2800, 4000)),
+                (0.45, "expression", "sleepy", 0.78, 0.04, duration(2800, 4000)),
             ),
         ),
         (
