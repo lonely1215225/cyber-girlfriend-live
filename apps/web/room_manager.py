@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from room_decor import default_decor, normalize_decor
 from room_store import RoomStore
 
 try:
@@ -216,6 +217,7 @@ class LiveRoom:
         disconnect_grace_s: int = 12,
         max_call_s: int = 10 * 60,
         store: RoomStore | None = None,
+        decor_provider: Any = None,
     ) -> None:
         self.queue_limit = max(1, queue_limit)
         self.pending_timeout_s = max(10, pending_timeout_s)
@@ -223,6 +225,7 @@ class LiveRoom:
         self.disconnect_grace_s = max(3, disconnect_grace_s)
         self.max_call_s = max(60, max_call_s)
         self.store = store
+        self.decor_provider = decor_provider
         self._participants: dict[str, Participant] = {}
         self._queue: list[QueueEntry] = []
         self._active: CallSession | None = None
@@ -894,7 +897,20 @@ class LiveRoom:
                 "status": status,
                 "queue_position": my_position,
             },
+            "decor": self._decor_locked(),
         }
+
+    def _decor_locked(self) -> dict[str, str]:
+        if self.decor_provider is None:
+            return default_decor()
+        try:
+            return normalize_decor(self.decor_provider())
+        except Exception:
+            return default_decor()
+
+    async def notify_state(self) -> None:
+        async with self._lock:
+            self._broadcast_locked()
 
     @staticmethod
     def _participant_public(participant: Participant | None) -> dict[str, Any]:

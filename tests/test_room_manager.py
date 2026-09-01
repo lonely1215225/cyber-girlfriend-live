@@ -108,6 +108,10 @@ class LiveRoomTests(unittest.IsolatedAsyncioTestCase):
                 {self.alice.display_name, self.bob.display_name},
             )
             self.assertTrue(all(viewer["status"] == "watching" for viewer in state["viewers"]))
+            self.assertEqual(state["decor"]["mode"], "auto")
+            self.assertEqual(state["decor"]["weather"], "unknown")
+            self.assertEqual(state["decor"]["source"], "clock")
+            self.assertIn(state["decor"]["scene"], {"sun", "night", "overcast", "rain", "rainbow"})
         finally:
             await self.room.unsubscribe(alice_events)
             await self.room.unsubscribe(bob_events)

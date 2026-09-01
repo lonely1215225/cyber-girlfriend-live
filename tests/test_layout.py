@@ -27,6 +27,8 @@ class LayoutTests(unittest.TestCase):
             "scripts/docker-up.sh",
             "install.sh",
             "assets/expressions/xiaoya_locket/reference-laugh.png",
+            "apps/web/room_decor.py",
+            "apps/web/room-decor.js",
         )
         missing = [rel for rel in required if not (ROOT / rel).is_file()]
         self.assertEqual(missing, [])

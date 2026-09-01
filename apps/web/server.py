@@ -46,6 +46,7 @@ from rss_news import (
     news_event_fingerprint,
     normalize_news_title,
 )
+from room_decor import RoomDecorError, RoomDecorStore
 from room_manager import LiveRoom, RoomError
 from room_store import RoomStore
 
@@ -89,11 +90,13 @@ DEFAULT_REF_AUDIO = Path(os.environ.get("REF_AUDIO", str(PROJECT_ROOT / "assets"
 if not DEFAULT_REF_AUDIO.is_absolute():
     DEFAULT_REF_AUDIO = PROJECT_ROOT / DEFAULT_REF_AUDIO
 avatar_profiles = AvatarProfileStore(ROOM_DB_PATH, PROJECT_ROOT / "data", DEFAULT_REF_AUDIO)
+room_decor = RoomDecorStore(PROJECT_ROOT / "data" / "room_decor.json")
 live_room = LiveRoom(
     queue_limit=int(os.environ.get("LIVE_ROOM_QUEUE_LIMIT", "100")),
     pending_timeout_s=int(os.environ.get("LIVE_ROOM_JOIN_TIMEOUT", "60")),
     max_call_s=int(os.environ.get("LIVE_ROOM_MAX_CALL_SECONDS", "600")),
     store=room_store,
+    decor_provider=room_decor.public,
 )
 # HF injects SPACE_ID ("owner/space") into every Space runtime; it's absent
 # locally and on a plain `docker run`. We meter conversation time ONLY on the
@@ -204,6 +207,8 @@ async def _startup():
         mention_replies.start()
         await mention_replies.restore_jobs()
         app.state.proactive_news_task = asyncio.create_task(_proactive_news_loop())
+        await room_decor.refresh_weather()
+        app.state.room_decor_task = asyncio.create_task(_room_decor_weather_loop())
     if mcp_gateway.enabled:
         asyncio.create_task(mcp_gateway.warmup())
     if not LIMITER_ENABLED:
@@ -227,6 +232,11 @@ async def _shutdown():
                 await task
         await mention_replies.stop()
         await live_room.stop()
+        decor_task = getattr(app.state, "room_decor_task", None)
+        if decor_task:
+            decor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await decor_task
     await mcp_gateway.close()
 
 
@@ -237,6 +247,15 @@ async def _room_store_cleanup_loop() -> None:
             await room_store.cleanup(ip_retention_days=ROOM_IP_RETENTION_DAYS)
         except Exception as exc:  # noqa: BLE001
             logger.warning("room database cleanup failed: %s", exc)
+
+
+async def _room_decor_weather_loop() -> None:
+    while True:
+        await asyncio.sleep(30 * 60)
+        before = room_decor.public()
+        after = await room_decor.refresh_weather(force=True)
+        if after != before:
+            await live_room.notify_state()
 
 
 async def _proactive_news_loop() -> None:
@@ -336,6 +355,10 @@ class AdminAvatarRequest(BaseModel):
 
 class AdminAvatarTransportRequest(BaseModel):
     transport: str
+
+
+class AdminRoomDecorRequest(BaseModel):
+    mode: str
 
 
 class AvatarProfileUpdateRequest(BaseModel):
@@ -1052,6 +1075,35 @@ async def admin_set_motion(request: Request):
         _client_ip(request),
     )
     return payload
+
+
+@app.get("/api/admin/room-decor")
+async def admin_get_room_decor(request: Request):
+    """Return the shared weather scene and cached forecast accent."""
+    await _require_admin(request)
+    await room_decor.refresh_weather()
+    return {"ok": True, "decor": room_decor.public()}
+
+
+@app.put("/api/admin/room-decor")
+async def admin_set_room_decor(body: AdminRoomDecorRequest, request: Request):
+    """Persist the host weather override and broadcast it to every viewer."""
+    admin_session = await _require_admin(request)
+    try:
+        room_decor.set_mode(body.mode)
+    except RoomDecorError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    await room_decor.refresh_weather()
+    decor = room_decor.public()
+    await live_room.notify_state()
+    await room_store.audit_admin(
+        str(admin_session["id"]),
+        "room.decor.change",
+        decor["mode"],
+        json.dumps(decor, ensure_ascii=False),
+        _client_ip(request),
+    )
+    return {"ok": True, "decor": decor}
 
 
 @app.get("/api/me")
