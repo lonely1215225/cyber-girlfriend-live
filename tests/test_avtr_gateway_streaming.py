@@ -209,6 +209,20 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
             "xiaoya_locket",
         )
 
+    def test_new_faces_stay_on_base_portrait(self):
+        gateway.expression_profile = "side_eye"
+        gateway.expression_gain = 0.8
+        gateway.expression_target = 0.8
+        self.assertEqual(
+            gateway._render_avatar_for_expression("xiaoya_locket"),
+            "xiaoya_locket",
+        )
+        gateway.expression_profile = "lip_bite"
+        self.assertEqual(
+            gateway._render_avatar_for_expression("xiaoya_locket"),
+            "xiaoya_locket",
+        )
+
     def test_profile_switch_uses_gradual_release_before_replacing_basis(self):
         gateway.expression_profile = "laugh"
         gateway.expression_gain = 0.5

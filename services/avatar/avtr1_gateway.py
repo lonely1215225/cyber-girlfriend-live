@@ -433,6 +433,11 @@ EXPRESSION_PROFILES = {
     "soft_smile", "curious", "side_eye", "lip_bite", "sleepy", "tender",
 }
 SILENT_ONLY_PROFILES = frozenset({"lip_bite", "cheek_puff"})
+# These have no August-calibrated still. Drive them on the live portrait with
+# retargeted keypoints only — a generated source swap made her look uncanny.
+PARAMETER_ONLY_PROFILES = frozenset({
+    "soft_smile", "curious", "side_eye", "lip_bite", "sleepy", "tender",
+})
 SPEAKABLE_SUBSTITUTES = {
     "lip_bite": "smirk",
     "cheek_puff": "cute_annoyed",
@@ -500,6 +505,7 @@ def _render_avatar_for_expression(base_avatar_id: str) -> str:
     if (
         base_avatar_id == EXPRESSION_SOURCE_AVATAR
         and expression_profile != "neutral"
+        and expression_profile not in PARAMETER_ONLY_PROFILES
         and max(expression_gain, expression_target) >= EXPRESSION_SOURCE_MIN_INTENSITY
     ):
         return f"{EXPRESSION_SOURCE_PREFIX}{expression_profile}"
