@@ -67,6 +67,7 @@ _PRIVATE_PROTOCOL_CLOSE_RE = re.compile(
 _DELIVERY_PROFILES = (
     "neutral", "happy", "surprised", "serious", "pout", "one_brow",
     "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",
+    "soft_smile", "curious", "side_eye", "lip_bite", "sleepy", "tender",
 )
 _DELIVERY_STYLES = ("neutral", "gentle", "calm", "cheerful", "serious")
 _VOCAL_EMOTIONS = (

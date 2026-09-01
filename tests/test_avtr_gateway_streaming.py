@@ -178,7 +178,9 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
         gateway.expression_mouth_strength = 0.2
         gateway.expression_expires_at = 0.0
         gateway.expression_pending = None
+        gateway.expression_after_speech = None
         gateway.expression_owner = "none"
+        gateway.speech_output_active = False
         gateway.idle_expression_actions.clear()
         gateway.expression_timeline.clear()
 
@@ -263,6 +265,26 @@ class SemanticExpressionEnvelopeTests(unittest.TestCase):
         self.assertFalse(gateway.idle_expression_actions)
         self.assertEqual(gateway.expression_pending[-1], "dialogue")
         self.assertEqual(gateway.expression_target, 0.0)
+
+    def test_lip_bite_waits_until_speech_ends(self):
+        gateway.speech_output_active = True
+        gateway.expression_gain = 0.0
+        gateway._apply_expression("lip_bite", 0.78, 0.04, 2400)
+
+        self.assertEqual(gateway.expression_profile, "smirk")
+        self.assertEqual(gateway.expression_after_speech[0], "lip_bite")
+
+        gateway.speech_output_active = False
+        gateway._apply_deferred_silent_expression()
+        self.assertEqual(gateway.expression_profile, "lip_bite")
+        self.assertIsNone(gateway.expression_after_speech)
+
+    def test_idle_lip_bite_is_not_remapped(self):
+        gateway.speech_output_active = True
+        gateway.expression_gain = 0.0
+        gateway._apply_expression("lip_bite", 0.78, 0.04, 2400, owner="ambient")
+        self.assertEqual(gateway.expression_profile, "lip_bite")
+        self.assertIsNone(gateway.expression_after_speech)
 
     def test_expression_source_switch_uses_bounded_non_recursive_transition(self):
         gateway.expression_render_avatar = "xiaoya_locket"

@@ -263,6 +263,19 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(serious_cue.profile, "neutral")
         self.assertEqual(serious_cue.intensity, 0.0)
 
+    def test_new_faces_are_accepted_and_silent_only_holds_after_speech(self) -> None:
+        control = DeliveryControlFilter()
+        visible = control.feed("<e lip_bite 0.70 playful 0.50 none 1.00>先别急着笑我。")
+        self.assertEqual(visible, "先别急着笑我。")
+        bite = publish_expression(visible)
+        self.assertEqual(bite.profile, "lip_bite")
+        self.assertGreaterEqual(bite.duration_ms, 1800)
+
+        begin_delivery_generation()
+        visible = control.feed("<e soft_smile 0.55 gentle>见到你就好。")
+        smile = publish_expression(visible)
+        self.assertEqual(smile.profile, "soft_smile")
+
     def test_visual_hold_is_based_on_length_not_phrase_matching(self) -> None:
         self.assertEqual(cue_duration_ms("甲乙丙丁", "laugh"), cue_duration_ms("春夏秋冬", "laugh"))
 

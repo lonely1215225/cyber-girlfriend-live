@@ -18,7 +18,15 @@ from dataclasses import dataclass
 EXPRESSION_PROFILES = frozenset({
     "neutral", "surprised", "pout", "one_brow",
     "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",
+    "soft_smile", "curious", "side_eye", "lip_bite", "sleepy", "tender",
 })
+# These occupy the mouth. They are valid faces, but must not play on top of
+# spoken audio; the renderer swaps them for a speakable stand-in until speech ends.
+SILENT_ONLY_PROFILES = frozenset({"lip_bite", "cheek_puff"})
+SPEAKABLE_SUBSTITUTES = {
+    "lip_bite": "smirk",
+    "cheek_puff": "cute_annoyed",
+}
 # Retired faces stay parseable so leftover model tags are stripped, then
 # remapped away from the dropped portraits.
 RETIRED_EXPRESSION_ALIASES = {
@@ -41,13 +49,14 @@ NONVERBAL_EVENTS = frozenset({
 DELIVERY_CONTROL_PROMPT = """
 你同时担任自己的实时表演导演。只在本轮要输出给观众的自然语言正文时，必须先输出一个隐藏控制标签：
 <e face face_intensity voice voice_intensity nonverbal pace>
-face 只能选 neutral、surprised、pout、one_brow、smirk、wink、cheek_puff、cute_annoyed、shy、laugh；face_intensity 是 0 到 1。不要使用 happy 或 serious 作为面部表情。
+face 只能选 neutral、surprised、pout、one_brow、smirk、wink、cute_annoyed、shy、laugh、soft_smile、curious、side_eye、sleepy、tender、lip_bite、cheek_puff；face_intensity 是 0 到 1。不要使用 happy 或 serious 作为面部表情。
+说话时只能选不挡嘴的脸：neutral、surprised、pout、one_brow、smirk、wink、cute_annoyed、shy、laugh、soft_smile、curious、side_eye、sleepy、tender。lip_bite 和 cheek_puff 会占用嘴巴，不能边说边做；说话句子不要选它们。系统若收到这两张，会在开口时先换成接近的可说话表情，等这句说完再切过去。
 voice 只能选 neutral、happy、playful、warm、tender、shy、serious、sad、angry、surprised；voice_intensity 是 0 到 1；nonverbal 只能选 none、soft_laugh、laugh、sigh、breath、hum；pace 是 0.96 到 1.04。
 面部表情和声音情绪必须分别判断。根据完整对话、真实语义、态度和表达节奏临场选择，不能按词语机械匹配。面部可以灵动，但声音平时必须保持接近角色原始参考音色：普通说明、事实陈述、新闻主体和日常衔接句优先用 neutral，voice_intensity 填 0.00 到 0.18，pace 填 0.98 到 1.02。不要为了显得活泼而让整段持续高音、高亢或撒娇。
 只有某一个具体句子确实承载明显的惊喜、调侃、害羞、安慰、生气、难过或强调时，才为该情绪片段选择对应 voice，并将 voice_intensity 提高到 0.45 到 0.68；极少数情绪高潮才可超过 0.68。特殊片段结束后，必须在下一普通句前重新输出 neutral 的低强度标签，不能让上一句的高情绪沿用到整段回答。面部表情不要求随声音一起升高。
 只有真的需要可听笑声、叹气或呼吸时才选 nonverbal，不要每句都加。严肃新闻、灾难、求助和难过话题不强行撒娇或发笑。
 选择 soft_laugh、laugh、sigh 或 hum 时，正文必须自然写出当下真会说出口的简短语气或拟声，并在该句开头加上对应的英文自由标签，让合成引擎发出真实声音事件。可用标签包括 [laughing]、[chuckle]、[sigh]、[inhale]、[exhale]、[whisper]、[soft voice]、[playful]、[surprised]、[sad]。例如轻笑写成“[chuckle]嘿嘿，被你发现了。”，叹气写成“[sigh]唉……那我慢慢说。”，悄悄话写成“[whisper]这个只有你能听。”。标签只服务声音，观众看不到；不要写中文舞台提示、不要解释标签。
-每个回答的第一句前必须输出一个标签；后续只有特殊情绪片段开始或结束时才输出新标签。把连续的普通句视为同一低情绪片段，特殊句结束后务必切回低情绪。不要把“诶、哟、嘿嘿”等单独作为一个待合成句子，应自然连到后面的正文。严格按六个值的顺序填写，不写属性名，不写结束标签。例如普通句用 <e shy 0.42 neutral 0.08 none 1.00>，只有确实需要调侃的句子才用 <e smirk 0.62 playful 0.56 none 1.00>。标签后立刻输出正文，不解释标签。调用工具或不输出正文时不要输出标签。
+每个回答的第一句前必须输出一个标签；后续只有特殊情绪片段开始或结束时才输出新标签。把连续的普通句视为同一低情绪片段，特殊句结束后务必切回低情绪。不要把“诶、哟、嘿嘿”等单独作为一个待合成句子，应自然连到后面的正文。严格按六个值的顺序填写，不写属性名，不写结束标签。例如普通句用 <e soft_smile 0.52 neutral 0.08 none 1.00>，好奇时用 <e curious 0.66 playful 0.22 none 1.00>，调侃用 <e side_eye 0.64 playful 0.52 none 1.00>，安慰用 <e tender 0.60 tender 0.48 none 1.00>。标签后立刻输出正文，不解释标签。调用工具或不输出正文时不要输出标签。
 正文只能是可直接展示和朗读的纯文本，禁止Markdown和任何HTML/XML标签，包括<br>、<p>、<div>。
 """.strip()
 
@@ -430,6 +439,9 @@ def cue_duration_ms(text: str, profile: str) -> int:
         # A blink-sized cue disappeared inside the source-image crossfade.
         # Keep a model-directed wink visible long enough to ease in and out.
         return max(1600, min(2400, estimate))
+    if profile in SILENT_ONLY_PROFILES:
+        # These play after the mouth is free; keep a short readable hold.
+        return max(1800, min(2800, estimate))
     return estimate
 
 
@@ -517,6 +529,7 @@ def begin_delivery_generation() -> None:
 
 __all__ = [
     "DELIVERY_CONTROL_PROMPT", "DeliveryControlFilter", "ExpressionCue",
+    "EXPRESSION_PROFILES", "SILENT_ONLY_PROFILES", "SPEAKABLE_SUBSTITUTES",
     "VOCAL_EMOTIONS", "NONVERBAL_EVENTS",
     "begin_delivery_generation", "begin_delivery_response", "clear_delivery_state", "cue_duration_ms", "cues_after",
     "publish_expression", "submit_delivery_plan",

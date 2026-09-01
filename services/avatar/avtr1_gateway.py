@@ -430,6 +430,12 @@ flv_muxer_voice: FlvMuxer | None = None
 EXPRESSION_PROFILES = {
     "neutral", "surprised", "pout", "one_brow",
     "smirk", "wink", "cheek_puff", "cute_annoyed", "shy", "laugh",
+    "soft_smile", "curious", "side_eye", "lip_bite", "sleepy", "tender",
+}
+SILENT_ONLY_PROFILES = frozenset({"lip_bite", "cheek_puff"})
+SPEAKABLE_SUBSTITUTES = {
+    "lip_bite": "smirk",
+    "cheek_puff": "cute_annoyed",
 }
 RETIRED_EXPRESSION_ALIASES = {
     "happy": "neutral",
@@ -443,6 +449,7 @@ expression_expires_at = 0.0
 expression_sequence = 0
 expression_owner = "none"
 expression_pending: tuple[str, float, float, int, str] | None = None
+expression_after_speech: tuple[str, float, float, int] | None = None
 expression_timeline: deque[tuple[int, str, float, float, int, int]] = deque()
 idle_expression_actions: deque[tuple[float, str, str, float, float, int]] = deque()
 idle_expression_next_at = time.monotonic() + random.uniform(
@@ -956,6 +963,7 @@ def _take_output_audio() -> tuple[tuple[bytes, bytes], bool]:
         speech_output_ready = False
         speech_output_rebuffering = False
         expression_timeline.clear()
+        _apply_deferred_silent_expression()
         return (packet, packet), False
 
     # A genuine upstream PCM starvation is the only remaining reason to emit
@@ -1342,6 +1350,49 @@ def _schedule_idle_expression(now: float) -> None:
             (
                 (0.0, "expression", "cute_annoyed", 0.74, 0.10, duration(2800, 4000)),
                 (3.2, "expression", "laugh", 0.72, 0.12, duration(2400, 3600)),
+            ),
+        ),
+        (
+            "warm_soft_smile",
+            (
+                (0.0, "expression", "soft_smile", 0.70, 0.06, duration(3200, 4600)),
+                (3.4, "blink", "neutral", 0.0, 0.0, 0),
+            ),
+        ),
+        (
+            "curious_peek",
+            (
+                (0.0, "expression", "curious", 0.74, 0.08, duration(2800, 4000)),
+                (3.0, "blink", "neutral", 0.0, 0.0, 0),
+                (3.4, "expression", "soft_smile", 0.62, 0.05, duration(2400, 3600)),
+            ),
+        ),
+        (
+            "tease_side_eye",
+            (
+                (0.0, "expression", "side_eye", 0.76, 0.05, duration(2600, 3800)),
+                (2.8, "expression", "smirk", 0.68, 0.06, duration(2800, 4000)),
+            ),
+        ),
+        (
+            "naughty_lip_bite",
+            (
+                (0.0, "expression", "lip_bite", 0.78, 0.04, duration(2800, 4000)),
+                (3.1, "blink", "neutral", 0.0, 0.0, 0),
+            ),
+        ),
+        (
+            "drowsy_idle",
+            (
+                (0.0, "blink", "neutral", 0.0, 0.0, 0),
+                (0.45, "expression", "sleepy", 0.72, 0.04, duration(3400, 5000)),
+            ),
+        ),
+        (
+            "tender_watch",
+            (
+                (0.0, "expression", "tender", 0.70, 0.06, duration(3200, 4600)),
+                (3.5, "blink_double", "neutral", 0.0, 0.0, 0),
             ),
         ),
     )
@@ -2041,6 +2092,19 @@ async def handle_expression(request):
     })
 
 
+def _apply_deferred_silent_expression() -> None:
+    """Play a mouth-blocking face only after spoken audio has left the clock."""
+    global expression_after_speech
+    deferred = expression_after_speech
+    expression_after_speech = None
+    if deferred is None:
+        return
+    profile, intensity, mouth_strength, duration_ms = deferred
+    _apply_expression(
+        profile, intensity, mouth_strength, duration_ms, owner="dialogue"
+    )
+
+
 def _apply_expression(
     profile: str,
     intensity: float,
@@ -2051,9 +2115,19 @@ def _apply_expression(
 ) -> None:
     global expression_profile, expression_target, expression_pending
     global expression_mouth_strength, expression_expires_at, expression_owner
+    global expression_after_speech
     if owner == "dialogue":
         _cancel_idle_expression()
     profile = RETIRED_EXPRESSION_ALIASES.get(profile, profile)
+    if owner == "dialogue" and profile not in SILENT_ONLY_PROFILES:
+        expression_after_speech = None
+    if (
+        owner == "dialogue"
+        and profile in SILENT_ONLY_PROFILES
+        and speech_output_active
+    ):
+        expression_after_speech = (profile, intensity, mouth_strength, duration_ms)
+        profile = SPEAKABLE_SUBSTITUTES.get(profile, "smirk")
     if profile == "neutral" or intensity <= 0.0:
         expression_pending = None
         expression_target = 0.0
