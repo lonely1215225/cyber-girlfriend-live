@@ -603,12 +603,19 @@ class MentionReplyWorker:
                     )
                     user_text = f"刚进入直播间的观众名字是“{request.speaker}”，现在欢迎对方。"
                 else:
-                    instructions += (
-                        "这是公开评论：用中文口语回一两句，短、直、像随口说，可直接播报。"
-                        "不要“既然……那就……”这类书面腔，不要假装正在连线。当前只陪聊天："
-                        "直接回应观众此刻说的话，不查网，不说正在查询。遇到要实时资料的问题，"
-                        "就说现在只想聊天，别编。"
-                    )
+                    if DIALOGUE_TOOLS_ENABLED:
+                        instructions += (
+                            "这是公开评论：用中文口语回一两句，短、直、像随口说，可直接播报。"
+                            "不要“既然……那就……”这类书面腔，不要假装正在连线。"
+                            "普通闲聊直接回答；只有明确要求查询或确实依赖最新外部事实时才查网。"
+                        )
+                    else:
+                        instructions += (
+                            "这是公开评论：用中文口语回一两句，短、直、像随口说，可直接播报。"
+                            "不要“既然……那就……”这类书面腔，不要假装正在连线。当前只陪聊天："
+                            "直接回应观众此刻说的话，不查网，不说正在查询。遇到要实时资料的问题，"
+                            "就说现在只想聊天，别编。"
+                        )
                     memory, active_topic = await asyncio.gather(
                         self.room.participant_memory_context(
                             request.participant_id,
