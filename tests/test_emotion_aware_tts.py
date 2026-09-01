@@ -12,6 +12,7 @@ from emotion_aware_tts import (  # noqa: E402
     prepare_tts_text,
     remove_unspeechable_preserving_cjk,
     split_streaming_sentences,
+    voxcpm_clone_options,
 )
 from playback_policy import (  # noqa: E402
     apply_websocket_playback_policy,
@@ -97,6 +98,8 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(split_streaming_sentences(report), streamed)
         self.assertFalse(should_complete_flush_before_play("interactive"))
         self.assertTrue(should_complete_flush_before_play("proactive"))
+        self.assertEqual(voxcpm_clone_options(False), {"live": True, "fast": True})
+        self.assertEqual(voxcpm_clone_options(True), {"live": False, "fast": False})
 
     def test_quoted_question_does_not_cut_a_joke_in_half(self) -> None:
         joke = (

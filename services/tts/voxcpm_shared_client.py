@@ -276,6 +276,7 @@ class SharedVoxCPMClient:
             raise RuntimeError("VoxCPM API key is missing")
         if self._use_stream:
             try:
+                LOG.info("VoxCPM clone fast=%s live=%s", fast, live)
                 yield from self._queued_stream(spoken, fast=fast, live=live)
                 return
             except StreamUnavailable:

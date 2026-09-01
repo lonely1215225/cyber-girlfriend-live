@@ -208,6 +208,13 @@ def prepare_tts_text(
     return value
 
 
+def voxcpm_clone_options(batch: bool) -> dict[str, bool]:
+    """Dialogue uses a fast timbre clone; news keeps the slower hi-fi prompt."""
+
+    interactive = not bool(batch)
+    return {"live": interactive, "fast": interactive}
+
+
 class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
     """Fish S2 handler that keeps the upstream Qwen3 TTS slot."""
 
@@ -389,7 +396,7 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
         if self.voxcpm is not None:
             self.voxcpm.set_reference(str(self.ref_audio or ""), str(self.ref_text or ""))
             yield from self._stream(
-                self.voxcpm.stream_clone(text, live=not is_batch_tts()),
+                self.voxcpm.stream_clone(text, **voxcpm_clone_options(is_batch_tts())),
                 label=f"voxcpm_{self._active_style}",
             )
             return
