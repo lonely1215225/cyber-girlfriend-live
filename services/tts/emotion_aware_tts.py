@@ -63,7 +63,7 @@ _INTERJECTION_CORE = re.compile(
     r"^[嘿哎呦哟嗯喂哈啊哦额唔唉嗨哼诶欸哇]{1,4}[，。！？!?…\s]*$"
 )
 _CLOSING_QUOTE = frozenset("”」』\"'")
-_MIN_QUESTION_FLUSH_CHARS = 8
+_MIN_SENTENCE_FLUSH_CHARS = 12
 
 
 def _spoken_core(text: str) -> str:
@@ -88,14 +88,18 @@ def _inside_chinese_quotes(text: str, index: int) -> bool:
 
 
 def _is_dialogue_boundary(text: str, index: int, candidate: str) -> bool:
-    """Keep quoted punchlines and tiny ？/！ clips attached to the next clause."""
+    """Keep punchlines and tiny openers attached to the next clause.
+
+    A 3-character first sentence such as ``没干嘛。`` would otherwise play
+    for under a second, then stall while VoxCPM clones the real reply.
+    """
 
     if is_leading_interjection(candidate):
         return False
     rest = text[index + 1 :].lstrip()
     if rest[:1] in _CLOSING_QUOTE or _inside_chinese_quotes(text, index):
         return False
-    if text[index] in "？?!" and _spoken_char_count(candidate) < _MIN_QUESTION_FLUSH_CHARS:
+    if _spoken_char_count(candidate) < _MIN_SENTENCE_FLUSH_CHARS:
         return False
     return True
 
@@ -110,9 +114,10 @@ def split_streaming_sentences(text: str) -> list[str]:
     sentence immediately when its closing punctuation arrives.
 
     Dialogue flushes only on a real sentence end. Commas, ellipses, quoted
-    questions, and tiny ？/！ openers stay inside the same request so a joke
-    or "还有啊？" cannot play alone and then stall on the next clone. News /
-    welcome connections set the batch policy so this returns the whole buffer.
+    questions, and short first sentences stay inside the same request so a
+    joke or "没干嘛。" cannot play alone and then stall on the next clone.
+    News / welcome connections set the batch policy so this returns the
+    whole buffer.
     """
     if is_batch_tts():
         return [text]
@@ -384,7 +389,7 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
         if self.voxcpm is not None:
             self.voxcpm.set_reference(str(self.ref_audio or ""), str(self.ref_text or ""))
             yield from self._stream(
-                self.voxcpm.stream_clone(text),
+                self.voxcpm.stream_clone(text, live=not is_batch_tts()),
                 label=f"voxcpm_{self._active_style}",
             )
             return

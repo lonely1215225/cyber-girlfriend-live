@@ -25,7 +25,10 @@ from speech_to_speech.api.openai_realtime import websocket_router
 
 from tiered_memory import cancel_semantic_refinements, install_tiered_memory
 from expression_director import begin_delivery_response, clear_delivery_state, cues_after
-from playback_policy import apply_websocket_playback_policy
+from playback_policy import (
+    apply_websocket_playback_policy,
+    should_complete_flush_before_play,
+)
 
 LOG = logging.getLogger("speech_to_speech.avatar_tee")
 LOG.setLevel(logging.INFO)
@@ -63,8 +66,10 @@ BYTES_PER_SAMPLE = 2
 PREROLL_MS = max(240, int(os.environ.get("AVATAR_TEE_UPLOAD_PREROLL_MS", "320")))
 PREROLL_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * PREROLL_MS / 1000)
 PACE_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * 0.1)
+# VoxCPM's next sentence takes 4-12s. The old 1.2s gap closed the mouth
+# and forced another AVTR start watermark after every clause.
 SEGMENT_GAP_SECONDS = max(
-    0.9, float(os.environ.get("AVATAR_TEE_SEGMENT_GAP_MS", "1200")) / 1000.0
+    8.0, float(os.environ.get("AVATAR_TEE_SEGMENT_GAP_MS", "14000")) / 1000.0
 )
 
 
@@ -352,6 +357,7 @@ if TEE_URL:
             complete_audio=complete_audio,
             playback_mode=playback_mode,
         )
+        complete_flush = should_complete_flush_before_play(playback_mode)
         if is_preview:
             await original_send_events(ws, events)
             return
@@ -361,26 +367,28 @@ if TEE_URL:
             # not emit response.created. Initialize completeness and playback
             # policy from the WebSocket itself so proactive news cannot
             # silently fall back to the interactive 480ms reservoir.
-            if complete_audio:
+            if complete_audio or complete_flush:
                 await tee.interrupt()
             tee.active_connection_id = connection_id
-            tee.complete_flush = complete_audio
+            tee.complete_flush = complete_flush
             tee.playback_mode = (
                 "proactive" if playback_mode == "proactive" else "interactive"
             )
             LOG.info(
-                "AVTR playback connection mode=%s complete=%s",
+                "AVTR playback connection mode=%s complete=%s flush=%s",
                 tee.playback_mode,
                 complete_audio,
+                complete_flush,
             )
         for event in events:
             event_type = getattr(event, "type", "")
             if event_type == "response.created":
                 begin_delivery_response()
                 LOG.info(
-                    "AVTR playback request mode=%s complete=%s",
+                    "AVTR playback request mode=%s complete=%s flush=%s",
                     tee.playback_mode,
                     complete_audio,
+                    complete_flush,
                 )
             elif event_type in ("response.audio.delta", "response.output_audio.delta"):
                 delta = getattr(event, "delta", "")
@@ -392,10 +400,10 @@ if TEE_URL:
                         LOG.warning("Invalid realtime PCM delta: %s", exc)
             elif event_type in ("response.audio.done", "response.output_audio.done"):
                 tee.finish_expression_segment()
-                # Realtime mode finishes each sentence promptly. Completeness
-                # mode waits for response.done so every sentence is present.
-                if not complete_audio:
-                    tee.finish()
+                # Do not close the AVTR turn here. The next VoxCPM sentence is
+                # still cloning; finishing made the mouth stop and then wait
+                # through another full generate plus a new start watermark.
+                # response.done (or the long segment gap) closes the turn.
             elif event_type == "input_audio_buffer.speech_started":
                 # Semantic memory uses the conversation model only while idle.
                 # Cancel it at VAD onset, before STT can submit the next LLM turn.

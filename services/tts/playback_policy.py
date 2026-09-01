@@ -25,6 +25,12 @@ def is_batch_tts() -> bool:
         return _batch_tts
 
 
+def should_complete_flush_before_play(playback_mode: str = "interactive") -> bool:
+    """News waits for the whole clip. Dialogue and welcomes start after preroll."""
+
+    return str(playback_mode or "") == "proactive"
+
+
 def apply_websocket_playback_policy(
     *,
     complete_audio: bool = False,

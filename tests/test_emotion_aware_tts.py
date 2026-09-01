@@ -17,6 +17,7 @@ from playback_policy import (  # noqa: E402
     apply_websocket_playback_policy,
     is_batch_tts,
     set_batch_tts,
+    should_complete_flush_before_play,
 )
 from fish_s2_tags import apply_fish_performance_tags, clean_public_fish_text  # noqa: E402
 from sensevoice_stt import SenseVoiceMetadata  # noqa: E402
@@ -38,8 +39,17 @@ class EmotionAwareTTSTests(unittest.TestCase):
         set_batch_tts(False)
 
     def test_chinese_streaming_split_emits_completed_sentence_immediately(self) -> None:
-        self.assertEqual(split_streaming_sentences("你好呀。你今天"), ["你好呀。", "你今天"])
-        self.assertEqual(split_streaming_sentences("你好呀。"), ["你好呀。", ""])
+        first = "三丰，小米现在最新旗舰是小米十七系列。"
+        self.assertEqual(split_streaming_sentences(first + "你今天"), [first, "你今天"])
+        self.assertEqual(split_streaming_sentences(first), [first, ""])
+
+    def test_short_first_sentence_waits_for_the_next_clause(self) -> None:
+        self.assertEqual(split_streaming_sentences("没干嘛。"), ["没干嘛。"])
+        self.assertEqual(split_streaming_sentences("你好呀。你今天"), ["你好呀。你今天"])
+        self.assertEqual(
+            split_streaming_sentences("没干嘛。就……等人，比如现在就在等你说话呢。"),
+            ["没干嘛。就……等人，比如现在就在等你说话呢。", ""],
+        )
 
     def test_vocative_and_comma_stay_inside_the_first_sentence(self) -> None:
         self.assertEqual(
@@ -59,19 +69,19 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertFalse(is_leading_interjection("小麻呗。"))
         self.assertEqual(
             split_streaming_sentences("哎呦喂……你还真来了。"),
-            ["哎呦喂……你还真来了。", ""],
+            ["哎呦喂……你还真来了。"],
         )
         self.assertEqual(
             split_streaming_sentences("喂，你先听我说。"),
-            ["喂，你先听我说。", ""],
+            ["喂，你先听我说。"],
         )
         self.assertEqual(
             split_streaming_sentences("嘿，我在这儿。下一句"),
-            ["嘿，我在这儿。", "下一句"],
+            ["嘿，我在这儿。下一句"],
         )
         self.assertEqual(
             split_streaming_sentences("嘿嘿。叫我小麻就行。"),
-            ["嘿嘿。叫我小麻就行。", ""],
+            ["嘿嘿。叫我小麻就行。"],
         )
         self.assertEqual(prepare_tts_text("喂，", "cheerful"), "喂，")
 
@@ -85,6 +95,8 @@ class EmotionAwareTTSTests(unittest.TestCase):
         apply_websocket_playback_policy(complete_audio=False, playback_mode="interactive")
         self.assertFalse(is_batch_tts())
         self.assertEqual(split_streaming_sentences(report), streamed)
+        self.assertFalse(should_complete_flush_before_play("interactive"))
+        self.assertTrue(should_complete_flush_before_play("proactive"))
 
     def test_quoted_question_does_not_cut_a_joke_in_half(self) -> None:
         joke = (

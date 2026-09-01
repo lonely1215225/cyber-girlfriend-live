@@ -299,7 +299,8 @@ SEARXNG_URL=
 | `TTS_DO_SAMPLE` | `1` | 保留自然采样；设为 `0` 会更固定但可能更机械 |
 | `TTS_REPETITION_PENALTY` | `1.05` | 声码重复惩罚 |
 | `AVATAR_TEE_UPLOAD_PREROLL_MS` | `320` | TTS 上传到网关前的短缓冲；真正开播水位看下面的 AVTR 输出水库 |
-| `AVATAR_TEE_SEGMENT_GAP_MS` | `1200` | 一句结束后再等这么久才收尾，避免慢续写把口型切断 |
+| `VOXCPM_PLAY_RESERVOIR_SECONDS` | `1.2` | 对话在攒够这么多流式 PCM 后开始播放；新闻仍等整句再对节奏 |
+| `AVATAR_TEE_SEGMENT_GAP_MS` | `14000` | 下一句还在克隆时保持口型回合；低于 8 秒会被抬到 8 秒 |
 | `AVTR1_SPEECH_START_BUFFER_MS` | `600` | 网关开始对口型前至少攒这么多音频 |
 | `AVTR1_AUDIO_REBUFFER_STEP_MS` | `200` | 一轮语音发生欠载后，动态恢复水位的递增步长 |
 | `AVTR1_AUDIO_MAX_BUFFER_MS` | `1400` | 动态语音水位上限；连续稳定三轮后会逐步回落 |
