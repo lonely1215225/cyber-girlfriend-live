@@ -64,6 +64,13 @@ class IndexTTSEmotionTests(unittest.TestCase):
         self.assertTrue(tease["use_emo_text"])
         self.assertIn("坏笑", tease["emo_text"])
         self.assertGreaterEqual(tease["emo_alpha"], 0.24)
+        light = plan_indextts_controls(
+            vocal_emotion="playful",
+            vocal_intensity=0.25,
+            spoken_text="哟，嘴这么毒啊？",
+        )
+        self.assertTrue(light["use_emo_text"])
+        self.assertIn("坏笑", light["emo_text"])
 
     def test_alpha_stays_soft(self) -> None:
         self.assertAlmostEqual(emo_alpha_from_intensity(0.0), 0.10)

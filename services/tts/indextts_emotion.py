@@ -56,7 +56,7 @@ _NONVERBAL_TEXT = {
 _DAILY_VOICES = frozenset({"warm", "tender", "neutral", "serious"})
 _COLOR_VOICES = frozenset({"happy", "playful", "shy", "sad", "angry", "surprised"})
 _DAILY_TEXT_INTENSITY = 0.36
-_COLOR_TEXT_INTENSITY = 0.26
+_COLOR_TEXT_INTENSITY = 0.22
 _TENDER = "tender"
 
 
