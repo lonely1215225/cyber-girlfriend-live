@@ -28,6 +28,7 @@
 /third_party/avtr-1/artifacts/
 /third_party/mediamtx/
 /third_party/fish-speech/
+/third_party/index-tts/
 
 # Retained legacy implementation (not part of the AVTR-1 runtime)
 /LiveTalking/
