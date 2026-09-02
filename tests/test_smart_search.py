@@ -1,6 +1,7 @@
 import json
 import asyncio
 import os
+import socket
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +11,13 @@ from unittest import mock
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "apps" / "web"
 sys.path.insert(0, str(FRONTEND_DIR))
 
-from smart_search import SearchHit, SmartSearchGateway, format_hits_for_speech  # noqa: E402
+from smart_search import (  # noqa: E402
+    SearchHit,
+    SmartSearchGateway,
+    _public_ipv4_infos,
+    format_hits_for_speech,
+    install_public_ipv4_resolver,
+)
 
 
 class SmartSearchTests(unittest.IsolatedAsyncioTestCase):
@@ -105,6 +112,17 @@ class SmartSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output["source"], "example.com")
         self.assertNotIn("https://", output["content"])
         self.assertIn("正文链接", output["content"])
+
+    async def test_search_resolver_skips_cgnat_and_keeps_public_ipv4(self):
+        install_public_ipv4_resolver()
+        fake = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("100.64.12.8", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("3.211.224.5", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443)),
+        ]
+        with mock.patch("smart_search._orig_getaddrinfo", return_value=fake):
+            infos = _public_ipv4_infos("api.tavily.com", 443, socket.SOCK_STREAM, 6, 0)
+        self.assertEqual([item[4][0] for item in infos], ["3.211.224.5"])
 
     async def test_search_hits_are_formatted_for_speech(self):
         raw = json.dumps({

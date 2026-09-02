@@ -27,6 +27,50 @@ logger = logging.getLogger("s2s.smart_search")
 MAX_QUERY_CHARS = 500
 MAX_SNIPPET_CHARS = 900
 _SPACE_RE = re.compile(r"\s+")
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+_SEARCH_HOSTS = frozenset({"api.tavily.com", "api.exa.ai", "r.jina.ai"})
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _public_ipv4_infos(host: str, port: int, socktype: int, proto: int, flags: int):
+    infos = _orig_getaddrinfo(host, port, socket.AF_INET, socktype, proto, flags)
+    filtered = []
+    seen: set[str] = set()
+    for item in infos:
+        try:
+            ip = ipaddress.ip_address(item[4][0])
+        except (TypeError, ValueError):
+            continue
+        if not ip.is_global or ip in _CGNAT:
+            continue
+        text = str(ip)
+        if text in seen:
+            continue
+        seen.add(text)
+        filtered.append(item)
+    # Shared 100.0.0.0/8 answers on this host have included blackholes.
+    # Try ordinary public IPv4 first so a 12s budget is not spent on them.
+    shared = ipaddress.ip_network("100.0.0.0/8")
+    filtered.sort(key=lambda item: ipaddress.ip_address(item[4][0]) in shared)
+    return filtered
+
+
+def _search_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    hostname = str(host or "").split("%", 1)[0].lower()
+    socktype = type or socket.SOCK_STREAM
+    if hostname in _SEARCH_HOSTS:
+        filtered = _public_ipv4_infos(host, port, socktype, proto, flags)
+        if filtered:
+            return filtered
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+
+def install_public_ipv4_resolver() -> None:
+    """Prefer reachable IPv4 for paid search APIs. CGNAT/IPv6 hangs ate the 5s budget."""
+    socket.getaddrinfo = _search_getaddrinfo
+
+
+install_public_ipv4_resolver()
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,14 +93,14 @@ class SmartSearchGateway:
             "1", "true", "yes", "on",
         }
         self.cache_seconds = max(15.0, float(os.environ.get("SMART_SEARCH_CACHE_SECONDS", "180")))
-        self.timeout_seconds = max(2.0, float(os.environ.get("SMART_SEARCH_TIMEOUT_SECONDS", "5")))
+        self.timeout_seconds = max(6.0, float(os.environ.get("SMART_SEARCH_TIMEOUT_SECONDS", "12")))
         self.evidence_budget_seconds = max(
-            1.0,
-            min(self.timeout_seconds, float(os.environ.get("SMART_SEARCH_EVIDENCE_BUDGET_SECONDS", "3.5"))),
+            2.0,
+            min(self.timeout_seconds, float(os.environ.get("SMART_SEARCH_EVIDENCE_BUDGET_SECONDS", "8"))),
         )
-        self.cooldown_seconds = max(10.0, float(os.environ.get("SMART_SEARCH_COOLDOWN_SECONDS", "60")))
+        self.cooldown_seconds = max(10.0, float(os.environ.get("SMART_SEARCH_COOLDOWN_SECONDS", "20")))
         self._http = httpx.AsyncClient(
-            timeout=httpx.Timeout(self.timeout_seconds, connect=min(3.0, self.timeout_seconds)),
+            timeout=httpx.Timeout(self.timeout_seconds, connect=min(8.0, self.timeout_seconds)),
             follow_redirects=True,
             headers={"user-agent": "cyber-girlfriend-live/1.0", "accept": "application/json"},
         )
@@ -106,7 +150,9 @@ class SmartSearchGateway:
             return parsed._replace(fragment="").geturl()
         return "" if not address.is_global else parsed._replace(fragment="").geturl()
 
-    def _available(self, provider: str) -> bool:
+    def _available(self, provider: str, *, ignore_circuit: bool = False) -> bool:
+        if ignore_circuit:
+            return True
         failures, retry_at = self._health.get(provider, (0, 0.0))
         return failures < 2 or time.monotonic() >= retry_at
 
@@ -217,7 +263,14 @@ class SmartSearchGateway:
                 break
         return output
 
-    async def search(self, query: str, *, topic: str = "general", limit: int = 5) -> str:
+    async def search(
+        self,
+        query: str,
+        *,
+        topic: str = "general",
+        limit: int = 5,
+        ignore_circuit: bool = False,
+    ) -> str:
         query = self._clean(query, MAX_QUERY_CHARS)
         if not query:
             raise ValueError("search query is empty")
@@ -243,7 +296,7 @@ class SmartSearchGateway:
         hits: list[SearchHit] = []
         used: list[str] = []
         for name, provider in providers:
-            if not self._available(name):
+            if not self._available(name, ignore_circuit=ignore_circuit):
                 errors.append(f"{name}: circuit open")
                 continue
             try:
