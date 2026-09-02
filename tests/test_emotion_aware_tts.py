@@ -24,6 +24,7 @@ from playback_policy import (  # noqa: E402
 from fish_s2_tags import apply_fish_performance_tags, clean_public_fish_text  # noqa: E402
 from sensevoice_stt import SenseVoiceMetadata  # noqa: E402
 from expression_director import (  # noqa: E402
+    DELIVERY_CONTROL_PROMPT,
     DeliveryControlFilter,
     begin_delivery_generation,
     begin_delivery_response,
@@ -306,6 +307,11 @@ class EmotionAwareTTSTests(unittest.TestCase):
 
     def test_visual_hold_is_based_on_length_not_phrase_matching(self) -> None:
         self.assertEqual(cue_duration_ms("甲乙丙丁", "laugh"), cue_duration_ms("春夏秋冬", "laugh"))
+
+    def test_delivery_prompt_forbids_english_bracket_tags(self) -> None:
+        self.assertIn("不要加英文方括号标签", DELIVERY_CONTROL_PROMPT)
+        self.assertNotIn("[laughing]", DELIVERY_CONTROL_PROMPT)
+        self.assertNotIn("[sigh]", DELIVERY_CONTROL_PROMPT)
 
     def test_fish_tags_survive_speechable_filter_and_are_hidden_from_viewers(self) -> None:
         spoken = "[laughing]嘿嘿，被你发现了。"
