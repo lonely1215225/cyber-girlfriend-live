@@ -1104,7 +1104,10 @@ class MentionReplyWorker:
                 "type": "input_text", "text": f"逐字朗读：{phrase}",
             }]},
         }, ensure_ascii=False))
-        await ws.send(json.dumps({"type": "response.create", "response": {}}, ensure_ascii=False))
+        await ws.send(json.dumps({
+            "type": "response.create",
+            "response": {"metadata": {"client_purpose": "tool_progress"}},
+        }, ensure_ascii=False))
         while True:
             event = json.loads(await asyncio.wait_for(ws.recv(), timeout=45))
             if event.get("type") == "response.done":

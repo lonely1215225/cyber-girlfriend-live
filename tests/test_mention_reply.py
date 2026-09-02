@@ -786,6 +786,30 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final["text"], "已经播出的半句话")
         self.assertTrue(final["interrupted"])
 
+    async def test_speak_exact_marks_the_wait_beat_as_tool_progress(self):
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+                self.sent = []
+
+            async def recv(self):
+                return next(self.events)
+
+            async def send(self, message):
+                self.sent.append(json.loads(message))
+
+        worker = MentionReplyWorker(FakeRoom(), mock.Mock(enabled=False), "ws://unused")
+        socket = FakeWebSocket()
+        await worker._speak_exact(socket, "我翻一下今天的，马上说。")
+        create = next(item for item in socket.sent if item.get("type") == "response.create")
+        self.assertEqual(create["response"]["metadata"]["client_purpose"], "tool_progress")
+        user_item = next(
+            item for item in socket.sent if item.get("type") == "conversation.item.create"
+        )
+        self.assertIn("我翻一下今天的，马上说。", user_item["item"]["content"][0]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()
