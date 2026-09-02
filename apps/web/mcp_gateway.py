@@ -274,7 +274,7 @@ class McpGateway:
                 "required": ["query"],
             },
             "source": "smart-search",
-            "progress_text": "我正在联网查找相关资料，再核对一下来源呀。",
+            "progress_text": "我去看一眼，马上回你。",
         }
 
     async def tools_for_capabilities(self, capabilities: list[str]) -> list[dict[str, Any]]:
@@ -345,7 +345,7 @@ class McpGateway:
                             "description": f"[{client.config.label} MCP] {raw.get('description') or original_name}",
                             "parameters": schema,
                             "source": client.config.key,
-                            "progress_text": "我正在查询外部资料，核对完就告诉你呀。",
+                            "progress_text": "我去看一眼，马上回你。",
                         }
                     )
                     mapping[public_name] = (client, original_name)
@@ -385,7 +385,7 @@ class McpGateway:
                             "required": ["query"],
                         },
                         "source": "rss",
-                        "progress_text": "我正在翻看最新资讯，马上整理给你呀。",
+                        "progress_text": "我翻一下今天的，马上说。",
                     }
                 )
             if self.smart_search.search_enabled:
@@ -410,7 +410,7 @@ class McpGateway:
                             "required": ["query"],
                         },
                         "source": "smart-search",
-                        "progress_text": "我正在联网查找相关资料，再核对一下来源呀。",
+                        "progress_text": "我去看一眼，马上回你。",
                     }
                 )
             if self.smart_search.fetch_enabled:
@@ -430,7 +430,7 @@ class McpGateway:
                             "required": ["url"],
                         },
                         "source": "jina-reader",
-                        "progress_text": "我正在打开相关页面确认细节，稍等一下呀。",
+                        "progress_text": "我去打开看一眼。",
                     }
                 )
             # CoinGecko's official server exposes a generic `execute` tool.
@@ -463,7 +463,7 @@ class McpGateway:
                             "required": ["coin_id"],
                         },
                         "source": "coingecko",
-                        "progress_text": "我正在核对实时行情和币种，马上告诉你呀。",
+                        "progress_text": "我去对一下最新的数。",
                     }
                 )
                 mapping[price_name] = (coingecko, "__price__")

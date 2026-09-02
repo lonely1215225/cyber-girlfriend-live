@@ -47,9 +47,11 @@ SPOKEN_CHINESE_POLICY = (
     "英文资料只可用来理解，说出口必须是中文。"
 )
 LOOKED_UP_EVIDENCE_POLICY = (
-    "网上资料已经查到了。只根据【已查到的资料】用两三句中文口语讲最值得听的一两件事。"
-    "不要说正在查、正在联网、稍等或核对来源，不要编造资料里没有的事，不要念网址。"
+    "网上资料已经查到了。口头应承已经对观众说过了，不要再重复那一句。"
+    "只根据【已查到的资料】用两三句中文口语讲最值得听的一两件事。"
+    "不要再说正在查、正在联网、稍等或核对来源，不要编造资料里没有的事，不要念网址。"
 )
+_PRICE_WAIT_RE = re.compile(r"价格|多少钱|行情|报价|汇率|现价")
 _HAN_RE = re.compile(r"[\u3400-\u9fff]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 
@@ -81,6 +83,16 @@ def is_news_request(text: str) -> bool:
 def looks_like_search_filler(text: str) -> bool:
     """True when the model spoke a lookup promise instead of a fact."""
     return bool(SEARCH_FILLER_RE.search(str(text or "").strip()))
+
+
+def lookup_wait_line(text: str) -> str:
+    """One in-character beat while a live lookup is still running."""
+    utterance = viewer_utterance(text)
+    if is_news_request(utterance):
+        return "我翻一下今天的，马上说。"
+    if _PRICE_WAIT_RE.search(utterance):
+        return "我去对一下最新的数。"
+    return "我去看一眼，马上回你。"
 
 
 def wants_news_context(text: str) -> bool:

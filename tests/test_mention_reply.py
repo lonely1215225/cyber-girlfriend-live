@@ -388,7 +388,8 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         ):
             await worker._respond(request)
         self.assertEqual([name for name, _ in gateway.calls], ["smart_web_search"])
-        worker._speak_exact.assert_not_awaited()
+        worker._speak_exact.assert_awaited()
+        self.assertTrue(any(item.get("text") == "我去看一眼，马上回你。" for item in room.items))
         self.assertFalse(any(item.get("text") == "我先帮你查清楚呀。" for item in room.items))
         self.assertTrue(any(item.get("text") == "这是核对后的最终答案。" for item in room.items))
         session_updates = [item["session"] for item in socket.sent if item.get("type") == "session.update"]
@@ -446,7 +447,9 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         ):
             await worker._respond(request)
         self.assertEqual(gateway.queries, ["看看最新新闻"])
-        worker._speak_exact.assert_not_awaited()
+        worker._speak_exact.assert_awaited()
+        self.assertEqual(worker._speak_exact.await_args.args[1], "我翻一下今天的，马上说。")
+        self.assertTrue(any(item.get("text") == "我翻一下今天的，马上说。" for item in room.items))
         user_item = next(
             item["item"]["content"][0]["text"]
             for item in socket.sent

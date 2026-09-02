@@ -2308,8 +2308,20 @@ async function doStart(audioContext = null) {
     chat.onToolCall(name);
     // Execute the tool, then push it to the conversation once the result is in,
     // so the toggle shows both the call input and its output together.
-    // Do not speak "I'm searching" — that filler was landing as the visible answer.
-    const progressGate = progressGates.get(responseId);
+    // Speak one short wait beat while research runs. The isolated
+    // tool_progress response must not become the final answer.
+    let progressGate = progressGates.get(responseId);
+    if (name === "smart_web_search" && !voiceProgressSpoken && !progressGate) {
+      let resolve = () => {};
+      const promise = new Promise((done) => { resolve = done; });
+      const tool = mcpToolDefs.find((item) => item.name === name);
+      progressGate = {
+        promise,
+        resolve,
+        phrase: tool?.progressText || "我去看一眼，马上回你。",
+      };
+      progressGates.set(responseId, progressGate);
+    }
     const gatePromise = progressGate?.promise;
     const execution = runTool(name, args, callId).then(({ output, image }) => {
       if (client === c) chat.onToolResult(name, args, output, image);

@@ -155,7 +155,7 @@ function render(state) {
     const origin = messageById.get(job.message_id);
     if (job.terminal || !job.id || !origin) continue;
     const alreadyHasSpokenProgress = messages.some((item) => (
-      item.partial && item.role === "assistant" && item.reply_to?.id === job.message_id
+      item.role === "assistant" && item.reply_to?.id === job.message_id
     ));
     if (alreadyHasSpokenProgress) continue;
     messages.push({

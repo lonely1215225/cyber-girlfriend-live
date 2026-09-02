@@ -24,6 +24,7 @@ from dialogue_intent import (
     LOOKED_UP_EVIDENCE_POLICY,
     SIMPLE_CHAT_POLICY,
     SPOKEN_CHINESE_POLICY,
+    lookup_wait_line,
     looks_like_english_answer,
     looks_like_search_filler,
     needs_web_search,
@@ -571,18 +572,26 @@ class MentionReplyWorker:
             and not request.welcome
             and needs_web_search(request.prompt)
         )
+        wait_line = lookup_wait_line(request.prompt) if wants_search else ""
         prefetch_task: asyncio.Task[str] | None = None
         if wants_search:
             prefetch_fn = getattr(self.mcp_gateway, "prefetch_spoken_evidence", None)
             if callable(prefetch_fn):
-                if job is not None:
-                    job.update(
-                        phase="researching",
-                        status_text="正在查最新资讯",
-                        terminal=False,
-                    )
-                    await self.room.publish_agent_job(job, reply_to=reply_quote)
                 prefetch_task = asyncio.create_task(prefetch_fn(request.prompt))
+        if wait_line:
+            if job is not None:
+                job.update(
+                    phase="researching",
+                    status_text=wait_line,
+                    terminal=False,
+                )
+                await self.room.publish_agent_job(job, reply_to=reply_quote)
+            await self.room.publish_bot_reply(
+                message_id=f"{speech_base_id}:wait",
+                text=wait_line,
+                reply_to=reply_quote,
+            )
+            request.delivery_started = True
         try:
             # News and welcomes use the same live TTS socket as chat: first
             # sentence starts after the short reservoir, not after a
@@ -595,6 +604,11 @@ class MentionReplyWorker:
                     if event.get("type") == "session.created":
                         break
 
+                progress_spoken = False
+                speak_wait = (
+                    asyncio.create_task(self._speak_exact(ws, wait_line))
+                    if wait_line else None
+                )
                 prefetched = ""
                 if prefetch_task is not None:
                     try:
@@ -602,6 +616,12 @@ class MentionReplyWorker:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("lookup prefetch failed: %s", exc)
                         prefetched = ""
+                if speak_wait is not None:
+                    try:
+                        await speak_wait
+                        progress_spoken = True
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("lookup wait speech failed: %s", exc)
                 web_tool = (
                     self.mcp_gateway.dialogue_web_tool()
                     if wants_search and not prefetched and self.mcp_gateway.enabled
@@ -710,7 +730,6 @@ class MentionReplyWorker:
                 discovery_rounds = 0
                 answer_retries = 0
                 requested_capabilities: set[str] = set()
-                progress_spoken = False
                 usage_totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
                 session: dict[str, Any] = {
                     "type": "realtime",
@@ -847,13 +866,27 @@ class MentionReplyWorker:
                                 progress_text = "我正在同时查几个来源，核对清楚就告诉你呀。"
 
                             async def play_progress() -> None:
+                                nonlocal progress_spoken
+                                line = wait_line or progress_text
                                 if job is not None:
                                     job.update(
-                                        phase="researching", status_text=progress_text,
+                                        phase="researching", status_text=line,
                                         feedback_count=int(job.get("feedback_count") or 0) + 1,
                                         terminal=False,
                                     )
                                     await self.room.publish_agent_job(job, reply_to=reply_quote)
+                                if progress_spoken:
+                                    return
+                                try:
+                                    await self._speak_exact(ws, line)
+                                    progress_spoken = True
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.warning("tool progress speech failed: %s", exc)
+                                finally:
+                                    await ws.send(json.dumps(
+                                        {"type": "session.update", "session": session},
+                                        ensure_ascii=False,
+                                    ))
 
                             async def execute_call(call: dict[str, str]) -> tuple[dict[str, str], str]:
                                 try:

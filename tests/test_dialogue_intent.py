@@ -7,6 +7,7 @@ sys.path.insert(0, str(FRONTEND_DIR))
 
 from dialogue_intent import (  # noqa: E402
     is_news_request,
+    lookup_wait_line,
     looks_like_english_answer,
     looks_like_search_filler,
     needs_web_search,
@@ -36,6 +37,11 @@ class DialogueIntentTests(unittest.TestCase):
     def test_search_filler_is_not_an_answer(self):
         self.assertTrue(looks_like_search_filler("我正在联网查找相关资料，再核对一下来源呀。"))
         self.assertFalse(looks_like_search_filler("今天有条挺好玩的，一只海豹上了路。"))
+
+    def test_lookup_wait_line_is_a_short_spoken_beat(self):
+        self.assertEqual(lookup_wait_line("看看最新新闻"), "我翻一下今天的，马上说。")
+        self.assertEqual(lookup_wait_line("帮我查一下现在比特币多少钱"), "我去对一下最新的数。")
+        self.assertEqual(lookup_wait_line("查证一下"), "我去看一眼，马上回你。")
 
     def test_packed_memory_does_not_steal_the_current_line(self):
         packed = (
