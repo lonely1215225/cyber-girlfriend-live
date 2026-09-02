@@ -21,6 +21,7 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import quote, urlparse
 
 import httpx
+from httpcore._backends.anyio import AnyIOBackend
 
 
 logger = logging.getLogger("s2s.smart_search")
@@ -28,8 +29,17 @@ MAX_QUERY_CHARS = 500
 MAX_SNIPPET_CHARS = 900
 _SPACE_RE = re.compile(r"\s+")
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
+_SHARED_100 = ipaddress.ip_network("100.0.0.0/8")
 _SEARCH_HOSTS = frozenset({"api.tavily.com", "api.exa.ai", "r.jina.ai"})
 _orig_getaddrinfo = socket.getaddrinfo
+
+
+def _usable_public_ipv4(text: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(text)
+    except (TypeError, ValueError):
+        return False
+    return ip.version == 4 and ip.is_global and ip not in _CGNAT and ip not in _SHARED_100
 
 
 def _public_ipv4_infos(host: str, port: int, socktype: int, proto: int, flags: int):
@@ -37,36 +47,96 @@ def _public_ipv4_infos(host: str, port: int, socktype: int, proto: int, flags: i
     filtered = []
     seen: set[str] = set()
     for item in infos:
-        try:
-            ip = ipaddress.ip_address(item[4][0])
-        except (TypeError, ValueError):
-            continue
-        if not ip.is_global or ip in _CGNAT:
-            continue
-        text = str(ip)
-        if text in seen:
+        text = str(item[4][0])
+        if not _usable_public_ipv4(text) or text in seen:
             continue
         seen.add(text)
         filtered.append(item)
-    # Shared 100.0.0.0/8 answers on this host have included blackholes.
-    # Try ordinary public IPv4 first so a 12s budget is not spent on them.
-    shared = ipaddress.ip_network("100.0.0.0/8")
-    filtered.sort(key=lambda item: ipaddress.ip_address(item[4][0]) in shared)
     return filtered
 
 
+def first_public_ipv4(host: str) -> str:
+    hostname = str(host or "").split("%", 1)[0].lower().rstrip(".")
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        infos = _public_ipv4_infos(host, 443, socket.SOCK_STREAM, 0, 0)
+        return str(infos[0][4][0]) if infos else ""
+    return hostname if _usable_public_ipv4(hostname) else ""
+
+
 def _search_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    hostname = str(host or "").split("%", 1)[0].lower()
+    hostname = str(host or "").split("%", 1)[0].lower().rstrip(".")
     socktype = type or socket.SOCK_STREAM
     if hostname in _SEARCH_HOSTS:
         filtered = _public_ipv4_infos(host, port, socktype, proto, flags)
         if filtered:
             return filtered
+        raise socket.gaierror(socket.EAI_NONAME, f"no public IPv4 for {hostname}")
     return _orig_getaddrinfo(host, port, family, type, proto, flags)
 
 
+class PublicIPv4Backend(AnyIOBackend):
+    """Connect search APIs to a reachable public IPv4. SNI stays on the hostname."""
+
+    async def connect_tcp(
+        self,
+        host,
+        port,
+        timeout=None,
+        local_address=None,
+        socket_options=None,
+    ):
+        hostname = str(host or "").split("%", 1)[0].lower().rstrip(".")
+        if hostname in _SEARCH_HOSTS:
+            targets = [
+                str(item[4][0])
+                for item in _public_ipv4_infos(host, port, socket.SOCK_STREAM, 0, 0)
+            ]
+            if not targets:
+                raise OSError(f"no public IPv4 for {host}")
+        elif _usable_public_ipv4(hostname):
+            targets = [hostname]
+        else:
+            return await super().connect_tcp(
+                host, port, timeout, local_address, socket_options
+            )
+
+        last_exc: BaseException | None = None
+        per_try = timeout
+        if timeout is not None and len(targets) > 1:
+            per_try = max(2.0, float(timeout) / len(targets))
+        for target in targets:
+            try:
+                return await super().connect_tcp(
+                    target, port, per_try, local_address, socket_options
+                )
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("search IPv4 %s:%s failed: %s", target, port, exc)
+        assert last_exc is not None
+        raise last_exc
+
+
+def _search_http_client(timeout_seconds: float) -> httpx.AsyncClient:
+    transport = httpx.AsyncHTTPTransport(
+        verify=True,
+        trust_env=False,
+        retries=1,
+        limits=httpx.Limits(max_keepalive_connections=0, max_connections=8),
+    )
+    transport._pool._network_backend = PublicIPv4Backend()
+    return httpx.AsyncClient(
+        transport=transport,
+        timeout=httpx.Timeout(timeout_seconds, connect=min(8.0, timeout_seconds)),
+        follow_redirects=True,
+        trust_env=False,
+        headers={"user-agent": "cyber-girlfriend-live/1.0", "accept": "application/json"},
+    )
+
+
 def install_public_ipv4_resolver() -> None:
-    """Prefer reachable IPv4 for paid search APIs. CGNAT/IPv6 hangs ate the 5s budget."""
+    """Prefer reachable IPv4 for paid search APIs. CGNAT/IPv6 used to eat the budget."""
     socket.getaddrinfo = _search_getaddrinfo
 
 
@@ -99,14 +169,18 @@ class SmartSearchGateway:
             min(self.timeout_seconds, float(os.environ.get("SMART_SEARCH_EVIDENCE_BUDGET_SECONDS", "8"))),
         )
         self.cooldown_seconds = max(10.0, float(os.environ.get("SMART_SEARCH_COOLDOWN_SECONDS", "20")))
-        self._http = httpx.AsyncClient(
-            timeout=httpx.Timeout(self.timeout_seconds, connect=min(8.0, self.timeout_seconds)),
-            follow_redirects=True,
-            headers={"user-agent": "cyber-girlfriend-live/1.0", "accept": "application/json"},
-        )
+        self._http = _search_http_client(self.timeout_seconds)
         self._cache: dict[str, tuple[float, str]] = {}
         self._health: dict[str, tuple[int, float]] = {}
         self._lock = asyncio.Lock()
+
+    async def _reset_http(self) -> None:
+        old = self._http
+        self._http = _search_http_client(self.timeout_seconds)
+        try:
+            await old.aclose()
+        except Exception:
+            pass
 
     @property
     def search_enabled(self) -> bool:
@@ -310,10 +384,12 @@ class SmartSearchGateway:
                     # free quotas for every ordinary viewer question.
                     break
                 raise RuntimeError("no relevant results")
-            except (httpx.HTTPError, ValueError, RuntimeError, KeyError) as exc:
+            except (httpx.HTTPError, ValueError, RuntimeError, KeyError, OSError) as exc:
                 self._failed(name)
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
                 logger.warning("smart search provider=%s failed: %s: %s", name, type(exc).__name__, exc)
+                if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError, httpx.NetworkError, OSError)):
+                    await self._reset_http()
 
         hits = self._dedupe(hits, limit)
         if not hits:

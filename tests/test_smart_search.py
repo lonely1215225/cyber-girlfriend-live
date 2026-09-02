@@ -15,6 +15,7 @@ from smart_search import (  # noqa: E402
     SearchHit,
     SmartSearchGateway,
     _public_ipv4_infos,
+    first_public_ipv4,
     format_hits_for_speech,
     install_public_ipv4_resolver,
 )
@@ -117,12 +118,25 @@ class SmartSearchTests(unittest.IsolatedAsyncioTestCase):
         install_public_ipv4_resolver()
         fake = [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("100.64.12.8", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("100.62.170.192", 443)),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("3.211.224.5", 443)),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443)),
         ]
         with mock.patch("smart_search._orig_getaddrinfo", return_value=fake):
             infos = _public_ipv4_infos("api.tavily.com", 443, socket.SOCK_STREAM, 6, 0)
+            chosen = first_public_ipv4("api.tavily.com")
         self.assertEqual([item[4][0] for item in infos], ["3.211.224.5"])
+        self.assertEqual(chosen, "3.211.224.5")
+
+    async def test_search_host_without_public_ipv4_does_not_use_ipv6(self):
+        install_public_ipv4_resolver()
+        fake = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("100.62.170.192", 443)),
+        ]
+        with mock.patch("smart_search._orig_getaddrinfo", return_value=fake):
+            with self.assertRaises(socket.gaierror):
+                socket.getaddrinfo("api.tavily.com", 443)
+            self.assertEqual(first_public_ipv4("api.tavily.com"), "")
 
     async def test_search_hits_are_formatted_for_speech(self):
         raw = json.dumps({

@@ -134,14 +134,34 @@ class LocalRssToolTests(unittest.IsolatedAsyncioTestCase):
 
         gateway = McpGateway()
         gateway.rss_news.enabled = True
+        gateway.smart_search.tavily_key = "tvly-test"
         gateway.rss_news.spoken_brief = mock.AsyncMock(
             return_value="刚才查到的最新资讯：\n1. 备用头条"
         )
         gateway.smart_search.search = mock.AsyncMock(side_effect=RuntimeError("tavily: ConnectTimeout"))
         try:
+            with self.assertRaises(RuntimeError):
+                await gateway.prefetch_spoken_evidence("看看最新新闻")
+            gateway.rss_news.spoken_brief.assert_not_awaited()
+        finally:
+            await gateway.close()
+
+        gateway = McpGateway()
+        gateway.rss_news.enabled = True
+        gateway.smart_search.tavily_key = ""
+        gateway.smart_search.exa_key = ""
+        gateway.smart_search.searxng_url = ""
+        gateway.rss_news.spoken_brief = mock.AsyncMock(
+            return_value="刚才查到的最新资讯：\n1. 备用头条"
+        )
+        gateway.smart_search.search = mock.AsyncMock(
+            side_effect=AssertionError("paid search must stay unused without keys")
+        )
+        try:
             news = await gateway.prefetch_spoken_evidence("看看最新新闻")
             self.assertIn("备用头条", news)
             gateway.rss_news.spoken_brief.assert_awaited_once()
+            gateway.smart_search.search.assert_not_awaited()
         finally:
             await gateway.close()
 

@@ -496,7 +496,7 @@ class McpGateway:
             except Exception as exc:
                 logger.warning("smart search prefetch failed: %s", exc)
                 errors.append(str(exc))
-        if news and self.rss_news.enabled:
+        if news and self.rss_news.enabled and not self.smart_search.search_enabled:
             try:
                 return await self.rss_news.spoken_brief(query, limit=4)
             except Exception as exc:
