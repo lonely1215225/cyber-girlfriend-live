@@ -485,18 +485,24 @@ class McpGateway:
         if not query:
             raise ValueError("search query is empty")
         news = is_news_request(query) or bool(re.search(r"新闻|热搜|资讯|头条", query))
+        errors: list[str] = []
+        if self.smart_search.search_enabled:
+            try:
+                topic = "news" if news else "general"
+                raw = await self.smart_search.search(
+                    query, topic=topic, limit=5, ignore_circuit=True
+                )
+                return self._spoken_search_output(raw)
+            except Exception as exc:
+                logger.warning("smart search prefetch failed: %s", exc)
+                errors.append(str(exc))
         if news and self.rss_news.enabled:
             try:
                 return await self.rss_news.spoken_brief(query, limit=4)
             except Exception as exc:
                 logger.warning("RSS spoken brief failed: %s", exc)
-        if self.smart_search.search_enabled:
-            topic = "news" if news else "general"
-            raw = await self.smart_search.search(query, topic=topic, limit=5)
-            return self._spoken_search_output(raw)
-        if news and self.rss_news.enabled:
-            return await self.rss_news.spoken_brief(query, limit=4)
-        raise RuntimeError("没有可用的查询来源")
+                errors.append(str(exc))
+        raise RuntimeError("; ".join(errors) or "没有可用的查询来源")
 
     async def call(self, public_name: str, arguments: dict[str, Any]) -> str:
         if public_name == "smart_web_search":

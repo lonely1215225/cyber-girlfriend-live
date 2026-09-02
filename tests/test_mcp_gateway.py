@@ -113,18 +113,34 @@ class LocalRssToolTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.close()
 
-    async def test_prefetch_uses_rss_brief_for_news_and_formats_search(self):
+    async def test_prefetch_uses_configured_search_before_rss(self):
+        gateway = McpGateway()
+        gateway.rss_news.enabled = True
+        gateway.smart_search.tavily_key = "tvly-test"
+        gateway.rss_news.spoken_brief = mock.AsyncMock(
+            side_effect=AssertionError("configured Tavily/Exa must be tried first")
+        )
+        gateway.smart_search.search = mock.AsyncMock(return_value=json.dumps({
+            "results": [{"title": "某国发布了新政策", "source": "Tavily", "snippet": "今天落地"}],
+        }, ensure_ascii=False))
+        try:
+            news = await gateway.prefetch_spoken_evidence("看看最新有什么新闻说来听听")
+            self.assertIn("某国发布了新政策", news)
+            self.assertEqual(gateway.smart_search.search.await_args.kwargs["topic"], "news")
+            self.assertTrue(gateway.smart_search.search.await_args.kwargs["ignore_circuit"])
+            gateway.rss_news.spoken_brief.assert_not_awaited()
+        finally:
+            await gateway.close()
+
         gateway = McpGateway()
         gateway.rss_news.enabled = True
         gateway.rss_news.spoken_brief = mock.AsyncMock(
-            return_value="刚才查到的最新资讯：\n1. 某国发布了新政策"
+            return_value="刚才查到的最新资讯：\n1. 备用头条"
         )
-        gateway.smart_search.search = mock.AsyncMock(
-            side_effect=AssertionError("news prefetch must prefer RSS")
-        )
+        gateway.smart_search.search = mock.AsyncMock(side_effect=RuntimeError("tavily: ConnectTimeout"))
         try:
             news = await gateway.prefetch_spoken_evidence("看看最新新闻")
-            self.assertIn("某国发布了新政策", news)
+            self.assertIn("备用头条", news)
             gateway.rss_news.spoken_brief.assert_awaited_once()
         finally:
             await gateway.close()
