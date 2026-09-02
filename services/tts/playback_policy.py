@@ -44,6 +44,18 @@ def is_batch_tts() -> bool:
         return _batch_tts
 
 
+def response_is_progress_only(response: object | None) -> bool:
+    """True for the isolated wait-beat / tool-progress readout."""
+    if response is None:
+        return False
+    metadata = getattr(response, "metadata", None)
+    if isinstance(metadata, dict):
+        purpose = metadata.get("client_purpose")
+    else:
+        purpose = getattr(metadata, "client_purpose", "") if metadata is not None else ""
+    return str(purpose or "") == "tool_progress"
+
+
 def should_complete_flush_before_play(playback_mode: str = "interactive") -> bool:
     """News waits for the whole clip. Dialogue and welcomes start after preroll."""
 

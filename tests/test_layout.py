@@ -13,6 +13,7 @@ class LayoutTests(unittest.TestCase):
             "apps/web/server.py",
             "apps/web/room_manager.py",
             "apps/speech/s2s_with_avatar_tee.py",
+            "apps/speech/avatar_tee.py",
             "services/avatar/avtr1_gateway.py",
             "services/tts/emotion_aware_tts.py",
             "services/tts/indextts_client.py",

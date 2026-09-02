@@ -18,6 +18,7 @@ from playback_policy import (  # noqa: E402
     apply_websocket_playback_policy,
     begin_live_tts_turn,
     is_batch_tts,
+    response_is_progress_only,
     set_batch_tts,
     should_complete_flush_before_play,
 )
@@ -100,6 +101,12 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(split_streaming_sentences(report), streamed)
         self.assertFalse(should_complete_flush_before_play("interactive"))
         self.assertTrue(should_complete_flush_before_play("proactive"))
+        self.assertTrue(response_is_progress_only(
+            type("Resp", (), {"metadata": {"client_purpose": "tool_progress"}})()
+        ))
+        self.assertFalse(response_is_progress_only(
+            type("Resp", (), {"metadata": {"client_purpose": "answer"}})()
+        ))
         begin_live_tts_turn()
         self.assertEqual(
             live_tts_options(False),
