@@ -652,6 +652,7 @@ class MentionReplyWorker:
                         "声音表演要先保证清晰、完整，再根据新闻本身决定轻快、认真、"
                         "惊讶或克制的情绪；严肃事件不撒娇、不发笑。"
                         "必须说完整句子，用句号、问号或感叹号收尾，禁止半句截断。"
+                        "每句不超过二十八个字，先说一句再补一句。"
                     )
                     user_text = request.prompt
                 elif request.welcome:
@@ -670,7 +671,7 @@ class MentionReplyWorker:
                     elif web_tool:
                         instructions += (
                             "这是公开评论：观众要查网上的最新事实。先联网，再用两三句中文口语说结论。"
-                            "不要“既然……那就……”这类书面腔，不要假装正在连线。"
+                            "每句不超过二十八个字。不要“既然……那就……”这类书面腔，不要假装正在连线。"
                             "不要只说正在查找或核对来源。"
                             f"{SPOKEN_CHINESE_POLICY}"
                         )
@@ -933,6 +934,7 @@ class MentionReplyWorker:
                             session["tool_choice"] = "auto"
                             session["instructions"] += (
                                 "资料已返回。用两三句中文口语讲最有意思的一点就够。"
+                                "每句不超过二十八个字，先说完一句再补下一句。"
                                 f"{SPOKEN_CHINESE_POLICY}"
                             )
                             await ws.send(json.dumps(
