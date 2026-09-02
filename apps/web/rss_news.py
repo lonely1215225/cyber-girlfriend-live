@@ -460,10 +460,11 @@ class RssNewsAggregator:
             indexed: dict[int, list[NewsItem] | Exception] = {}
             for task in done:
                 try:
-                    index, items = task.result()
-                    indexed[index] = items
+                    result_index, items = task.result()
                 except Exception as exc:  # noqa: BLE001
-                    indexed[index] = exc
+                    logger.warning("RSS fetch task failed: %s: %s", type(exc).__name__, exc)
+                    continue
+                indexed[result_index] = items
             results = [indexed.get(index, RuntimeError("cancelled")) for index in range(len(sources))]
 
         items: list[NewsItem] = []
