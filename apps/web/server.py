@@ -1839,7 +1839,7 @@ async def session_end(request: Request):
 
 
 def _dialogue_tool_policy() -> str:
-    if DIALOGUE_TOOLS_ENABLED:
+    if DIALOGUE_TOOLS_ENABLED and mcp_gateway.dialogue_web_tool():
         return (
             "普通闲聊只回一两句，短、直、像随口说，不要讲新闻或瓜，不要分点。"
             "只有用户明确要求查询，或问题确实依赖最新外部事实时，才调用 smart_web_search。"
@@ -1931,10 +1931,8 @@ async def room_realtime(websocket: WebSocket):
     # serial delay to joining the voice pipeline.
     memory_task = asyncio.create_task(live_room.memory_context(token))
     # Do not preload the current headline into every voice turn. Casual chat
-    # is memory-only; news is attached only when a later utterance asks.
-    active_news_task = asyncio.create_task(
-        live_room.active_news_context("")
-    )
+    # is memory-only; @mentions attach news only when that utterance asks.
+    active_news = ""
     # Resolve on every TTS sentence so a deferred profile switch takes effect
     # on the next turn without reconnecting the caller.
     voice_token = "active_profile"
@@ -1946,7 +1944,7 @@ async def room_realtime(websocket: WebSocket):
             ping_interval=20,
             ping_timeout=20,
         ) as upstream:
-            personal_memory, active_news = await asyncio.gather(memory_task, active_news_task)
+            personal_memory = await memory_task
             await websocket.accept()
             assistant_text: dict[str, str] = {}
             assistant_pending_text: dict[str, str] = {}

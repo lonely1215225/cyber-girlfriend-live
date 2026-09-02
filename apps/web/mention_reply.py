@@ -612,7 +612,7 @@ class MentionReplyWorker:
                     )
                     user_text = f"刚进入直播间的观众名字是“{request.speaker}”，现在欢迎对方。"
                 else:
-                    if wants_search:
+                    if web_tool:
                         instructions += (
                             "这是公开评论：观众要查网上的最新事实。先联网，再用两三句中文口语说结论。"
                             "不要“既然……那就……”这类书面腔，不要假装正在连线。"
