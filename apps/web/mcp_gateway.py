@@ -12,8 +12,9 @@ from typing import Any
 
 import httpx
 
+from dialogue_intent import is_news_request
 from rss_news import RssNewsAggregator
-from smart_search import SmartSearchGateway
+from smart_search import SmartSearchGateway, format_hits_for_speech
 
 
 logger = logging.getLogger("s2s.mcp")
@@ -471,6 +472,32 @@ class McpGateway:
             logger.info("Loaded %d tools from %d MCP servers", len(tools), len(self.clients))
             return [dict(tool) for tool in tools]
 
+    @staticmethod
+    def _spoken_search_output(raw: str) -> str:
+        try:
+            return format_hits_for_speech(raw)
+        except (json.JSONDecodeError, RuntimeError, TypeError, ValueError, KeyError):
+            return raw
+
+    async def prefetch_spoken_evidence(self, query: str) -> str:
+        """Fetch Chinese headlines or search hits before the host starts talking."""
+        query = str(query or "").strip()
+        if not query:
+            raise ValueError("search query is empty")
+        news = is_news_request(query) or bool(re.search(r"新闻|热搜|资讯|头条", query))
+        if news and self.rss_news.enabled:
+            try:
+                return await self.rss_news.spoken_brief(query, limit=4)
+            except Exception as exc:
+                logger.warning("RSS spoken brief failed: %s", exc)
+        if self.smart_search.search_enabled:
+            topic = "news" if news else "general"
+            raw = await self.smart_search.search(query, topic=topic, limit=5)
+            return self._spoken_search_output(raw)
+        if news and self.rss_news.enabled:
+            return await self.rss_news.spoken_brief(query, limit=4)
+        raise RuntimeError("没有可用的查询来源")
+
     async def call(self, public_name: str, arguments: dict[str, Any]) -> str:
         if public_name == "smart_web_search":
             query = str(arguments.get("query") or "")
@@ -479,10 +506,19 @@ class McpGateway:
                 topic = "news"
             limit = int(arguments.get("limit") or 5)
             try:
-                return await self.smart_search.search(query, topic=topic, limit=limit)
+                raw = await self.smart_search.search(query, topic=topic, limit=limit)
+                return self._spoken_search_output(raw)
             except Exception as exc:
                 if self.rss_news.enabled:
                     logger.warning("smart_web_search falling back to RSS: %s", exc)
+                    spoken = getattr(self.rss_news, "spoken_brief", None)
+                    if callable(spoken) and (
+                        is_news_request(query) or re.search(r"新闻|热搜|资讯", query)
+                    ):
+                        try:
+                            return await spoken(query, limit=limit)
+                        except Exception:
+                            pass
                     return await self.rss_news.query_topics(query=query, limit=limit)
                 raise
         if public_name == "smart_web_fetch":

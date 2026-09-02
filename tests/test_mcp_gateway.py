@@ -104,11 +104,42 @@ class LocalRssToolTests(unittest.IsolatedAsyncioTestCase):
         gateway = McpGateway()
         gateway.smart_search.search = mock.AsyncMock(side_effect=RuntimeError("tavily: ConnectTimeout"))
         gateway.rss_news.enabled = True
+        gateway.rss_news.spoken_brief = mock.AsyncMock(return_value="刚才查到的最新资讯：一条好玩的新闻")
         gateway.rss_news.query_topics = mock.AsyncMock(return_value="RSS 最新资讯：一条好玩的新闻")
         try:
             output = await gateway.call("smart_web_search", {"query": "今天有啥好玩的新闻"})
             self.assertIn("好玩的新闻", output)
             self.assertEqual(gateway.smart_search.search.await_args.kwargs["topic"], "news")
+        finally:
+            await gateway.close()
+
+    async def test_prefetch_uses_rss_brief_for_news_and_formats_search(self):
+        gateway = McpGateway()
+        gateway.rss_news.enabled = True
+        gateway.rss_news.spoken_brief = mock.AsyncMock(
+            return_value="刚才查到的最新资讯：\n1. 某国发布了新政策"
+        )
+        gateway.smart_search.search = mock.AsyncMock(
+            side_effect=AssertionError("news prefetch must prefer RSS")
+        )
+        try:
+            news = await gateway.prefetch_spoken_evidence("看看最新新闻")
+            self.assertIn("某国发布了新政策", news)
+            gateway.rss_news.spoken_brief.assert_awaited_once()
+        finally:
+            await gateway.close()
+
+        gateway = McpGateway()
+        gateway.rss_news.enabled = False
+        gateway.smart_search.tavily_key = "tvly-test"
+        gateway.smart_search.search = mock.AsyncMock(return_value=json.dumps({
+            "results": [{"title": "比特币现价", "source": "Tavily", "snippet": "上涨"}],
+        }, ensure_ascii=False))
+        try:
+            spoken = await gateway.prefetch_spoken_evidence("帮我查一下现在比特币多少钱")
+            self.assertIn("刚才查到的资料", spoken)
+            self.assertIn("比特币现价", spoken)
+            self.assertEqual(gateway.smart_search.search.await_args.kwargs["topic"], "general")
         finally:
             await gateway.close()
 
