@@ -52,11 +52,26 @@ class IndexTTSEmotionTests(unittest.TestCase):
             0.15,
         )
 
+    def test_marked_tease_keeps_playful_color(self) -> None:
+        raw = emo_vector_for("playful")
+        tease = plan_indextts_controls(
+            vocal_emotion="playful",
+            vocal_intensity=0.40,
+            nonverbal="none",
+            spoken_text="你还挺会说嘛。",
+        )
+        self.assertEqual(tease["emo_vector"], raw)
+        self.assertTrue(tease["use_emo_text"])
+        self.assertIn("坏笑", tease["emo_text"])
+        self.assertGreaterEqual(tease["emo_alpha"], 0.24)
+
     def test_alpha_stays_soft(self) -> None:
-        self.assertAlmostEqual(emo_alpha_from_intensity(0.0), 0.08)
+        self.assertAlmostEqual(emo_alpha_from_intensity(0.0), 0.10)
         self.assertLessEqual(emo_alpha_from_intensity(0.18), 0.16)
         self.assertLessEqual(emo_alpha_from_intensity(0.5), 0.32)
-        self.assertLessEqual(emo_alpha_from_intensity(1.0), 0.45)
+        self.assertLessEqual(emo_alpha_from_intensity(1.0), 0.40)
+        self.assertGreaterEqual(emo_alpha_from_intensity(0.40, "playful"), 0.24)
+        self.assertLessEqual(emo_alpha_from_intensity(1.0, "happy"), 0.50)
 
     def test_text_gate_is_closed_for_quiet_news(self) -> None:
         plan = plan_indextts_controls(

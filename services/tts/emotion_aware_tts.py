@@ -346,7 +346,7 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
         LOG.info(
             "TTS delivery source=%s style=%s expression=%s intensity=%.2f "
             "voice=%s voice_intensity=%.2f nonverbal=%s "
-            "user_emotion=%s event=%s batch=%s text=%r",
+            "emo_alpha=%.3f emo_text=%s user_emotion=%s event=%s batch=%s text=%r",
             cue.source,
             self._active_style,
             cue.profile,
@@ -354,6 +354,8 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
             cue.vocal_emotion,
             cue.vocal_intensity,
             cue.nonverbal,
+            float(self._active_delivery.get("emo_alpha") or 0.0),
+            self._active_delivery.get("emo_text") or "",
             metadata.emotion if metadata else None,
             metadata.event if metadata else None,
             batch,
