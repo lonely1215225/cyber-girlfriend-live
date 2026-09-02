@@ -688,13 +688,26 @@ class RoomStore:
         item = dict(row)
         # A current topic remains available briefly for deictic follow-ups. For
         # explicit entity/title matches it can still be used after the soft TTL.
+        from dialogue_intent import wants_news_context
+
         clean_query = re.sub(r"[\s，。！？,.!?@]", "", query or "").lower()
         deictic = bool(re.search(r"这个|这条|刚才|刚刚|那个|它|此事|这件事|是真的吗|为什么|后来|进展", clean_query))
         title = str(item.get("title") or "").lower()
-        terms = [token for token in re.findall(r"[a-z0-9]{3,}|[\u3400-\u9fff]{2,}", clean_query) if token not in {"什么", "怎么", "新闻", "现在", "最新"}]
+        stop = {
+            "什么", "怎么", "怎样", "新闻", "现在", "最新", "简单", "别的", "别说",
+            "讲个", "笑话", "一下", "一个", "好的", "可以", "就是", "我们", "你们",
+            "自己", "今天", "这个", "那个", "告诉", "说说", "聊聊", "谢谢", "在吗",
+            "你好", "老板", "小麻",
+        }
+        terms = [
+            token for token in re.findall(r"[a-z0-9]{3,}|[\u3400-\u9fff]{3,}", clean_query)
+            if token not in stop
+        ]
         matched = any(term in title or term in str(item.get("evidence") or "").lower() for term in terms)
         fresh = float(item.get("locked_until") or 0) >= time.time()
         if include_unconditionally and not fresh:
+            return ""
+        if not include_unconditionally and not wants_news_context(query) and not matched:
             return ""
         if not include_unconditionally and not matched and not (fresh and deictic):
             return ""

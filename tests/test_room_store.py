@@ -249,6 +249,7 @@ class RoomStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("比特币突破八万美元", context)
         self.assertIn("可信的第一条资料", context)
         self.assertEqual(await self.store.active_news_context("你喜欢什么动物"), "")
+        self.assertEqual(await self.store.active_news_context("别说别的了，你就简单讲个笑话"), "")
 
         await self.store.set_active_news_topic({
             "fingerprint": "event-two", "title": "新款芯片正式发布",
