@@ -35,6 +35,7 @@ class MentionReplyTests(unittest.TestCase):
 
     def test_detects_transition_promise_instead_of_final_answer(self):
         self.assertTrue(looks_like_deferred_answer("好哒，我去查查最新新闻"))
+        self.assertTrue(looks_like_deferred_answer("我正在联网查找相关资料，再核对一下来源呀。"))
         self.assertFalse(looks_like_deferred_answer("比特币今天上涨，主要与资金流入有关"))
 
     def test_failure_reply_separates_busy_from_blank_answers(self):
@@ -387,13 +388,78 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         ):
             await worker._respond(request)
         self.assertEqual([name for name, _ in gateway.calls], ["smart_web_search"])
-        worker._speak_exact.assert_awaited_once()
+        worker._speak_exact.assert_not_awaited()
+        self.assertFalse(any(item.get("text") == "我先帮你查清楚呀。" for item in room.items))
         self.assertTrue(any(item.get("text") == "这是核对后的最终答案。" for item in room.items))
         session_updates = [item["session"] for item in socket.sent if item.get("type") == "session.update"]
         self.assertEqual(session_updates[0].get("tool_choice"), "auto")
         self.assertEqual([tool["name"] for tool in session_updates[0].get("tools") or []], ["smart_web_search"])
         self.assertTrue(any(item.get("tool_choice") == "auto" for item in session_updates))
         self.assertTrue(any("中文口语" in item.get("instructions", "") for item in session_updates))
+
+    async def test_news_mention_uses_prefetched_headlines_without_tools(self):
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+            async def publish_agent_job(self, job, **_kwargs): self.items.append(dict(job)); return job
+            async def participant_memory_context(self, *_args, **_kwargs): return ""
+            async def active_news_context(self, *_args): return ""
+
+        class PrefetchGateway:
+            enabled = True
+            DISCOVERY_TOOL_NAME = "request_external_capabilities"
+            def __init__(self):
+                self.queries = []
+            async def prefetch_spoken_evidence(self, query):
+                self.queries.append(query)
+                return "刚才查到的最新资讯：\n1. 某国发布了新政策\n   摘要：今天正式落地。"
+            def dialogue_web_tool(self):
+                raise AssertionError("prefetched news must not expose search tools")
+            async def call(self, *_args, **_kwargs):
+                raise AssertionError("prefetched news must not call tools")
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    json.dumps({
+                        "type": "response.audio_transcript.done",
+                        "transcript": "刚看到一条，某国今天落地了新政策。",
+                    }, ensure_ascii=False),
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+                self.sent = []
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def recv(self): return next(self.events)
+            async def send(self, message): self.sent.append(json.loads(message))
+
+        room, gateway, socket = RecordingRoom(), PrefetchGateway(), FakeWebSocket()
+        worker = MentionReplyWorker(room, gateway, "ws://unused")
+        worker._speak_exact = mock.AsyncMock()
+        request = parse_mention({
+            "id": "news", "participant_id": "p1", "speaker": "张三丰",
+            "text": "@小麻 看看最新新闻",
+        })
+        with mock.patch("mention_reply.DIALOGUE_TOOLS_ENABLED", True), mock.patch(
+            "mention_reply.websockets.connect", return_value=socket
+        ):
+            await worker._respond(request)
+        self.assertEqual(gateway.queries, ["看看最新新闻"])
+        worker._speak_exact.assert_not_awaited()
+        user_item = next(
+            item["item"]["content"][0]["text"]
+            for item in socket.sent
+            if item.get("type") == "conversation.item.create"
+            and item.get("item", {}).get("role") == "user"
+        )
+        self.assertIn("【已查到的资料】", user_item)
+        self.assertIn("某国发布了新政策", user_item)
+        session = next(item["session"] for item in socket.sent if item.get("type") == "session.update")
+        self.assertEqual(session.get("tools") or [], [])
+        self.assertIn("已经查到", session["instructions"])
+        self.assertFalse(any("正在联网查找" in str(item.get("text") or "") for item in room.items))
+        self.assertTrue(any("某国今天落地了新政策" in str(item.get("text") or "") for item in room.items))
 
     async def test_empty_answer_after_search_speaks_a_retry_line(self):
         class RecordingRoom(FakeRoom):

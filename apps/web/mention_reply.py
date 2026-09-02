@@ -21,9 +21,11 @@ import websockets
 
 from avatar_profiles import DEFAULT_PERSONA_PROMPT, ROLE_IDENTITY_POLICY, ROLE_OUTPUT_POLICY
 from dialogue_intent import (
+    LOOKED_UP_EVIDENCE_POLICY,
     SIMPLE_CHAT_POLICY,
     SPOKEN_CHINESE_POLICY,
     looks_like_english_answer,
+    looks_like_search_filler,
     needs_web_search,
     wants_news_context,
 )
@@ -76,7 +78,8 @@ class MentionRequest:
 
 
 def looks_like_deferred_answer(text: str) -> bool:
-    return bool(DEFERRED_ANSWER_RE.search(text.strip()))
+    value = str(text or "").strip()
+    return bool(DEFERRED_ANSWER_RE.search(value)) or looks_like_search_filler(value)
 
 
 def parse_mention(message: dict[str, Any]) -> MentionRequest | None:
@@ -509,6 +512,13 @@ class MentionReplyWorker:
                 return
             if looks_like_english_answer(transcript) and not request.proactive and not request.welcome:
                 return
+            if (
+                not request.proactive
+                and not request.welcome
+                and looks_like_deferred_answer(transcript)
+                and len(transcript.strip()) <= 80
+            ):
+                return
             candidate = normalized_for_duplicate(transcript)
             previous = normalized_for_duplicate(previous_reply)
             # Detect while the first sentence is still inside the playback
@@ -561,17 +571,18 @@ class MentionReplyWorker:
             and not request.welcome
             and needs_web_search(request.prompt)
         )
-        web_tool = (
-            self.mcp_gateway.dialogue_web_tool()
-            if wants_search and self.mcp_gateway.enabled
-            else None
-        )
-        public_tools = [_public_tool_schema(web_tool)] if web_tool else []
-        web_tool_name = str(web_tool.get("name") or "") if web_tool else ""
-        active_external_tools: dict[str, dict[str, Any]] = {}
-        tool_progress = {
-            web_tool_name: str(web_tool.get("progress_text") or "正在查询并核对资料")
-        } if web_tool else {}
+        prefetch_task: asyncio.Task[str] | None = None
+        if wants_search:
+            prefetch_fn = getattr(self.mcp_gateway, "prefetch_spoken_evidence", None)
+            if callable(prefetch_fn):
+                if job is not None:
+                    job.update(
+                        phase="researching",
+                        status_text="正在查最新资讯",
+                        terminal=False,
+                    )
+                    await self.room.publish_agent_job(job, reply_to=reply_quote)
+                prefetch_task = asyncio.create_task(prefetch_fn(request.prompt))
         try:
             # News and welcomes use the same live TTS socket as chat: first
             # sentence starts after the short reservoir, not after a
@@ -583,6 +594,25 @@ class MentionReplyWorker:
                     event = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
                     if event.get("type") == "session.created":
                         break
+
+                prefetched = ""
+                if prefetch_task is not None:
+                    try:
+                        prefetched = str(await prefetch_task or "").strip()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("lookup prefetch failed: %s", exc)
+                        prefetched = ""
+                web_tool = (
+                    self.mcp_gateway.dialogue_web_tool()
+                    if wants_search and not prefetched and self.mcp_gateway.enabled
+                    else None
+                )
+                public_tools = [_public_tool_schema(web_tool)] if web_tool else []
+                web_tool_name = str(web_tool.get("name") or "") if web_tool else ""
+                active_external_tools: dict[str, dict[str, Any]] = {}
+                tool_progress = {
+                    web_tool_name: str(web_tool.get("progress_text") or "正在查询并核对资料")
+                } if web_tool else {}
 
                 persona_prompt = DEFAULT_PERSONA_PROMPT
                 if self.persona_provider is not None:
@@ -612,10 +642,16 @@ class MentionReplyWorker:
                     )
                     user_text = f"刚进入直播间的观众名字是“{request.speaker}”，现在欢迎对方。"
                 else:
-                    if web_tool:
+                    if prefetched:
+                        instructions += (
+                            "这是公开评论：不要假装正在连线。"
+                            f"{LOOKED_UP_EVIDENCE_POLICY}{SPOKEN_CHINESE_POLICY}"
+                        )
+                    elif web_tool:
                         instructions += (
                             "这是公开评论：观众要查网上的最新事实。先联网，再用两三句中文口语说结论。"
                             "不要“既然……那就……”这类书面腔，不要假装正在连线。"
+                            "不要只说正在查找或核对来源。"
                             f"{SPOKEN_CHINESE_POLICY}"
                         )
                     else:
@@ -650,6 +686,8 @@ class MentionReplyWorker:
                             "用户可能在延续刚才的播报；依据附带话题回答，涉及新进展仍须查询。"
                         )
                         context_sections.append(active_topic)
+                    if prefetched:
+                        context_sections.append(f"【已查到的资料】\n{prefetched}")
                     if request.avoid_reply:
                         instructions += (
                             "上一次生成因重复旧答案已被系统拦截。重新理解当前评论，换一个直接、相关的回答；"
@@ -816,23 +854,6 @@ class MentionReplyWorker:
                                         terminal=False,
                                     )
                                     await self.room.publish_agent_job(job, reply_to=reply_quote)
-                                await self.room.publish_bot_reply(
-                                    message_id=f"{speech_base_id}:progress:{tool_rounds}",
-                                    text=progress_text, reply_to=reply_quote, partial=True,
-                                )
-                                request.delivery_started = True
-                                try:
-                                    await self._speak_exact(ws, progress_text)
-                                except Exception as exc:  # noqa: BLE001
-                                    logger.warning("tool progress speech failed: %s", exc)
-                                finally:
-                                    # Exact progress TTS temporarily installs a
-                                    # read-only session prompt. Restore the
-                                    # agent session before returning tool data.
-                                    await ws.send(json.dumps(
-                                        {"type": "session.update", "session": session},
-                                        ensure_ascii=False,
-                                    ))
 
                             async def execute_call(call: dict[str, str]) -> tuple[dict[str, str], str]:
                                 try:
@@ -952,6 +973,30 @@ class MentionReplyWorker:
                             continue
                         if tool_rounds > 0 and looks_like_deferred_answer(transcript):
                             raise RuntimeError("模型连续生成了查询承诺，而不是最终答案")
+                        if (
+                            prefetched
+                            and looks_like_deferred_answer(transcript)
+                            and answer_retries < 2
+                        ):
+                            answer_retries += 1
+                            speech_round += 1
+                            transcript = ""
+                            completed_transcript = ""
+                            segment_delta = ""
+                            round_finalized = False
+                            last_partial_at = 0.0
+                            session["instructions"] += (
+                                "资料已经在上面。不要说正在查、正在联网或稍等。"
+                                "立刻根据【已查到的资料】用中文口语说一两件具体的事。"
+                            )
+                            await ws.send(json.dumps(
+                                {"type": "session.update", "session": session},
+                                ensure_ascii=False,
+                            ))
+                            await ws.send(json.dumps({"type": "response.create", "response": {}}))
+                            continue
+                        if prefetched and looks_like_deferred_answer(transcript):
+                            raise RuntimeError("模型连续生成了查询承诺，而不是最终答案")
                         if looks_like_english_answer(transcript) and answer_retries < 2:
                             answer_retries += 1
                             speech_round += 1
@@ -1002,6 +1047,8 @@ class MentionReplyWorker:
                             await self.room.publish_agent_job(job, reply_to=reply_quote)
                         return
         finally:
+            if prefetch_task is not None and not prefetch_task.done():
+                prefetch_task.cancel()
             if transcript.strip() and not round_finalized:
                 with contextlib.suppress(Exception):
                     await publish_spoken(partial=False, interrupted=True)
