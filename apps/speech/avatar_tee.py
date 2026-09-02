@@ -101,11 +101,11 @@ class LocalAvatarTee:
             self._start_pump()
 
     async def _finish_segment_after_gap(
-        self, generation: int, marker: float | None
+        self, generation: int, marker: float | None, delay: float | None = None
     ) -> None:
         """Close a spoken segment while a slow cloud continuation is pending."""
         try:
-            await asyncio.sleep(SEGMENT_GAP_SECONDS)
+            await asyncio.sleep(SEGMENT_GAP_SECONDS if delay is None else delay)
             if (
                 generation == self.generation
                 and marker is not None
@@ -146,6 +146,20 @@ class LocalAvatarTee:
                 )
         except Exception as exc:  # noqa: BLE001
             LOG.warning("AVTR-1 expression cue failed: %s", exc)
+
+    def keep_turn_open(self, *, delay: float | None = None) -> None:
+        """Hold the AVTR turn while the next response is still cloning."""
+        self._cancel_scheduled_finish()
+        if self.started_at is None and self.last_feed_at is None:
+            return
+        if self.segment_gap_task is not None:
+            self.segment_gap_task.cancel()
+        marker = time.monotonic()
+        self.last_feed_at = marker
+        hold = SEGMENT_GAP_SECONDS if delay is None else max(1.0, float(delay))
+        self.segment_gap_task = asyncio.create_task(
+            self._finish_segment_after_gap(self.generation, marker, hold)
+        )
 
     def _cancel_scheduled_finish(self) -> None:
         task = self._finish_task

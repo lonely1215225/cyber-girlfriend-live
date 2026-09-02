@@ -34,3 +34,13 @@ class AvatarTeeFinishTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.06)
         self.assertFalse(self.tee.done)
         self.assertIsNone(self.tee._finish_task)
+
+    async def test_keep_turn_open_cancels_finish_and_holds_the_gap(self):
+        self.tee.started_at = 1.0
+        self.tee.last_feed_at = 1.0
+        self.tee.schedule_finish(complete=False, delay=0.02)
+        self.tee.keep_turn_open(delay=0.2)
+        await asyncio.sleep(0.05)
+        self.assertFalse(self.tee.done)
+        self.assertIsNone(self.tee._finish_task)
+        self.assertIsNotNone(self.tee.segment_gap_task)

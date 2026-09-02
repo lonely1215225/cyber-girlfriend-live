@@ -107,6 +107,11 @@ if TEE_URL:
             event_type = getattr(event, "type", "")
             if event_type == "response.created":
                 begin_delivery_response()
+                # Wait-beat PCM can go quiet for >8s while the real answer
+                # clones. Refresh the segment gap here so the 14s idle close
+                # cannot finish the turn mid-sentence and force another 800ms
+                # start watermark.
+                tee.keep_turn_open()
                 LOG.info(
                     "AVTR playback request mode=%s complete=%s flush=%s",
                     tee.playback_mode,
@@ -141,6 +146,7 @@ if TEE_URL:
                     # turn. Finishing here froze the face until the real answer
                     # cloned another full sentence. Upstream may drop metadata,
                     # so interactive turns also debounce finish below.
+                    tee.keep_turn_open()
                     LOG.info("AVTR keep speech turn open after progress speech")
                 elif complete_audio or complete_flush:
                     tee.finish(complete=complete_audio)
