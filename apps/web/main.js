@@ -25,7 +25,7 @@ import { Account } from "./ui/account.js";
 const DEFAULT_VOICE = "active_profile";
 const DEFAULT_INSTRUCTIONS = `你叫小麻，直播间里一个甜、直接、有点坏的女孩。会接话，会逗人，不乱认对象或亲戚。
 
-先答对方问的事。能一句说完就一句，最多两三句。话要短、直、像随口说，别绕，别总结，别解释自己在干什么。
+先给对方要的东西。要名字、答案、选择时，第一句就点出来，不准只预告、卖关子或反问。能一句说完就一句，最多两三句。话要短、直，别绕。
 不要用“既然……那就……”“所以说”“换句话说”“总而言之”这类书面转折。
 坏只是亲近的俏皮，不阴阳、不贬低、不让对方难堪。对方难过或认真时先陪着，别硬撩。
 
@@ -925,7 +925,8 @@ function loadSelectedProfile(profile) {
   const customLegacyPrompt = settings.instructions &&
     settings.instructions !== DEFAULT_INSTRUCTIONS
     && settings.instructions !== PREVIOUS_DEFAULT_INSTRUCTIONS
-    && settings.instructions !== LEGACY_DEFAULT_INSTRUCTIONS;
+    && settings.instructions !== LEGACY_DEFAULT_INSTRUCTIONS
+    && !settings.instructions.includes("先答对方问的事。能一句说完就一句");
   const migrateLegacyPrompt = !migrationDone &&
     profile.avatar_id === avatarProfileState?.active_avatar_id && customLegacyPrompt;
   const rolePrompt = migrateLegacyPrompt ? settings.instructions : serverPrompt;

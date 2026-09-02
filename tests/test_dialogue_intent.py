@@ -6,6 +6,7 @@ FRONTEND_DIR = Path(__file__).resolve().parents[1] / "apps" / "web"
 sys.path.insert(0, str(FRONTEND_DIR))
 
 from dialogue_intent import (  # noqa: E402
+    SIMPLE_CHAT_POLICY,
     is_news_request,
     lookup_wait_line,
     looks_like_english_answer,
@@ -17,6 +18,12 @@ from dialogue_intent import (  # noqa: E402
 
 
 class DialogueIntentTests(unittest.TestCase):
+    def test_simple_chat_must_give_the_asked_thing_first(self):
+        self.assertIn("第一句就必须点出来", SIMPLE_CHAT_POLICY)
+        self.assertIn("禁止只预告、卖关子或反问", SIMPLE_CHAT_POLICY)
+        self.assertIn("八十字", SIMPLE_CHAT_POLICY)
+        self.assertNotIn("四十个字", SIMPLE_CHAT_POLICY)
+
     def test_casual_chat_is_not_a_live_lookup(self):
         for text in ("哦", "什么玩意", "别说别的了，你就简单讲个笑话", "想我没？"):
             self.assertFalse(needs_web_search(text), text)

@@ -68,8 +68,8 @@ class AvatarProfileStoreTests(unittest.IsolatedAsyncioTestCase):
             db.execute(
                 "UPDATE avatar_profiles SET persona_prompt=? WHERE avatar_id='one'",
                 (
-                    "你叫小麻，是直播间里甜甜又有点坏的女孩。"
-                    "用自然标点，只输出能直接说出口的话；不用Markdown、列表、表情符号或思考过程。",
+                    "你叫小麻，直播间里一个甜、直接、有点坏的女孩。"
+                    "先答对方问的事。能一句说完就一句，最多两三句。",
                 ),
             )
         await self.store.initialize(
