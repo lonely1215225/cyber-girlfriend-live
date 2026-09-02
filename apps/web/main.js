@@ -80,7 +80,7 @@ let dialogueToolsEnabled = false;
 const COMPANION_TOOL_POLICY =
   "当前是纯陪伴聊天模式。直接回应对方，不调用搜索、新闻、价格、网页、RSS、MCP、视觉或其他外部工具，也不要说正在查询、核对来源或稍后告诉对方。遇到依赖实时外部资料的问题，坦率说明现在只陪对方聊天，不猜测、不编造。";
 const NETWORK_TOOL_POLICY =
-  "普通闲聊、情绪表达、吐槽、承接上下文和角色互动直接回答，不调用工具。只有用户明确要求查询，或问题确实依赖最新外部事实时，才静默调用一次 request_external_capabilities 并选择最少的能力。外部查询取得证据后必须在本轮给出结论。";
+  "普通闲聊只回一两句，短、直、像随口说，不要讲新闻或瓜，不要分点。只有用户明确要求查询，或问题确实依赖最新外部事实时，才调用 smart_web_search。不要申请其他能力，也不要调用其他工具。外部查询取得证据后必须用中文口语给出结论，禁止英文段落和Markdown。";
 
 function toolPolicy() {
   return dialogueToolsEnabled ? NETWORK_TOOL_POLICY : COMPANION_TOOL_POLICY;
@@ -438,18 +438,10 @@ function searchAvailable() {
   return serverSearchKey || !!userSearchKey;
 }
 
-/** Tool definitions for the currently-enabled (and usable) tools. */
+/** Live voice only sees web search. Extra MCP / camera schemas stay off-session. */
 function activeToolDefs() {
   if (!dialogueToolsEnabled) return [];
-  const defs = [];
-  const hasSmartSearch = mcpToolDefs.some((tool) => tool.name === "smart_web_search");
-  if ((voiceCapabilities.has("web") || voiceCapabilities.has("news")) &&
-      !hasSmartSearch && toolsEnabled.web_search && searchAvailable()) {
-    defs.push(TOOL_DEFS.web_search);
-  }
-  if (voiceCapabilities.has("vision") && toolsEnabled.camera_snapshot) defs.push(TOOL_DEFS.camera_snapshot);
-  defs.push(...mcpToolDefs);
-  return defs;
+  return mcpToolDefs.filter((tool) => tool.name === "smart_web_search");
 }
 
 /** Push the active tool set to a live session so toggles apply mid-call. */
@@ -1349,8 +1341,8 @@ function syncToolsUi() {
   toolWebRow.classList.toggle("disabled", !avail);
   toolCamSwitch.checked = toolsEnabled.camera_snapshot;
   mcpToolStatus.textContent = mcpToolDefs.length
-    ? `${mcpSources.join("、")} 已连接，共 ${mcpToolDefs.length} 个实时工具`
-    : "MCP 服务暂时不可用";
+    ? "聊天只开放联网查询"
+    : "联网查询暂时不可用";
 
   if (serverSearchKey) {
     // Key lives server-side: show it as configured, never expose it.
@@ -1552,30 +1544,13 @@ async function runTool(name, argsJson, callId) {
   let result = { output: "" };
   try {
     if (name === "request_external_capabilities") {
-      voiceRoutePending = true;
-      const requested = Array.isArray(args.capabilities)
-        ? args.capabilities.map((item) => String(item).trim().toLowerCase()).filter(Boolean)
-        : [];
-      const external = [...new Set(requested.filter((item) => item !== "conversation"))];
-      if (!external.length) {
-        voiceCapabilities = new Set();
-        mcpToolDefs = [];
-        mcpSources = [];
-        pushToolsToSession();
-        result.output = JSON.stringify({
-          route: "conversation_fast",
-          enabled: [],
-          instruction: "直接自然回答用户，不要提查询或工具。",
-        });
-      } else {
-        await fetchMcpTools(external);
-        result.output = JSON.stringify({
-          route: "external_research",
-          enabled: external,
-          tools: activeToolDefs().map((tool) => tool.name),
-          instruction: "先说一句简短自然的查询进度，同时立即调用最合适的工具；工具返回后给出最终答案。",
-        });
-      }
+      const enabled = activeToolDefs().map((tool) => tool.name);
+      result.output = JSON.stringify({
+        enabled,
+        instruction: enabled.length
+          ? "普通闲聊直接回答。只有要查网时才调用 smart_web_search。不要再申请其他能力。"
+          : "直接自然回答用户，不要提查询或工具。",
+      });
     } else if (mcpToolDefs.some((tool) => tool.name === name)) {
       result.output = await execMcpTool(name, args);
     } else if (name === "web_search") {
@@ -1644,18 +1619,14 @@ async function execWebSearch(query) {
   return lines.length > 1 ? lines.join("\n") : `${lines[0]}\nNo results found.`;
 }
 
-async function fetchMcpTools(capabilities = []) {
+async function fetchMcpTools() {
   try {
-    voiceCapabilities = new Set(capabilities);
-    const query = capabilities.length
-      ? `?capabilities=${encodeURIComponent(capabilities.join(","))}`
-      : "";
-    const response = await fetch(`/api/mcp/tools${query}`, { cache: "no-store" });
+    const response = await fetch("/api/mcp/tools", { cache: "no-store" });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || "MCP tools unavailable");
     const tools = Array.isArray(data.tools) ? data.tools : [];
     mcpToolDefs = tools
-      .filter((tool) => tool?.type === "function" && typeof tool.name === "string")
+      .filter((tool) => tool?.type === "function" && tool.name === "smart_web_search")
       .map((tool) => ({
         type: "function",
         name: tool.name,
@@ -1668,18 +1639,19 @@ async function fetchMcpTools(capabilities = []) {
     mcpSources = Array.isArray(data.sources)
       ? data.sources.map((source) => String(source)).filter(Boolean)
       : [];
+    voiceCapabilities = mcpToolDefs.length ? new Set(["web"]) : new Set();
   } catch (error) {
-    console.warn("[mcp] tool discovery failed", error);
+    console.warn("[mcp] web search tool unavailable", error);
     mcpToolDefs = [];
     mcpSources = [];
+    voiceCapabilities = new Set();
   }
   syncToolsUi();
   pushToolsToSession();
 }
 
-/** Restore the one-tool router after a completed connected-voice turn. */
+/** Keep the single web-search tool after a completed connected-voice turn. */
 async function resetVoiceToolDiscovery() {
-  voiceCapabilities = new Set();
   voiceProgressSpoken = false;
   voiceRoutePending = false;
   await fetchMcpTools();
@@ -2337,7 +2309,7 @@ async function doStart(audioContext = null) {
     // Execute the tool, then push it to the conversation once the result is in,
     // so the toggle shows both the call input and its output together.
     let progressGate = progressGates.get(responseId);
-    if (name !== "request_external_capabilities" && voiceCapabilities.size && !voiceProgressSpoken && !progressGate) {
+    if (name === "smart_web_search" && !voiceProgressSpoken && !progressGate) {
       let resolve = () => {};
       const promise = new Promise((done) => { resolve = done; });
       const tool = mcpToolDefs.find((item) => item.name === name);

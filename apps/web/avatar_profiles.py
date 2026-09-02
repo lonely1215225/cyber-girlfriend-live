@@ -66,6 +66,7 @@ ROLE_IDENTITY_POLICY = (
 ROLE_OUTPUT_POLICY = (
     "只输出可直接展示和朗读的纯文本；禁止Markdown和任何HTML/XML标签，"
     "包括<br>、<p>、<div>，也不得输出思考或工具协议。"
+    "观众用中文时必须只用中文口语，禁止英文段落。"
 )
 
 

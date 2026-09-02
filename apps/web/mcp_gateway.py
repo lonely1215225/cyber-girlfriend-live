@@ -162,6 +162,7 @@ class McpHttpClient:
 
 class McpGateway:
     DISCOVERY_TOOL_NAME = "request_external_capabilities"
+    DIALOGUE_WEB_TOOL_NAME = "smart_web_search"
 
     def __init__(self) -> None:
         enabled = os.environ.get("MCP_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -240,6 +241,39 @@ class McpGateway:
                 "required": ["capabilities"],
             },
             "source": "tool-discovery",
+        }
+
+    def dialogue_web_tool(self) -> dict[str, Any] | None:
+        """The only tool chat and live voice may see: live web search.
+
+        Do not call ``list_tools()`` here. That path talks to every configured
+        MCP server (prices, news, fetch, custom docs) and is what made casual
+        ``@小麻`` replies stall or look like a busy channel.
+        """
+        if not self.smart_search.search_enabled:
+            return None
+        return {
+            "type": "function",
+            "name": self.DIALOGUE_WEB_TOOL_NAME,
+            "description": (
+                "查询当前互联网并返回经过清洗的结构化结果。"
+                "仅在用户明确要求查网，或问题必须依赖最新网上事实时调用。"
+                "普通闲聊、情绪、吐槽、承接上下文不要调用。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "具体、完整的查询问题。"},
+                    "topic": {
+                        "type": "string", "enum": ["general", "news"],
+                        "default": "general",
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
+                },
+                "required": ["query"],
+            },
+            "source": "smart-search",
+            "progress_text": "我正在联网查找相关资料，再核对一下来源呀。",
         }
 
     async def tools_for_capabilities(self, capabilities: list[str]) -> list[dict[str, Any]]:
@@ -439,11 +473,18 @@ class McpGateway:
 
     async def call(self, public_name: str, arguments: dict[str, Any]) -> str:
         if public_name == "smart_web_search":
-            return await self.smart_search.search(
-                str(arguments.get("query") or ""),
-                topic=str(arguments.get("topic") or "general"),
-                limit=int(arguments.get("limit") or 5),
-            )
+            query = str(arguments.get("query") or "")
+            topic = str(arguments.get("topic") or "general")
+            if topic != "news" and re.search(r"新闻|热搜|资讯", query):
+                topic = "news"
+            limit = int(arguments.get("limit") or 5)
+            try:
+                return await self.smart_search.search(query, topic=topic, limit=limit)
+            except Exception as exc:
+                if self.rss_news.enabled:
+                    logger.warning("smart_web_search falling back to RSS: %s", exc)
+                    return await self.rss_news.query_topics(query=query, limit=limit)
+                raise
         if public_name == "smart_web_fetch":
             return await self.smart_search.fetch(
                 str(arguments.get("url") or ""),

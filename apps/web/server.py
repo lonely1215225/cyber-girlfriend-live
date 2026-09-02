@@ -1282,27 +1282,17 @@ async def search(req: SearchRequest):
 
 
 @app.get("/api/mcp/tools")
-async def mcp_tools(capabilities: str = ""):
-    """Progressively disclose only the tools needed by the current voice turn.
+async def mcp_tools(capabilities: str = ""):  # noqa: ARG001 — kept for old clients
+    """Chat and live voice only receive live web search.
 
-    With no capability query the browser receives one tiny routing tool.  A
-    completed routing call asks this endpoint for the selected capability set;
-    this keeps ordinary live conversation fast and prevents unrelated tools
-    from being called merely because their schemas were present.
+    Capability query strings from older clients are ignored so a leftover
+    discovery hop cannot pull in prices, RSS, fetch, or vision tools.
     """
     if not DIALOGUE_TOOLS_ENABLED or not mcp_gateway.enabled:
         return {"enabled": False, "tools": [], "sources": []}
-    try:
-        requested = [item.strip().lower() for item in capabilities.split(",") if item.strip()]
-        tools = (
-            await mcp_gateway.tools_for_capabilities(requested)
-            if requested
-            else [mcp_gateway.discovery_tool()]
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("MCP tools unavailable: %s", exc)
-        raise HTTPException(status_code=502, detail="MCP 服务暂时不可用")
-    sources = sorted({str(tool.get("source")) for tool in tools if tool.get("source")})
+    tool = mcp_gateway.dialogue_web_tool()
+    tools = [tool] if tool else []
+    sources = sorted({str(item.get("source")) for item in tools if item.get("source")})
     return {"enabled": True, "tools": tools, "sources": sources}
 
 
@@ -1318,6 +1308,9 @@ async def mcp_call(body: McpCallRequest, request: Request):
             return _room_error(exc)
         if state.get("me", {}).get("status") != "calling":
             raise HTTPException(status_code=403, detail="只有当前连线者可以调用 MCP 工具")
+    allowed = mcp_gateway.dialogue_web_tool()
+    if allowed is None or body.name != allowed["name"]:
+        raise HTTPException(status_code=403, detail="聊天只开放联网查询")
     try:
         output = await mcp_gateway.call(body.name, body.arguments)
     except KeyError:
@@ -1848,9 +1841,10 @@ async def session_end(request: Request):
 def _dialogue_tool_policy() -> str:
     if DIALOGUE_TOOLS_ENABLED:
         return (
-            "普通闲聊、情绪表达、吐槽、承接上下文和角色互动直接回答，不调用工具。"
-            "只有用户明确要求查询，或问题确实依赖最新外部事实时，才静默调用一次"
-            " request_external_capabilities 并选择最少的能力。外部查询取得证据后必须在本轮给出结论。"
+            "普通闲聊只回一两句，短、直、像随口说，不要讲新闻或瓜，不要分点。"
+            "只有用户明确要求查询，或问题确实依赖最新外部事实时，才调用 smart_web_search。"
+            "不要申请其他能力，也不要调用其他工具。外部查询取得证据后必须用中文口语给出结论，"
+            "禁止英文段落和Markdown。"
         )
     return (
         "当前是纯陪伴聊天模式。直接回应对方，不调用搜索、新闻、价格、网页、RSS、MCP、视觉或"
@@ -1936,8 +1930,10 @@ async def room_realtime(websocket: WebSocket):
     # WebSocket handshake so even a cold thread-pool/database open adds no
     # serial delay to joining the voice pipeline.
     memory_task = asyncio.create_task(live_room.memory_context(token))
+    # Do not preload the current headline into every voice turn. Casual chat
+    # is memory-only; news is attached only when a later utterance asks.
     active_news_task = asyncio.create_task(
-        live_room.active_news_context(include_unconditionally=True)
+        live_room.active_news_context("")
     )
     # Resolve on every TTS sentence so a deferred profile switch takes effect
     # on the next turn without reconnecting the caller.

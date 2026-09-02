@@ -20,6 +20,29 @@ class McpGatewayTests(unittest.TestCase):
         self.assertNotIn("conversation", capabilities["items"]["enum"])
         self.assertIn("Never call it for greetings", McpGateway.discovery_tool()["description"])
 
+    def test_dialogue_web_tool_is_search_only_without_listing_mcp(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"MCP_ENABLED": "0", "TAVILY_API_KEY": "tvly-test", "EXA_API_KEY": "", "SEARXNG_URL": ""},
+        ):
+            gateway = McpGateway()
+        gateway.list_tools = mock.AsyncMock(side_effect=AssertionError("must not list MCP"))
+        try:
+            tool = gateway.dialogue_web_tool()
+            self.assertIsNotNone(tool)
+            self.assertEqual(tool["name"], "smart_web_search")
+            self.assertEqual(tool["source"], "smart-search")
+        finally:
+            pass
+
+    def test_dialogue_web_tool_missing_without_search_keys(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"MCP_ENABLED": "0", "TAVILY_API_KEY": "", "EXA_API_KEY": "", "SEARXNG_URL": ""},
+        ):
+            gateway = McpGateway()
+        self.assertIsNone(gateway.dialogue_web_tool())
+
     def test_parses_streamable_http_sse_response(self):
         payload = {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "search"}]}}
         response = httpx.Response(
@@ -74,6 +97,18 @@ class LocalRssToolTests(unittest.IsolatedAsyncioTestCase):
             names = {tool["name"] for tool in tools}
             self.assertIn("smart_web_search", names)
             self.assertIn("smart_web_fetch", names)
+        finally:
+            await gateway.close()
+
+    async def test_web_search_falls_back_to_rss_when_providers_timeout(self):
+        gateway = McpGateway()
+        gateway.smart_search.search = mock.AsyncMock(side_effect=RuntimeError("tavily: ConnectTimeout"))
+        gateway.rss_news.enabled = True
+        gateway.rss_news.query_topics = mock.AsyncMock(return_value="RSS 最新资讯：一条好玩的新闻")
+        try:
+            output = await gateway.call("smart_web_search", {"query": "今天有啥好玩的新闻"})
+            self.assertIn("好玩的新闻", output)
+            self.assertEqual(gateway.smart_search.search.await_args.kwargs["topic"], "news")
         finally:
             await gateway.close()
 
