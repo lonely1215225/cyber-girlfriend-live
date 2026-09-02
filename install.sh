@@ -114,6 +114,112 @@ if [[ ! -x "$FISH_REPO/.venv/bin/python" ]]; then
   (cd "$FISH_REPO" && uv sync --python 3.12 --extra cu129)
 fi
 
+say "[4b/7] 下载 IndexTTS-2.5"
+INDEX_REPO="$ROOT/third_party/index-tts"
+INDEX_DIR="$ROOT/models/indextts2.5"
+INDEX_TTS_COMMIT="ee40fa7d6c6b8a2c7f06105f9f1e65775b74868c"
+if [[ ! -d "$INDEX_REPO/.git" ]]; then
+  git clone https://github.com/index-tts/index-tts.git "$INDEX_REPO"
+  git -C "$INDEX_REPO" checkout "$INDEX_TTS_COMMIT"
+fi
+if [[ ! -s "$INDEX_DIR/gpt.pth" || ! -s "$INDEX_DIR/s2mel.pth" || ! -s "$INDEX_DIR/codec.pth" || ! -f "$INDEX_DIR/config.yaml" ]]; then
+  mkdir -p "$INDEX_DIR/qwen0.6bemo4-merge"
+  if command -v aria2c >/dev/null; then
+    say "IndexTTS-2.5 via ModelScope CDN + aria2"
+    API='https://www.modelscope.cn/api/v1/models/IndexTeam/IndexTTS-2.5/repo?Revision=master&FilePath='
+    fetch_index() {
+      local rel="$1" expect="$2"
+      local dest="$INDEX_DIR/$rel"
+      mkdir -p "$(dirname "$dest")"
+      if [[ -f "$dest" && ! -f "$dest.aria2" && "$(stat -c%s "$dest")" -eq "$expect" ]]; then
+        return 0
+      fi
+      local enc
+      enc="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$rel")"
+      aria2c -x 16 -s 16 -k 1M -c --file-allocation=none --max-tries=0 --retry-wait=2 \
+        --console-log-level=notice -d "$(dirname "$dest")" -o "$(basename "$dest")" \
+        "${API}${enc}"
+      [[ "$(stat -c%s "$dest")" -eq "$expect" ]] || die "IndexTTS size mismatch: $rel"
+    }
+    fetch_index config.yaml 2860
+    fetch_index wav2vec2bert_stats.pt 9343
+    fetch_index feat1.pt 57170
+    fetch_index feat2.pt 374866
+    fetch_index multilingual_zh_ja_yue_char_del.tiktoken 907395
+    fetch_index qwen0.6bemo4-merge/Modelfile 360
+    fetch_index qwen0.6bemo4-merge/added_tokens.json 707
+    fetch_index qwen0.6bemo4-merge/chat_template.jinja 550
+    fetch_index qwen0.6bemo4-merge/config.json 727
+    fetch_index qwen0.6bemo4-merge/generation_config.json 117
+    fetch_index qwen0.6bemo4-merge/merges.txt 1671853
+    fetch_index qwen0.6bemo4-merge/special_tokens_map.json 616
+    fetch_index qwen0.6bemo4-merge/tokenizer_config.json 5433
+    fetch_index qwen0.6bemo4-merge/vocab.json 2776833
+    fetch_index qwen0.6bemo4-merge/tokenizer.json 11422654
+    fetch_index s2mel.pth 414908601
+    fetch_index codec.pth 607290935
+    fetch_index qwen0.6bemo4-merge/model.safetensors 1192135096
+    fetch_index gpt.pth 3259599833
+  else
+    export INDEX_DIR ROOT
+    "$S2S_VENV/bin/python" - <<'PY'
+import os
+from pathlib import Path
+
+dest = Path(os.environ["INDEX_DIR"])
+dest.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MODELSCOPE_CACHE", str(Path(os.environ["ROOT"]) / ".cache" / "modelscope"))
+try:
+    from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot
+    print("downloading IndexTeam/IndexTTS-2.5 via ModelScope", flush=True)
+    ms_snapshot(model_id="IndexTeam/IndexTTS-2.5", local_dir=str(dest))
+except Exception as exc:
+    print(f"ModelScope download failed ({exc}); trying Hugging Face", flush=True)
+    from huggingface_hub import snapshot_download
+    snapshot_download("IndexTeam/IndexTTS-2.5", local_dir=str(dest))
+PY
+  fi
+fi
+
+INDEX_CACHE="$INDEX_DIR/hf_cache"
+mkdir -p "$INDEX_CACHE/bigvgan" "$INDEX_CACHE/w2v-bert-2.0"
+fetch_url() {
+  local dest="$1" expect="$2" url="$3"
+  mkdir -p "$(dirname "$dest")"
+  if [[ -f "$dest" && ! -f "$dest.aria2" && "$(stat -c%s "$dest")" -eq "$expect" ]]; then
+    return 0
+  fi
+  if command -v aria2c >/dev/null; then
+    aria2c -x 16 -s 16 -k 1M -c --file-allocation=none --max-tries=0 --retry-wait=2 \
+      --console-log-level=notice -d "$(dirname "$dest")" -o "$(basename "$dest")" "$url"
+  else
+    curl -fL --retry 8 --retry-all-errors -o "$dest" "$url"
+  fi
+  [[ "$(stat -c%s "$dest")" -eq "$expect" ]] || die "IndexTTS aux size mismatch: $dest"
+}
+ms_url() {
+  local repo="$1" rel="$2"
+  local enc
+  enc="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$rel")"
+  printf 'https://www.modelscope.cn/api/v1/models/%s/repo?Revision=master&FilePath=%s' "$repo" "$enc"
+}
+# Keep w2v-bert to the 3 files Index actually loads. An empty dir would make
+# ensure_models_available() snapshot the unused 2.3GB conformer_shaw.pt.
+fetch_url "$INDEX_CACHE/campplus_cn_common.bin" 28036335 \
+  "$(ms_url iic/speech_campplus_sv_zh-cn_16k-common campplus_cn_common.bin)"
+fetch_url "$INDEX_CACHE/semantic_codec_model.safetensors" 177183712 \
+  "$(ms_url amphion/MaskGCT semantic_codec/model.safetensors)"
+fetch_url "$INDEX_CACHE/w2v-bert-2.0/config.json" 1874 \
+  "$(ms_url AI-ModelScope/w2v-bert-2.0 config.json)"
+fetch_url "$INDEX_CACHE/w2v-bert-2.0/preprocessor_config.json" 275 \
+  "$(ms_url AI-ModelScope/w2v-bert-2.0 preprocessor_config.json)"
+fetch_url "$INDEX_CACHE/w2v-bert-2.0/model.safetensors" 2322063736 \
+  "$(ms_url AI-ModelScope/w2v-bert-2.0 model.safetensors)"
+fetch_url "$INDEX_CACHE/bigvgan/config.json" 1401 \
+  "https://hf-mirror.net/nvidia/bigvgan_v2_22khz_80band_256x/resolve/main/config.json"
+fetch_url "$INDEX_CACHE/bigvgan/bigvgan_generator.pt" 449228171 \
+  "https://hf-mirror.net/nvidia/bigvgan_v2_22khz_80band_256x/resolve/main/bigvgan_generator.pt"
+
 say "[5/7] AVTR-1 环境 + 权重"
 AVTR1="$ROOT/third_party/avtr-1"
 export AVTR1_LOCAL_STORAGE="$AVTR1/artifacts"
