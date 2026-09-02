@@ -31,7 +31,7 @@ EXPRESSION_SOURCE_PREFIX = os.environ.get(
 BG_ID = os.environ.get("AVTR1_BG_ID", "plain_white")
 H264_BITRATE = int(os.environ.get("AVTR1_H264_BITRATE", "1800000"))
 SPEECH_START_BUFFER_MS = max(
-    420, int(os.environ.get("AVTR1_SPEECH_START_BUFFER_MS", "600"))
+    280, int(os.environ.get("AVTR1_SPEECH_START_BUFFER_MS", "400"))
 )
 SPEECH_REBUFFER_STEP_MS = max(
     100, int(os.environ.get("AVTR1_AUDIO_REBUFFER_STEP_MS", "200"))
@@ -42,7 +42,7 @@ SPEECH_MAX_BUFFER_MS = max(
 )
 AV_OUTPUT_RESERVOIR_MS = max(
     SPEECH_START_BUFFER_MS,
-    int(os.environ.get("AVTR1_OUTPUT_RESERVOIR_MS", "800")),
+    int(os.environ.get("AVTR1_OUTPUT_RESERVOIR_MS", "480")),
 )
 PROACTIVE_OUTPUT_RESERVOIR_MS = max(
     AV_OUTPUT_RESERVOIR_MS,

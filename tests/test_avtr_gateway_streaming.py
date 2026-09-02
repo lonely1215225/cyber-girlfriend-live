@@ -22,7 +22,7 @@ class SpeechReservoirTests(unittest.TestCase):
         gateway.speech_stable_turns = 0
 
     def test_waits_for_initial_watermark_without_consuming_audio(self):
-        buf = bytearray(b"\x01\x00" * (gateway.SAMPLE_RATE // 2))
+        buf = bytearray(b"\x01\x00" * (gateway.SAMPLE_RATE // 4))
         gateway.speech_turn_active = True
         before = bytes(buf)
 
