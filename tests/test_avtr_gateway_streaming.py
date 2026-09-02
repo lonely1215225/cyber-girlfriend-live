@@ -45,8 +45,22 @@ class SpeechReservoirTests(unittest.TestCase):
         self.assertEqual(len(played), gateway.CURRENT_SAMPLES * 2)
         self.assertEqual(before - len(buf), gateway.CURRENT_SAMPLES * 2)
 
-    def test_sentence_gap_holds_without_raising_the_watermark(self):
-        buf = bytearray(b"\x01\x00" * (gateway.WINDOW_SAMPLES - 1))
+    def test_partial_clause_still_renders_speech_instead_of_idling(self):
+        leftover = gateway.CURRENT_SAMPLES + 200
+        buf = bytearray(b"\x01\x00" * leftover)
+        gateway.speech_turn_active = True
+        gateway.speech_playing = True
+
+        _cur, _future, played, has_speech = gateway._window_from_speech(buf)
+
+        self.assertTrue(has_speech)
+        self.assertEqual(len(played), gateway.CURRENT_SAMPLES * 2)
+        self.assertEqual(len(buf), 200 * 2)
+        self.assertFalse(gateway.speech_rebuffering)
+        self.assertTrue(gateway.speech_playing)
+
+    def test_true_sentence_gap_holds_without_raising_the_watermark(self):
+        buf = bytearray(b"\x01\x00" * 200)
         gateway.speech_turn_active = True
         gateway.speech_playing = True
         before = bytes(buf)
@@ -63,7 +77,7 @@ class SpeechReservoirTests(unittest.TestCase):
         )
         self.assertTrue(gateway.speech_playing)
 
-        buf.extend(b"\x01\x00" * 8)
+        buf.extend(b"\x01\x00" * gateway.MIN_SPEECH_RENDER_SAMPLES)
         _cur, _future, _played, has_speech = gateway._window_from_speech(buf)
         self.assertTrue(has_speech)
         self.assertFalse(gateway.speech_rebuffering)
@@ -147,6 +161,17 @@ class AuthoritativeAudioClockTests(unittest.TestCase):
         self.assertTrue(gateway.should_keep_idle_motion_during_speech())
         gateway.speech_output_pcm.extend(bytes(2 * gateway.PCM_PACKET_BYTES))
         self.assertFalse(gateway.should_keep_idle_motion_during_speech())
+
+    def test_renderer_skips_pcm_the_output_clock_already_played(self):
+        gateway.speech_playing = True
+        gateway.speech_output_active = True
+        gateway.speech_pcm.extend(b"\x01\x00" * (gateway.CURRENT_SAMPLES * 3))
+        gateway.speech_output_pcm.extend(b"\x02\x00" * gateway.CURRENT_SAMPLES)
+
+        dropped = gateway.drop_played_speech_pcm()
+
+        self.assertEqual(dropped, gateway.CURRENT_SAMPLES * 2 * 2)
+        self.assertEqual(len(gateway.speech_pcm), gateway.CURRENT_SAMPLES * 2)
 
     def test_proactive_turn_uses_deeper_video_reservoir_and_copies_pcm(self):
         pcm = b"\x01\x00" * gateway.SAMPLE_RATE

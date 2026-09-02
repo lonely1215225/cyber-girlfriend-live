@@ -349,6 +349,9 @@ AUDIO_SHIFT = 80
 CURRENT_SAMPLES = CHUNK_SIZE * FRAME_LEN
 FUTURE_SAMPLES = CHUNK_SIZE * FRAME_LEN + AUDIO_SHIFT
 WINDOW_SAMPLES = CURRENT_SAMPLES + FUTURE_SAMPLES
+# One 40ms video pair. Below this the renderer has nothing useful to lip-sync;
+# at or above it we pad the look-ahead instead of idling over leftover speech.
+MIN_SPEECH_RENDER_SAMPLES = FRAME_LEN
 PCM_PACKET_BYTES = 640
 MAX_SPEECH_SECONDS = max(30, int(os.environ.get("AVTR1_MAX_SPEECH_SECONDS", "90")))
 MAX_SPEECH_BYTES = SAMPLE_RATE * 2 * MAX_SPEECH_SECONDS
@@ -1104,10 +1107,10 @@ async def pace_av() -> None:
                             fresh = candidate
                             break
                         continue
-                    if stale_speech_frames > 0:
-                        stale_speech_frames -= 1
-                        video_catchup_drops += 1
-                        continue
+                    # A hold-debt that drops the next N mouths is what froze
+                    # the face while FLV audio kept playing. Late speech
+                    # frames are better than a still mouth.
+                    stale_speech_frames = 0
                 fresh = candidate
                 break
 
@@ -1127,7 +1130,6 @@ async def pace_av() -> None:
                 and speech_output_ready
                 and not should_keep_idle_motion_during_speech()
             ):
-                stale_speech_frames += 1
                 audio_continuity_holds += 1
 
         if last_video is not None:
@@ -1227,9 +1229,14 @@ def _window_from_speech(buf: bytearray) -> tuple[bytes, bytes, bytes, bool]:
     if len(buf) >= need:
         window = bytes(buf[:need])
         del buf[: CURRENT_SAMPLES * 2]
+    elif not speech_finished and len(buf) >= MIN_SPEECH_RENDER_SAMPLES * 2:
+        # IndexTTS often leaves 80-400ms in this buffer while the next
+        # clause clones. Waiting for a full 405ms window idled the mouth
+        # over audio the output clock was still playing.
+        window = bytes(buf) + bytes(need - len(buf))
+        consumed = min(len(buf), CURRENT_SAMPLES * 2)
+        del buf[:consumed]
     elif not speech_finished:
-        # Hold the last mouth while the next clause clones. Raising the
-        # watermark forced another start delay and a visible hitch.
         speech_silence_inserted_ms += 200
         return silence()
     elif buf:
@@ -1244,6 +1251,24 @@ def _window_from_speech(buf: bytearray) -> tuple[bytes, bytes, bytes, bool]:
     cur = window[: CURRENT_SAMPLES * 2]
     fut = window[CURRENT_SAMPLES * 2 :]
     return cur, fut, cur, True
+
+
+def drop_played_speech_pcm() -> int:
+    """Drop renderer PCM the output clock has already spoken.
+
+    The two buffers start equal and are consumed independently. When a render
+    batch misses its 200ms deadline, speech_pcm still holds audio the viewer
+    already heard. Rendering that tail moves the mouth after the word.
+    """
+    extra = len(speech_pcm) - len(speech_output_pcm)
+    step = CURRENT_SAMPLES * 2
+    if not speech_playing or not speech_output_active or extra < step:
+        return 0
+    drop = extra - (extra % step)
+    if drop <= 0:
+        return 0
+    del speech_pcm[:drop]
+    return drop
 
 
 def _window_from_listen(buf: bytearray) -> tuple[bytes, bytes]:
@@ -1566,6 +1591,7 @@ async def render_loop() -> None:
         t0 = loop.time()
         try:
             async with buf_lock:
+                drop_played_speech_pcm()
                 cur, fut, played, rendered_speech = _window_from_speech(speech_pcm)
                 listen_cur, listen_fut = _window_from_listen(listen_pcm)
                 avatar_id = AVATAR_ID
@@ -1759,8 +1785,11 @@ async def render_loop() -> None:
             # While a response is playing, use spare renderer capacity to keep
             # a bounded synchronized A/V reservoir. TTS can synthesize the next
             # sentence while the current sentence drains from this queue.
+            # Burst-fill only before the first audible frame. After that,
+            # stay at 1x so IndexTTS can use the GPU for the next clause.
             fill_reservoir = (
                 rendered_speech
+                and not speech_output_ready
                 and speech_frames_queued < speech_output_target_frames
             )
             await asyncio.sleep(0 if fill_reservoir else max(0.0, 0.2 - elapsed))
