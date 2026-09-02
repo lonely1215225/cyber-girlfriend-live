@@ -120,8 +120,43 @@ INDEX_DIR="$ROOT/models/indextts2.5"
 INDEX_TTS_COMMIT="ee40fa7d6c6b8a2c7f06105f9f1e65775b74868c"
 if [[ ! -d "$INDEX_REPO/.git" ]]; then
   git clone https://github.com/index-tts/index-tts.git "$INDEX_REPO"
-  git -C "$INDEX_REPO" checkout "$INDEX_TTS_COMMIT"
 fi
+if [[ "$(git -C "$INDEX_REPO" rev-parse HEAD)" != "$INDEX_TTS_COMMIT" ]]; then
+  git -C "$INDEX_REPO" fetch --depth 1 origin "$INDEX_TTS_COMMIT"
+  git -C "$INDEX_REPO" checkout --detach "$INDEX_TTS_COMMIT"
+fi
+# Same s2s venv only. Do not uv-sync the official Index lock (torch 2.8 /
+# transformers 4.52) and do not upgrade the live torch / transformers stack.
+say "IndexTTS runtime packages into s2s/.venv"
+uv pip install --python "$S2S_VENV/bin/python" \
+  "omegaconf>=2.3.0" \
+  "jieba==0.42.1" \
+  "cn2an==0.5.22" \
+  "einops>=0.8.1" \
+  "descript-audiotools==0.7.2" \
+  "munch==4.0.0" \
+  "json5==0.10.0" \
+  "g2p-en==2.1.0" \
+  "textstat>=0.7.10" \
+  "sentencepiece>=0.2.1" \
+  "accelerate>=1.8.1,<2" \
+  "modelscope>=1.27.0" \
+  "ffmpeg-python==0.2.0" \
+  "soxr>=0.5.0" \
+  "fugashi>=1.2.0" \
+  "unidic-lite>=1.0.0" \
+  "librosa==0.10.2.post1"
+if ! uv pip install --python "$S2S_VENV/bin/python" "WeTextProcessing"; then
+  say "WeTextProcessing skipped; Chinese Index path still starts"
+fi
+"$S2S_VENV/bin/python" - <<'PY'
+import torch
+import transformers
+assert torch.__version__.startswith("2.6"), torch.__version__
+assert transformers.__version__.startswith("4.57"), transformers.__version__
+import omegaconf, jieba, audiotools  # noqa: F401
+print("IndexTTS extras ok; torch", torch.__version__, "transformers", transformers.__version__)
+PY
 if [[ ! -s "$INDEX_DIR/gpt.pth" || ! -s "$INDEX_DIR/s2mel.pth" || ! -s "$INDEX_DIR/codec.pth" || ! -f "$INDEX_DIR/config.yaml" ]]; then
   mkdir -p "$INDEX_DIR/qwen0.6bemo4-merge"
   if command -v aria2c >/dev/null; then
