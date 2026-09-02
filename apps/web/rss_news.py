@@ -576,6 +576,56 @@ class RssNewsAggregator:
         self._cache[cache_key] = (now, output)
         return output
 
+    async def spoken_brief(self, query: str = "", limit: int = 4) -> str:
+        """Return a few Chinese headlines the host can speak immediately."""
+        if not self.enabled:
+            raise RuntimeError("RSS news is disabled")
+        cached = self._cache.get("__latest_topics__")
+        now = time.monotonic()
+        if cached and now - cached[0] <= self.cache_seconds:
+            raw = cached[1]
+        else:
+            sources: list[tuple[str, str, str, bool]] = []
+            if self.google_enabled:
+                sources.extend(
+                    (category, label, url, False)
+                    for category, label, url in _GOOGLE_HEADLINE_FEEDS[:2]
+                )
+            sources.extend(
+                (category, label, url, False)
+                for category, label, url in self.feeds[:3]
+            )
+            try:
+                items = await self._fetch_many(sources, overall_timeout=8.0)
+            except Exception as exc:
+                raise RuntimeError("新闻源这会儿连不上") from exc
+            if not items:
+                raise RuntimeError("新闻源这会儿连不上")
+            raw = self._format(items[:16])
+        blocks = formatted_news_blocks(raw)
+        tokens = _relevance_terms(query)
+        if tokens:
+            blocks.sort(
+                key=lambda block: sum(token in block.lower() for token in tokens),
+                reverse=True,
+            )
+        selected = blocks[: max(1, min(6, int(limit)))]
+        if not selected:
+            raise RuntimeError("暂时没有可播的新闻")
+        lines = ["刚才查到的最新资讯："]
+        for index, block in enumerate(selected, start=1):
+            rows = [line.strip() for line in block.splitlines() if line.strip()]
+            if not rows:
+                continue
+            lines.append(f"{index}. {rows[0]}")
+            for row in rows[1:]:
+                if row.startswith("摘要："):
+                    lines.append(f"   {row[:90]}")
+                    break
+        if len(lines) < 2:
+            raise RuntimeError("暂时没有可播的新闻")
+        return "\n".join(lines)
+
     async def query_topics(
         self,
         *,

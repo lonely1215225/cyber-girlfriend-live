@@ -1,4 +1,5 @@
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -172,6 +173,28 @@ class RssDialogueQueryTests(unittest.IsolatedAsyncioTestCase):
         aggregator.latest_topics = latest_topics
         output = await aggregator.query_topics(query="今天有什么体育新闻", limit=2)
         self.assertLess(output.index("体育赛事"), output.index("General headline"))
+
+    async def test_spoken_brief_uses_warm_cache_and_skips_urls(self):
+        aggregator = RssNewsAggregator()
+        aggregator._cache["__latest_topics__"] = (
+            time.monotonic(),
+            """RSS topics:
+1. [新闻｜人民日报] 2026-08-21 09:00 UTC — 某国发布新政策
+   摘要：今天正式落地。
+   原文：https://example.com/policy
+2. [科技｜IT之家] 2026-08-21 08:00 UTC — 新款芯片发布
+   摘要：性能提升。
+   原文：https://example.com/chip""",
+        )
+
+        async def fail_fetch(*_args, **_kwargs):
+            raise AssertionError("warm cache must not refetch")
+
+        aggregator._fetch_many = fail_fetch
+        output = await aggregator.spoken_brief("看看最新新闻", limit=2)
+        self.assertIn("刚才查到的最新资讯", output)
+        self.assertIn("某国发布新政策", output)
+        self.assertNotIn("https://example.com", output)
 
 
 if __name__ == "__main__":

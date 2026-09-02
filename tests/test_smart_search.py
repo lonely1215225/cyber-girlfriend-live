@@ -10,7 +10,7 @@ from unittest import mock
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "apps" / "web"
 sys.path.insert(0, str(FRONTEND_DIR))
 
-from smart_search import SearchHit, SmartSearchGateway  # noqa: E402
+from smart_search import SearchHit, SmartSearchGateway, format_hits_for_speech  # noqa: E402
 
 
 class SmartSearchTests(unittest.IsolatedAsyncioTestCase):
@@ -105,6 +105,23 @@ class SmartSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output["source"], "example.com")
         self.assertNotIn("https://", output["content"])
         self.assertIn("正文链接", output["content"])
+
+    async def test_search_hits_are_formatted_for_speech(self):
+        raw = json.dumps({
+            "results": [
+                {
+                    "title": "某国发布新政策",
+                    "source": "Tavily",
+                    "snippet": "today the policy took effect",
+                    "url": "https://example.com/policy",
+                }
+            ]
+        }, ensure_ascii=False)
+        spoken = format_hits_for_speech(raw)
+        self.assertIn("刚才查到的资料", spoken)
+        self.assertIn("某国发布新政策", spoken)
+        self.assertIn("Tavily", spoken)
+        self.assertNotIn("https://example.com", spoken)
 
 
 if __name__ == "__main__":

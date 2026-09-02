@@ -398,3 +398,23 @@ class SmartSearchGateway:
 
     async def close(self) -> None:
         await self._http.aclose()
+
+
+def format_hits_for_speech(raw: str) -> str:
+    """Turn provider JSON into short Chinese evidence the host can read."""
+    payload = json.loads(raw)
+    lines = ["刚才查到的资料："]
+    for index, item in enumerate(payload.get("results") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        source = str(item.get("source") or "网页")[:40]
+        snippet = str(item.get("snippet") or "").strip()[:90]
+        lines.append(f"{index}. {title}（{source}）")
+        if snippet:
+            lines.append(f"   {snippet}")
+    if len(lines) < 2:
+        raise RuntimeError("搜索没有返回可说的结果")
+    return "\n".join(lines)
