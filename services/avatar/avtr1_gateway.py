@@ -943,6 +943,25 @@ def _output_required_frames() -> int:
     return min(speech_output_target_frames, audio_frames)
 
 
+def speech_output_has_playable_pcm() -> bool:
+    return len(speech_output_pcm) >= 2 * PCM_PACKET_BYTES
+
+
+def should_keep_idle_motion_during_speech() -> bool:
+    """True while the next TTS clause is still cloning and speech PCM is gone.
+
+    Holding the last talking frame here is what froze the picture with the
+    mouth half-open. Idle/listen frames must keep moving until new speech
+    PCM arrives.
+    """
+    return bool(
+        speech_output_active
+        and speech_output_ready
+        and not speech_output_finished
+        and not speech_output_has_playable_pcm()
+    )
+
+
 def _take_output_audio() -> tuple[tuple[bytes, bytes], bool]:
     """Advance the authoritative 16-kHz PCM clock by exactly 40ms."""
     global speech_output_active, speech_output_finished, speech_output_ready
@@ -1081,6 +1100,9 @@ async def pace_av() -> None:
                 is_speech_frame = bool(candidate[-1])
                 if speech_output_active and speech_output_ready:
                     if not is_speech_frame:
+                        if should_keep_idle_motion_during_speech():
+                            fresh = candidate
+                            break
                         continue
                     if stale_speech_frames > 0:
                         stale_speech_frames -= 1
@@ -1100,7 +1122,11 @@ async def pace_av() -> None:
                 last_video = (epoch, raw, width, height)
         if fresh is None and last_video is not None:
             video_frames_held += 1
-            if speech_output_active and speech_output_ready:
+            if (
+                speech_output_active
+                and speech_output_ready
+                and not should_keep_idle_motion_during_speech()
+            ):
                 stale_speech_frames += 1
                 audio_continuity_holds += 1
 
@@ -1557,10 +1583,15 @@ async def render_loop() -> None:
                     not motion_active
                     and not speech_active
                     and not listen_active
-                    and not speech_turn_active
-                    and not speech_output_active
                     and not expression_timeline
                     and expression_owner in {"none", "ambient"}
+                    and (
+                        should_keep_idle_motion_during_speech()
+                        or (
+                            not speech_turn_active
+                            and not speech_output_active
+                        )
+                    )
                 ),
             )
             noise_alpha = NOISE_ALPHA if motion_active else IDLE_NOISE_ALPHA

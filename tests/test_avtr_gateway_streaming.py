@@ -140,6 +140,14 @@ class AuthoritativeAudioClockTests(unittest.TestCase):
         self.assertTrue(gateway.speech_output_ready)
         self.assertEqual(gateway.audio_output_underruns, 0)
 
+    def test_sentence_gap_keeps_idle_motion_instead_of_holding_the_mouth(self):
+        gateway.speech_output_active = True
+        gateway.speech_output_ready = True
+        gateway.speech_output_finished = False
+        self.assertTrue(gateway.should_keep_idle_motion_during_speech())
+        gateway.speech_output_pcm.extend(bytes(2 * gateway.PCM_PACKET_BYTES))
+        self.assertFalse(gateway.should_keep_idle_motion_during_speech())
+
     def test_proactive_turn_uses_deeper_video_reservoir_and_copies_pcm(self):
         pcm = b"\x01\x00" * gateway.SAMPLE_RATE
 
