@@ -312,6 +312,8 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertIn("不要加英文方括号标签", DELIVERY_CONTROL_PROMPT)
         self.assertNotIn("[laughing]", DELIVERY_CONTROL_PROMPT)
         self.assertNotIn("[sigh]", DELIVERY_CONTROL_PROMPT)
+        self.assertIn("声音整体必须温柔、软、轻", DELIVERY_CONTROL_PROMPT)
+        self.assertIn("优先用 warm 或 tender", DELIVERY_CONTROL_PROMPT)
 
     def test_fish_tags_survive_speechable_filter_and_are_hidden_from_viewers(self) -> None:
         spoken = "[laughing]嘿嘿，被你发现了。"
