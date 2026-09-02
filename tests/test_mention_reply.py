@@ -15,6 +15,7 @@ from mention_reply import (  # noqa: E402
     DuplicateReplyDetected,
     MentionReplyWorker,
     looks_like_deferred_answer,
+    mention_failure_reply,
     parse_mention,
 )
 
@@ -35,6 +36,11 @@ class MentionReplyTests(unittest.TestCase):
     def test_detects_transition_promise_instead_of_final_answer(self):
         self.assertTrue(looks_like_deferred_answer("好哒，我去查查最新新闻"))
         self.assertFalse(looks_like_deferred_answer("比特币今天上涨，主要与资金流入有关"))
+
+    def test_failure_reply_separates_busy_from_blank_answers(self):
+        self.assertIn("还在忙", mention_failure_reply(RuntimeError("All session slots are in use")))
+        self.assertIn("没答上来", mention_failure_reply(RuntimeError("模型没有生成可播报的最终答案")))
+        self.assertNotIn("工具被关闭", mention_failure_reply(RuntimeError("timeout")))
 
 class FakeRoom:
     async def can_bot_reply(self):
@@ -227,6 +233,8 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
 
         class ToolsMustNotBeLoaded:
             enabled = True
+            def dialogue_web_tool(self):
+                raise AssertionError("welcome must not load research tools")
             async def list_tools(self):
                 raise AssertionError("welcome must not load research tools")
 
@@ -282,7 +290,55 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
             await worker._run_task
         self.assertEqual(len(worker.pending), 0)
 
-    async def test_model_native_tool_calls_run_in_parallel_with_progress(self):
+    async def test_chat_exposes_only_web_search_and_never_lists_mcp(self):
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+            async def publish_agent_job(self, job, **_kwargs): return job
+            async def participant_memory_context(self, *_args, **_kwargs): return ""
+            async def active_news_context(self, *_args):
+                raise AssertionError("idle chat must not load news")
+
+        class WebOnlyGateway:
+            enabled = True
+            DISCOVERY_TOOL_NAME = "request_external_capabilities"
+            def dialogue_web_tool(self):
+                raise AssertionError("idle chat must not load web search")
+            async def list_tools(self):
+                raise AssertionError("chat must not load the full tool registry")
+            async def tools_for_capabilities(self, _capabilities):
+                raise AssertionError("chat must not expand extra capabilities")
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    '{"type":"response.audio_transcript.done","transcript":"嗯，我在听。"}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+                self.sent = []
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def recv(self): return next(self.events)
+            async def send(self, message): self.sent.append(json.loads(message))
+
+        room, socket = RecordingRoom(), FakeWebSocket()
+        worker = MentionReplyWorker(room, WebOnlyGateway(), "ws://unused")
+        request = parse_mention({
+            "id": "chat", "participant_id": "p1", "speaker": "张三丰", "text": "@小麻 哦",
+        })
+        with mock.patch("mention_reply.DIALOGUE_TOOLS_ENABLED", True), mock.patch(
+            "mention_reply.websockets.connect", return_value=socket
+        ):
+            await worker._respond(request)
+        session = next(item["session"] for item in socket.sent if item.get("type") == "session.update")
+        self.assertEqual(session.get("tools") or [], [])
+        self.assertIn("简单闲聊", session["instructions"])
+        self.assertNotIn("smart_web_search", session["instructions"])
+        self.assertNotIn("request_external_capabilities", session["instructions"])
+        self.assertEqual(room.items[-1]["text"], "嗯，我在听。")
+
+    async def test_chat_web_search_runs_with_progress(self):
         class RecordingRoom(FakeRoom):
             def __init__(self): self.items = []
             async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
@@ -290,40 +346,28 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
             async def participant_memory_context(self, *_args, **_kwargs): return ""
             async def active_news_context(self, *_args): return ""
 
-        class ToolGateway:
+        class WebOnlyGateway:
             enabled = True
             DISCOVERY_TOOL_NAME = "request_external_capabilities"
             def __init__(self): self.calls = []
-            def discovery_tool(self):
+            def dialogue_web_tool(self):
                 return {
-                    "type": "function", "name": self.DISCOVERY_TOOL_NAME,
-                    "description": "按需申请外部能力",
-                    "parameters": {"type": "object", "properties": {
-                        "capabilities": {"type": "array", "items": {"type": "string"}},
-                    }},
+                    "type": "function", "name": "smart_web_search", "description": "联网查询",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                    "progress_text": "我先帮你查清楚呀。",
                 }
             async def list_tools(self):
-                return [{
-                    "type": "function", "name": name, "description": "查询资料",
-                    "parameters": {"type": "object", "properties": {}},
-                    "progress_text": "我正在核对两个独立来源，稍等一下呀。",
-                } for name in ("source_one", "source_two")]
-            async def tools_for_capabilities(self, capabilities):
-                self.requested = capabilities
-                return await self.list_tools()
+                raise AssertionError("chat must not load the full tool registry")
             async def call(self, name, arguments):
-                self.calls.append((name, arguments, time.monotonic()))
-                await asyncio.sleep(0.05)
-                return json.dumps({"source": name, "result": "可信资料"}, ensure_ascii=False)
+                self.calls.append((name, arguments))
+                await asyncio.sleep(0.02)
+                return json.dumps({"result": "可信资料"}, ensure_ascii=False)
 
         class FakeWebSocket:
             def __init__(self):
                 self.events = iter([
                     '{"type":"session.created"}',
-                    '{"type":"response.function_call_arguments.done","name":"request_external_capabilities","arguments":"{\\"capabilities\\":[\\"web\\"]}","call_id":"d1"}',
-                    '{"type":"response.done","response":{"status":"completed"}}',
-                    '{"type":"response.function_call_arguments.done","name":"source_one","arguments":"{}","call_id":"c1"}',
-                    '{"type":"response.function_call_arguments.done","name":"source_two","arguments":"{}","call_id":"c2"}',
+                    '{"type":"response.function_call_arguments.done","name":"smart_web_search","arguments":"{\\"query\\":\\"查证一下\\"}","call_id":"c1"}',
                     '{"type":"response.done","response":{"status":"completed"}}',
                     '{"type":"response.audio_transcript.done","transcript":"这是核对后的最终答案。"}',
                     '{"type":"response.done","response":{"status":"completed"}}',
@@ -334,29 +378,176 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
             async def recv(self): return next(self.events)
             async def send(self, message): self.sent.append(json.loads(message))
 
-        room, gateway, socket = RecordingRoom(), ToolGateway(), FakeWebSocket()
+        room, gateway, socket = RecordingRoom(), WebOnlyGateway(), FakeWebSocket()
         worker = MentionReplyWorker(room, gateway, "ws://unused")
         request = parse_mention({"id": "tools", "participant_id": "p1", "speaker": "观众", "text": "@小麻 查证一下"})
         worker._speak_exact = mock.AsyncMock()
-        started = time.monotonic()
         with mock.patch("mention_reply.DIALOGUE_TOOLS_ENABLED", True), mock.patch(
             "mention_reply.websockets.connect", return_value=socket
         ):
             await worker._respond(request)
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 0.09)
-        self.assertEqual({name for name, _, _ in gateway.calls}, {"source_one", "source_two"})
+        self.assertEqual([name for name, _ in gateway.calls], ["smart_web_search"])
         worker._speak_exact.assert_awaited_once()
-        self.assertTrue(any(item.get("partial") and "同时查" in item["text"] for item in room.items))
         self.assertTrue(any(item.get("text") == "这是核对后的最终答案。" for item in room.items))
         session_updates = [item["session"] for item in socket.sent if item.get("type") == "session.update"]
         self.assertEqual(session_updates[0].get("tool_choice"), "auto")
-        self.assertNotIn("conversation", session_updates[0]["instructions"])
-        self.assertTrue(any(item.get("tool_choice") == "required" and len(item.get("tools") or []) == 2
-                            for item in session_updates))
+        self.assertEqual([tool["name"] for tool in session_updates[0].get("tools") or []], ["smart_web_search"])
         self.assertTrue(any(item.get("tool_choice") == "auto" for item in session_updates))
+        self.assertTrue(any("中文口语" in item.get("instructions", "") for item in session_updates))
 
-    async def test_external_route_cannot_complete_before_a_real_tool_call(self):
+    async def test_empty_answer_after_search_speaks_a_retry_line(self):
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+            async def publish_agent_job(self, job, **_kwargs): return job
+            async def participant_memory_context(self, *_args, **_kwargs): return ""
+            async def active_news_context(self, *_args): return ""
+
+        class WebOnlyGateway:
+            enabled = True
+            DISCOVERY_TOOL_NAME = "request_external_capabilities"
+            def dialogue_web_tool(self):
+                return {
+                    "type": "function", "name": "smart_web_search", "description": "联网查询",
+                    "parameters": {"type": "object"}, "progress_text": "我先帮你查清楚呀。",
+                }
+            async def call(self, _name, _arguments):
+                return "工具调用失败：ConnectTimeout"
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    '{"type":"response.function_call_arguments.done","name":"smart_web_search","arguments":"{\\"query\\":\\"今天新闻\\"}","call_id":"c1"}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def recv(self): return next(self.events)
+            async def send(self, _message): pass
+
+        room = RecordingRoom()
+        worker = MentionReplyWorker(room, WebOnlyGateway(), "ws://unused")
+        worker._speak_exact = mock.AsyncMock()
+        request = parse_mention({
+            "id": "news", "participant_id": "p1", "speaker": "张三丰",
+            "text": "@小麻 你查一下今天有啥好玩的新闻不",
+        })
+        with mock.patch("mention_reply.DIALOGUE_TOOLS_ENABLED", True), mock.patch(
+            "mention_reply.websockets.connect", return_value=FakeWebSocket()
+        ):
+            await worker._respond(request)
+        self.assertTrue(any("没把这条查完整" in str(item.get("text") or "") for item in room.items))
+        self.assertFalse(any("没答上来" in str(item.get("text") or "") for item in room.items))
+
+    async def test_english_search_summary_is_rejected_for_chinese_chat(self):
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+            async def publish_agent_job(self, job, **_kwargs): return job
+            async def participant_memory_context(self, *_args, **_kwargs): return ""
+            async def active_news_context(self, *_args): return ""
+
+        class WebOnlyGateway:
+            enabled = True
+            DISCOVERY_TOOL_NAME = "request_external_capabilities"
+            def dialogue_web_tool(self):
+                return {
+                    "type": "function", "name": "smart_web_search", "description": "联网查询",
+                    "parameters": {"type": "object"}, "progress_text": "我先帮你查清楚呀。",
+                }
+            async def call(self, _name, _arguments):
+                return '{"results":[{"title":"Seal becomes celebrity"}]}'
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    '{"type":"response.function_call_arguments.done","name":"smart_web_search","arguments":"{\\"query\\":\\"今天新闻\\"}","call_id":"c1"}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                    '{"type":"response.audio_transcript.done","transcript":"Based on the search results provided, here is a summary of the latest news."}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                    '{"type":"response.audio_transcript.done","transcript":"今天有条挺好玩的，一只海豹上了路。"}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+                self.sent = []
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def recv(self): return next(self.events)
+            async def send(self, message): self.sent.append(json.loads(message))
+
+        room = RecordingRoom()
+        worker = MentionReplyWorker(room, WebOnlyGateway(), "ws://unused")
+        worker._speak_exact = mock.AsyncMock()
+        request = parse_mention({
+            "id": "en", "participant_id": "p1", "speaker": "张三丰",
+            "text": "@小麻 今天有啥有趣的补充新闻",
+        })
+        with mock.patch("mention_reply.DIALOGUE_TOOLS_ENABLED", True), mock.patch(
+            "mention_reply.websockets.connect", return_value=FakeWebSocket()
+        ):
+            await worker._respond(request)
+        finals = [item["text"] for item in room.items if item.get("text") and not item.get("partial")]
+        self.assertTrue(any("海豹" in text for text in finals))
+        self.assertFalse(any("Based on the search results" in text for text in finals))
+
+    async def test_leftover_discovery_call_does_not_expand_tools(self):
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+            async def publish_agent_job(self, job, **_kwargs): return job
+            async def participant_memory_context(self, *_args, **_kwargs): return ""
+            async def active_news_context(self, *_args): return ""
+
+        class WebOnlyGateway:
+            enabled = True
+            DISCOVERY_TOOL_NAME = "request_external_capabilities"
+            def dialogue_web_tool(self):
+                return {
+                    "type": "function", "name": "smart_web_search", "description": "联网查询",
+                    "parameters": {"type": "object"}, "progress_text": "我先帮你查清楚呀。",
+                }
+            async def list_tools(self):
+                raise AssertionError("leftover discovery must not list MCP tools")
+            async def tools_for_capabilities(self, _capabilities):
+                raise AssertionError("leftover discovery must not expand capabilities")
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    '{"type":"response.function_call_arguments.done","name":"request_external_capabilities","arguments":"{\\"capabilities\\":[\\"web\\",\\"news\\",\\"market\\"]}","call_id":"d1"}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                    '{"type":"response.audio_transcript.done","transcript":"我在，你说。"}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+                self.sent = []
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def recv(self): return next(self.events)
+            async def send(self, message): self.sent.append(json.loads(message))
+
+        room, socket = RecordingRoom(), FakeWebSocket()
+        worker = MentionReplyWorker(room, WebOnlyGateway(), "ws://unused")
+        request = parse_mention({"id": "left", "participant_id": "p1", "speaker": "观众", "text": "@小麻 什么玩意"})
+        with mock.patch("mention_reply.DIALOGUE_TOOLS_ENABLED", True), mock.patch(
+            "mention_reply.websockets.connect", return_value=socket
+        ):
+            await worker._respond(request)
+        self.assertEqual(room.items[-1]["text"], "我在，你说。")
+        outputs = [
+            item["item"]["output"]
+            for item in socket.sent
+            if item.get("type") == "conversation.item.create"
+            and item.get("item", {}).get("type") == "function_call_output"
+        ]
+        self.assertTrue(outputs)
+        self.assertIn("直接自然回答", outputs[0])
+        self.assertNotIn("local_rss_news", outputs[0])
+        self.assertNotIn("mcp_", outputs[0])
+
+    async def test_deferred_lookup_promise_must_call_web_search(self):
         class RecordingRoom(FakeRoom):
             def __init__(self): self.jobs = []
             async def publish_bot_reply(self, **item): return item
@@ -364,29 +555,22 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
             async def participant_memory_context(self, *_args, **_kwargs): return ""
             async def active_news_context(self, *_args): return ""
 
-        class ToolGateway:
+        class WebOnlyGateway:
             enabled = True
             DISCOVERY_TOOL_NAME = "request_external_capabilities"
-            def discovery_tool(self):
+            def dialogue_web_tool(self):
                 return {
-                    "type": "function", "name": self.DISCOVERY_TOOL_NAME,
-                    "description": "按需申请外部能力", "parameters": {"type": "object"},
-                }
-            async def list_tools(self):
-                return [{
                     "type": "function", "name": "smart_web_search", "description": "联网查询",
                     "parameters": {"type": "object"}, "progress_text": "我先帮你查清楚呀。",
-                }]
-            async def tools_for_capabilities(self, _capabilities): return await self.list_tools()
+                }
+            async def list_tools(self):
+                raise AssertionError("chat must not load the full tool registry")
             async def call(self, _name, _arguments): return '{"result":"小米汽车可信资料"}'
 
         class FakeWebSocket:
             def __init__(self):
                 self.events = iter([
                     '{"type":"session.created"}',
-                    '{"type":"response.function_call_arguments.done","name":"request_external_capabilities","arguments":"{\\"capabilities\\":[\\"web\\"]}","call_id":"d1"}',
-                    '{"type":"response.done","response":{"status":"completed"}}',
-                    # Simulate a provider ignoring tool_choice and returning only a promise.
                     '{"type":"response.audio_transcript.done","transcript":"马上回来告诉你。"}',
                     '{"type":"response.done","response":{"status":"completed"}}',
                     '{"type":"response.function_call_arguments.done","name":"smart_web_search","arguments":"{\\"query\\":\\"小米最新汽车价格\\"}","call_id":"c1"}',
@@ -401,7 +585,7 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
             async def send(self, message): self.sent.append(json.loads(message))
 
         room, socket = RecordingRoom(), FakeWebSocket()
-        worker = MentionReplyWorker(room, ToolGateway(), "ws://unused")
+        worker = MentionReplyWorker(room, WebOnlyGateway(), "ws://unused")
         worker._speak_exact = mock.AsyncMock()
         request = parse_mention({
             "id": "car", "participant_id": "p1", "speaker": "观众",
@@ -418,7 +602,7 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         retry_updates = [
             item["session"] for item in socket.sent
             if item.get("type") == "session.update"
-            and "现在只能调用一个最合适" in item["session"].get("instructions", "")
+            and "立刻调用 smart_web_search" in item["session"].get("instructions", "")
         ]
         self.assertTrue(retry_updates)
 
@@ -429,6 +613,8 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
 
         class ToolsMustNotBeLoaded:
             enabled = True
+            def dialogue_web_tool(self):
+                raise AssertionError("proactive speech must use its preloaded evidence")
             async def list_tools(self):
                 raise AssertionError("proactive speech must use its preloaded evidence")
 
@@ -456,6 +642,51 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         final = [item for item in room.items if not item.get("partial")][-1]
         self.assertEqual(final["text"], "第一句新闻。第二句也要显示。")
         self.assertFalse(final.get("interrupted", False))
+
+    async def test_welcome_and_news_use_the_live_chat_socket(self):
+        seen: list[str] = []
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    '{"type":"response.audio_transcript.done","transcript":"诶，三丰。"}',
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def recv(self):
+                return next(self.events)
+
+            async def send(self, _message):
+                pass
+
+        def connect(url, **_kwargs):
+            seen.append(url)
+            return FakeWebSocket()
+
+        class RecordingRoom(FakeRoom):
+            def __init__(self):
+                self.items = []
+
+            async def publish_bot_reply(self, **item):
+                self.items.append(dict(item))
+                return item
+
+        worker = MentionReplyWorker(
+            RecordingRoom(), mock.Mock(enabled=False), "ws://s2s/v1/realtime"
+        )
+        with mock.patch("mention_reply.websockets.connect", side_effect=connect):
+            worker.enqueue_welcome(participant_id="p1", speaker="三丰")
+            await worker._respond(worker.pending.popleft())
+            worker.enqueue_proactive("讲新闻")
+            await worker._respond(worker.pending.popleft())
+        self.assertEqual(seen, ["ws://s2s/v1/realtime", "ws://s2s/v1/realtime"])
 
     async def test_spoken_prefix_survives_connection_failure(self):
         class RecordingRoom(FakeRoom):

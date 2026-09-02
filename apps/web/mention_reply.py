@@ -20,6 +20,13 @@ import httpx
 import websockets
 
 from avatar_profiles import DEFAULT_PERSONA_PROMPT, ROLE_IDENTITY_POLICY, ROLE_OUTPUT_POLICY
+from dialogue_intent import (
+    SIMPLE_CHAT_POLICY,
+    SPOKEN_CHINESE_POLICY,
+    looks_like_english_answer,
+    needs_web_search,
+    wants_news_context,
+)
 
 
 logger = logging.getLogger("s2s.mention_reply")
@@ -30,8 +37,19 @@ DEFERRED_ANSWER_RE = re.compile(
     re.IGNORECASE,
 )
 SESSION_BUSY_RE = re.compile(r"all session slots are in use|session slots.*(?:busy|full)", re.I)
-MAX_SESSION_BUSY_RETRIES = 3
+MAX_SESSION_BUSY_RETRIES = 8
 DIALOGUE_TOOLS_ENABLED = os.environ.get("DIALOGUE_TOOLS_ENABLED", "0") == "1"
+
+
+def mention_failure_reply(exc: BaseException) -> str:
+    """Speak a viewer-facing fallback. Busy is not the same as a blank answer."""
+    if SESSION_BUSY_RE.search(str(exc)):
+        return "刚才说话的通道还在忙，我没接上这一句。你再说一次我就回你。"
+    return "这一句我没答上来。你换个说法再叫我一次就好。"
+
+
+def _public_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
+    return {key: tool[key] for key in ("type", "name", "description", "parameters") if key in tool}
 
 
 class DuplicateReplyDetected(RuntimeError):
@@ -348,7 +366,7 @@ class MentionReplyWorker:
                 ):
                     request.session_busy_retries += 1
                     self.pending.appendleft(request)
-                    await asyncio.sleep(min(4.0, 0.75 * (2 ** request.session_busy_retries)))
+                    await asyncio.sleep(min(5.0, 1.0 * (2 ** (request.session_busy_retries - 1))))
                     self._wake.set()
                     continue
                 if not request.proactive and not request.welcome:
@@ -360,10 +378,7 @@ class MentionReplyWorker:
                     }, reply_to=self._reply_quote(request))
                     await self.room.publish_bot_reply(
                         message_id=request.message_id,
-                        text=(
-                            "刚才查询或播报通道连续繁忙，没有完成这次回答。"
-                            "这不是相关工具被关闭了，你稍后再问我一次好不好？"
-                        ),
+                        text=mention_failure_reply(exc),
                         reply_to=self._reply_quote(request),
                     )
             finally:
@@ -492,6 +507,8 @@ class MentionReplyWorker:
             nonlocal last_partial_at, round_finalized, transcript, completed_transcript, segment_delta
             if not transcript.strip():
                 return
+            if looks_like_english_answer(transcript) and not request.proactive and not request.welcome:
+                return
             candidate = normalized_for_duplicate(transcript)
             previous = normalized_for_duplicate(previous_reply)
             # Detect while the first sentence is still inside the playback
@@ -536,39 +553,31 @@ class MentionReplyWorker:
             separator = " " if left[-1].isascii() and left[-1].isalnum() and right[0].isascii() and right[0].isalnum() else ""
             return left + separator + right
 
-        # Progressive disclosure keeps ordinary conversation fast and prevents
-        # a stale topic from accidentally selecting a specific remote tool.
-        # The model first sees only a tiny capability request.  It receives the
-        # relevant real schemas only after deciding external data is necessary.
-        # Proactive topics are researched and grounded by the scheduler before
-        # they enter this speech queue. Exposing tools again would duplicate
-        # the lookup and make an unsolicited "I'm checking sources" preamble
-        # audible before every broadcast.
-        tools = (
-            await self.mcp_gateway.list_tools()
-            if DIALOGUE_TOOLS_ENABLED
-            and self.mcp_gateway.enabled
+        # Server-side intent: casual chat is memory-only and has no tools.
+        # Only an explicit live-lookup request may see web search.
+        wants_search = (
+            DIALOGUE_TOOLS_ENABLED
             and not request.proactive
             and not request.welcome
-            else []
+            and needs_web_search(request.prompt)
         )
-        discovery_tool = self.mcp_gateway.discovery_tool() if tools else None
-        public_tools = [
-            {key: discovery_tool[key] for key in ("type", "name", "description", "parameters")}
-        ] if discovery_tool else []
+        web_tool = (
+            self.mcp_gateway.dialogue_web_tool()
+            if wants_search and self.mcp_gateway.enabled
+            else None
+        )
+        public_tools = [_public_tool_schema(web_tool)] if web_tool else []
+        web_tool_name = str(web_tool.get("name") or "") if web_tool else ""
         active_external_tools: dict[str, dict[str, Any]] = {}
         tool_progress = {
-            str(tool.get("name") or ""): str(tool.get("progress_text") or "正在查询并核对资料")
-            for tool in tools
-        }
+            web_tool_name: str(web_tool.get("progress_text") or "正在查询并核对资料")
+        } if web_tool else {}
         try:
-            ws_url = self.ws_url
-            if request.proactive or request.welcome:
-                ws_url += ("&" if "?" in ws_url else "?") + "complete_audio=1"
-            if request.proactive:
-                ws_url += ("&" if "?" in ws_url else "?") + "playback_mode=proactive"
+            # News and welcomes use the same live TTS socket as chat: first
+            # sentence starts after the short reservoir, not after a
+            # whole-clip wait.
             async with websockets.connect(
-                ws_url, max_size=None, ping_interval=20, ping_timeout=20
+                self.ws_url, max_size=None, ping_interval=20, ping_timeout=20
             ) as ws:
                 while True:
                     event = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
@@ -603,32 +612,36 @@ class MentionReplyWorker:
                     )
                     user_text = f"刚进入直播间的观众名字是“{request.speaker}”，现在欢迎对方。"
                 else:
-                    if DIALOGUE_TOOLS_ENABLED:
+                    if wants_search:
                         instructions += (
-                            "这是公开评论：用中文口语回一两句，短、直、像随口说，可直接播报。"
+                            "这是公开评论：观众要查网上的最新事实。先联网，再用两三句中文口语说结论。"
                             "不要“既然……那就……”这类书面腔，不要假装正在连线。"
-                            "普通闲聊直接回答；只有明确要求查询或确实依赖最新外部事实时才查网。"
+                            f"{SPOKEN_CHINESE_POLICY}"
                         )
                     else:
                         instructions += (
-                            "这是公开评论：用中文口语回一两句，短、直、像随口说，可直接播报。"
-                            "不要“既然……那就……”这类书面腔，不要假装正在连线。当前只陪聊天："
-                            "直接回应观众此刻说的话，不查网，不说正在查询。遇到要实时资料的问题，"
-                            "就说现在只想聊天，别编。"
+                            "这是公开评论：不要假装正在连线。"
+                            f"{SIMPLE_CHAT_POLICY}{SPOKEN_CHINESE_POLICY}"
                         )
-                    memory, active_topic = await asyncio.gather(
-                        self.room.participant_memory_context(
-                            request.participant_id,
-                            request.prompt,
-                            exclude_message_id=request.message_id,
-                        ),
-                        self.room.active_news_context(request.prompt),
+                    memory_task = self.room.participant_memory_context(
+                        request.participant_id,
+                        request.prompt,
+                        exclude_message_id=request.message_id,
                     )
+                    if wants_news_context(request.prompt):
+                        memory, active_topic = await asyncio.gather(
+                            memory_task,
+                            self.room.active_news_context(request.prompt),
+                        )
+                    else:
+                        memory = await memory_task
+                        active_topic = ""
                     context_sections: list[str] = []
                     if memory:
                         instructions += (
                             "附带记忆仅属于当前观众，只能辅助理解指代；历史中的数字人回答不是本轮答案，"
-                            "不得照抄、续写或复述。本轮必须回答最后的【当前评论】。如果当前评论正在纠正"
+                            "不得照抄、续写或复述，更不要把旧的长篇瓜或新闻接着讲下去。"
+                            "本轮必须回答最后的【当前评论】。如果当前评论正在纠正"
                             "历史里的称呼、身份、事实或误解，应接受本轮纠正并据此回答，不能固守旧说法。"
                         )
                         context_sections.append(f"【历史记忆，仅供理解】\n{memory}")
@@ -654,7 +667,7 @@ class MentionReplyWorker:
                     # after it previously caused the old answer to be replayed.
                     user_text = "\n\n".join(context_sections)
                 pending_calls: list[dict[str, str]] = []
-                unauthorized_tool_calls = 0
+                leftover_discovery_calls: list[dict[str, str]] = []
                 tool_rounds = 0
                 discovery_rounds = 0
                 answer_retries = 0
@@ -669,8 +682,9 @@ class MentionReplyWorker:
                 if public_tools:
                     session["instructions"] += (
                         "普通闲聊、情绪表达、吐槽、承接上下文和角色互动直接回答，不调用工具。"
-                        "只有用户明确要求查询，或问题确实依赖最新外部事实时，才静默调用一次"
-                        " request_external_capabilities 并选择最少的能力。外部查询取得证据后必须在本轮给出结论。"
+                        "只有用户明确要求查询，或问题确实依赖最新外部事实时，才调用"
+                        f" {web_tool_name}。不要申请其他能力，也不要调用其他工具。"
+                        "外部查询取得证据后必须在本轮给出结论。"
                     )
                     session.update(tools=public_tools, tool_choice="auto")
                 await ws.send(
@@ -722,22 +736,23 @@ class MentionReplyWorker:
                         await publish_spoken(partial=False)
                     elif event_type == "response.function_call_arguments.done":
                         call_name = str(event.get("name") or "")
-                        authorized = (
-                            call_name == self.mcp_gateway.DISCOVERY_TOOL_NAME
-                            and bool(public_tools)
-                        ) or call_name in active_external_tools
-                        if authorized:
-                            pending_calls.append(
-                                {
-                                    "name": call_name,
-                                    "arguments": str(event.get("arguments") or "{}"),
-                                    "call_id": str(event.get("call_id") or ""),
-                                }
+                        call = {
+                            "name": call_name,
+                            "arguments": str(event.get("arguments") or "{}"),
+                            "call_id": str(event.get("call_id") or ""),
+                        }
+                        if web_tool and call_name == web_tool_name:
+                            active_external_tools[call_name] = web_tool
+                            pending_calls.append(call)
+                        elif call_name == self.mcp_gateway.DISCOVERY_TOOL_NAME:
+                            leftover_discovery_calls.append(call)
+                            logger.info(
+                                "ignored leftover discovery tool call request=%s",
+                                request.message_id,
                             )
                         else:
-                            unauthorized_tool_calls += 1
                             logger.warning(
-                                "blocked undeclared model tool call name=%r request=%s",
+                                "ignored undeclared model tool call name=%r request=%s",
                                 call_name,
                                 request.message_id,
                             )
@@ -749,97 +764,25 @@ class MentionReplyWorker:
                                 usage_totals[key] += max(0, int(usage.get(key) or 0))
                             except (TypeError, ValueError):
                                 pass
-                        if unauthorized_tool_calls:
-                            raise RuntimeError("模型尝试调用本轮未授权的工具")
                         cancelled = response.get("status") in {"cancelled", "failed", "incomplete"}
                         if transcript.strip() and (not round_finalized or cancelled):
                             await publish_spoken(partial=False, interrupted=cancelled)
-                        discovery_calls = [
-                            call for call in pending_calls
-                            if call["name"] == self.mcp_gateway.DISCOVERY_TOOL_NAME
-                        ]
-                        if discovery_calls and discovery_rounds < 2:
+                        if leftover_discovery_calls:
                             discovery_rounds += 1
-                            pending_calls = [
-                                call for call in pending_calls
-                                if call["name"] != self.mcp_gateway.DISCOVERY_TOOL_NAME
-                            ]
-                            requested: list[str] = []
-                            for call in discovery_calls:
-                                try:
-                                    arguments = json.loads(call["arguments"])
-                                except json.JSONDecodeError:
-                                    arguments = {}
-                                values = arguments.get("capabilities")
-                                if isinstance(values, list):
-                                    requested.extend(str(value) for value in values)
-                            requested_capabilities.update(value.strip().lower() for value in requested)
-                            selected = await self.mcp_gateway.tools_for_capabilities(requested)
-                            for tool in selected:
-                                active_external_tools[str(tool.get("name") or "")] = tool
-                            expanded = [
-                                {key: tool[key] for key in ("type", "name", "description", "parameters")}
-                                for tool in active_external_tools.values()
-                            ]
-                            conversation_only = "conversation" in requested and not expanded
-                            if conversation_only:
-                                session["instructions"] += (
-                                    "能力选择完成：直接自然回答，不调用工具。"
-                                )
-                            else:
-                                session["instructions"] += (
-                                    "能力选择完成：用已启用工具取得资料后回答。"
-                                )
-                            # Selecting an external capability is a commitment to
-                            # actually execute it.  Keep the next turn constrained
-                            # to a tool call; otherwise a small model can emit an
-                            # acknowledgement such as "I'll check" and have that
-                            # promise mistaken for the final answer.
-                            session.update(tools=expanded, tool_choice="required" if expanded else "none")
+                            ignored, leftover_discovery_calls = leftover_discovery_calls, []
+                            output = json.dumps({
+                                "enabled": [web_tool_name] if web_tool_name else [],
+                                "instruction": (
+                                    f"普通闲聊直接回答。只有要查网时才调用 {web_tool_name}。"
+                                    if web_tool_name else
+                                    "直接自然回答，不要再申请其他能力。"
+                                ),
+                            }, ensure_ascii=False)
+                            session.update(tools=public_tools, tool_choice="auto" if public_tools else "none")
                             await ws.send(json.dumps(
                                 {"type": "session.update", "session": session}, ensure_ascii=False
                             ))
-                            names = [str(tool.get("name") or "") for tool in selected]
-                            output = json.dumps({
-                                "enabled": names,
-                                "route": "conversation_fast" if conversation_only else "external_research",
-                                "instruction": (
-                                    "Answer directly now." if conversation_only else
-                                    "Use an enabled tool now. If none are suitable, answer without inventing data."
-                                ),
-                            }, ensure_ascii=False)
-                            if expanded and not progress_spoken:
-                                progress_candidates = [
-                                    tool_progress.get(str(tool.get("name") or ""), "")
-                                    for tool in selected
-                                ]
-                                progress_text = next(
-                                    (text for text in progress_candidates if text),
-                                    "我正在查询并核对资料，马上告诉你呀。",
-                                )
-                                if len(expanded) > 1:
-                                    progress_text = "我正在同时查几个来源，核对清楚就告诉你呀。"
-                                if job is not None:
-                                    job.update(
-                                        phase="researching", status_text=progress_text,
-                                        feedback_count=int(job.get("feedback_count") or 0) + 1,
-                                        terminal=False,
-                                    )
-                                    await self.room.publish_agent_job(job, reply_to=reply_quote)
-                                await self.room.publish_bot_reply(
-                                    message_id=f"{speech_base_id}:discovery-progress",
-                                    text=progress_text, reply_to=reply_quote, partial=True,
-                                )
-                                request.delivery_started = True
-                                try:
-                                    await self._speak_exact(ws, progress_text)
-                                finally:
-                                    await ws.send(json.dumps(
-                                        {"type": "session.update", "session": session},
-                                        ensure_ascii=False,
-                                    ))
-                                progress_spoken = True
-                            for call in discovery_calls:
+                            for call in ignored:
                                 await ws.send(json.dumps({
                                     "type": "conversation.item.create",
                                     "item": {
@@ -848,14 +791,15 @@ class MentionReplyWorker:
                                         "output": output,
                                     },
                                 }, ensure_ascii=False))
-                            await ws.send(json.dumps({"type": "response.create", "response": {}}))
-                            speech_round += 1
-                            transcript = ""
-                            completed_transcript = ""
-                            segment_delta = ""
-                            round_finalized = False
-                            last_partial_at = 0.0
-                            continue
+                            if not pending_calls:
+                                await ws.send(json.dumps({"type": "response.create", "response": {}}))
+                                speech_round += 1
+                                transcript = ""
+                                completed_transcript = ""
+                                segment_delta = ""
+                                round_finalized = False
+                                last_partial_at = 0.0
+                                continue
                         if pending_calls and tool_rounds < 3:
                             tool_rounds += 1
                             calls, pending_calls = pending_calls, []
@@ -933,6 +877,10 @@ class MentionReplyWorker:
                             # constraint so the following turn can give the actual
                             # answer (or choose one bounded follow-up lookup).
                             session["tool_choice"] = "auto"
+                            session["instructions"] += (
+                                "资料已返回。用两三句中文口语讲最有意思的一点就够。"
+                                f"{SPOKEN_CHINESE_POLICY}"
+                            )
                             await ws.send(json.dumps(
                                 {"type": "session.update", "session": session},
                                 ensure_ascii=False,
@@ -945,13 +893,12 @@ class MentionReplyWorker:
                             round_finalized = False
                             last_partial_at = 0.0
                             continue
-                        if active_external_tools and tool_rounds == 0:
-                            # Provider-side tool_choice enforcement is not
-                            # uniformly reliable.  Never accept prose after the
-                            # model selected external research until at least one
-                            # real tool result has been returned.
-                            if answer_retries >= 2:
-                                raise RuntimeError("模型选择了外部查询，但没有执行任何工具")
+                        if (
+                            public_tools
+                            and tool_rounds == 0
+                            and looks_like_deferred_answer(transcript)
+                            and answer_retries < 2
+                        ):
                             answer_retries += 1
                             speech_round += 1
                             transcript = ""
@@ -961,8 +908,8 @@ class MentionReplyWorker:
                             last_partial_at = 0.0
                             session["tool_choice"] = "required"
                             session["instructions"] += (
-                                "你已经选择外部查询。现在只能调用一个最合适的已启用工具；"
-                                "不要回复文字，不要再次说稍等，也不要凭记忆回答。"
+                                f"不要再说稍等。现在立刻调用 {web_tool_name}；"
+                                "不要回复文字，也不要凭记忆回答。"
                             )
                             await ws.send(json.dumps(
                                 {"type": "session.update", "session": session},
@@ -1005,8 +952,34 @@ class MentionReplyWorker:
                             continue
                         if tool_rounds > 0 and looks_like_deferred_answer(transcript):
                             raise RuntimeError("模型连续生成了查询承诺，而不是最终答案")
+                        if looks_like_english_answer(transcript) and answer_retries < 2:
+                            answer_retries += 1
+                            speech_round += 1
+                            transcript = ""
+                            completed_transcript = ""
+                            segment_delta = ""
+                            round_finalized = False
+                            last_partial_at = 0.0
+                            session["instructions"] += (
+                                "上一句说成英文了。立刻用中文口语重说，不要英文，不要Markdown。"
+                            )
+                            await ws.send(json.dumps(
+                                {"type": "session.update", "session": session},
+                                ensure_ascii=False,
+                            ))
+                            await ws.send(json.dumps({"type": "response.create", "response": {}}))
+                            continue
+                        if looks_like_english_answer(transcript):
+                            raise RuntimeError("模型用英文回答了中文观众")
                         if not transcript.strip():
-                            raise RuntimeError("模型没有生成可播报的最终答案")
+                            if tool_rounds > 0:
+                                transcript = (
+                                    "网这会儿连得慢，我没把这条查完整。"
+                                    "你等一会儿再叫我查一次就好。"
+                                )
+                                await publish_spoken(partial=False)
+                            else:
+                                raise RuntimeError("模型没有生成可播报的最终答案")
                         if request.proactive:
                             store = getattr(self.room, "store", None)
                             if store is not None:
@@ -1019,7 +992,7 @@ class MentionReplyWorker:
                                 "usage": usage_totals,
                                 "tool_rounds": tool_rounds,
                                 "discovery_rounds": discovery_rounds,
-                                "exposed_tool_count": len(active_external_tools),
+                                "exposed_tool_count": len(public_tools),
                                 "requested_capabilities": sorted(requested_capabilities),
                             })
                             job.update(
