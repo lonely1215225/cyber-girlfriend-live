@@ -134,6 +134,18 @@ class EmotionAwareTTSTests(unittest.TestCase):
         )
         self.assertEqual(split_streaming_sentences("还有啊？"), ["还有啊？"])
 
+    def test_followup_sentences_wait_for_a_longer_clone_group(self):
+        first = "三丰，小米现在最新旗舰是小米十七系列。"
+        follow = "刚才那下是不是把你吓着了？现在要是缓过来了的话我就继续往下说。"
+        self.assertEqual(
+            split_streaming_sentences(first + follow + "尾"),
+            [first, follow, "尾"],
+        )
+        self.assertEqual(
+            split_streaming_sentences(first + "现在缓过来了没？尾"),
+            [first, "现在缓过来了没？尾"],
+        )
+
     def test_comma_does_not_start_tts_before_the_sentence_ends(self) -> None:
         self.assertEqual(
             split_streaming_sentences("这条消息最重要的变化是，后面还有更多证据"),

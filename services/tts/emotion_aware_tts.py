@@ -66,6 +66,9 @@ _INTERJECTION_CORE = re.compile(
 )
 _CLOSING_QUOTE = frozenset("”」』\"'")
 _MIN_SENTENCE_FLUSH_CHARS = 12
+# After the first audible clip, keep cloning longer groups. A 4s follow-up
+# plus a 7s IndexTTS generate is the gap listeners hear as 卡.
+_MIN_FOLLOWUP_FLUSH_CHARS = 28
 
 
 def _spoken_core(text: str) -> str:
@@ -89,7 +92,13 @@ def _inside_chinese_quotes(text: str, index: int) -> bool:
     return opens > closes
 
 
-def _is_dialogue_boundary(text: str, index: int, candidate: str) -> bool:
+def _is_dialogue_boundary(
+    text: str,
+    index: int,
+    candidate: str,
+    *,
+    min_chars: int | None = None,
+) -> bool:
     """Keep punchlines and tiny openers attached to the next clause.
 
     A 3-character first sentence such as ``没干嘛。`` would otherwise play
@@ -101,7 +110,8 @@ def _is_dialogue_boundary(text: str, index: int, candidate: str) -> bool:
     rest = text[index + 1 :].lstrip()
     if rest[:1] in _CLOSING_QUOTE or _inside_chinese_quotes(text, index):
         return False
-    if _spoken_char_count(candidate) < _MIN_SENTENCE_FLUSH_CHARS:
+    needed = _MIN_SENTENCE_FLUSH_CHARS if min_chars is None else min_chars
+    if _spoken_char_count(candidate) < needed:
         return False
     return True
 
@@ -130,7 +140,14 @@ def split_streaming_sentences(text: str) -> list[str]:
             if char not in "。！？!?":
                 continue
             candidate = text[start : index + 1]
-            if not _is_dialogue_boundary(text, index, candidate):
+            min_chars = (
+                _MIN_SENTENCE_FLUSH_CHARS
+                if start == 0
+                else _MIN_FOLLOWUP_FLUSH_CHARS
+            )
+            if not _is_dialogue_boundary(
+                text, index, candidate, min_chars=min_chars
+            ):
                 continue
             boundaries.append(index + 1)
             start = index + 1
