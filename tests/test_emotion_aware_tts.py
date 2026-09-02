@@ -203,6 +203,14 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(cue.source, "fallback")
         self.assertEqual(cue.profile, "neutral")
         self.assertEqual(cue.intensity, 0.0)
+        self.assertEqual(cue.vocal_emotion, "warm")
+        sad = publish_expression(
+            "无论正文表达什么，都不在代码中猜语义。",
+            metadata=SenseVoiceMetadata(emotion="难过"),
+        )
+        self.assertEqual(sad.source, "fallback")
+        self.assertEqual(sad.profile, "neutral")
+        self.assertEqual(sad.vocal_emotion, "tender")
 
     def test_local_model_attribute_serialization_and_closing_tag_are_hidden(self) -> None:
         control = DeliveryControlFilter()
@@ -321,6 +329,8 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertNotIn("[sigh]", DELIVERY_CONTROL_PROMPT)
         self.assertIn("声音整体必须温柔、软、轻", DELIVERY_CONTROL_PROMPT)
         self.assertIn("优先用 warm 或 tender", DELIVERY_CONTROL_PROMPT)
+        self.assertIn("playful 0.40", DELIVERY_CONTROL_PROMPT)
+        self.assertIn("每句尽量短", DELIVERY_CONTROL_PROMPT)
 
     def test_fish_tags_survive_speechable_filter_and_are_hidden_from_viewers(self) -> None:
         spoken = "[laughing]嘿嘿，被你发现了。"

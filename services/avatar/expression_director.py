@@ -52,11 +52,11 @@ DELIVERY_CONTROL_PROMPT = """
 face 只能选 neutral、surprised、pout、one_brow、smirk、wink、cute_annoyed、shy、laugh、soft_smile、curious、side_eye、sleepy、tender、lip_bite、cheek_puff；face_intensity 是 0 到 1。不要使用 happy 或 serious 作为面部表情。
 说话时只能选不挡嘴的脸：neutral、surprised、pout、one_brow、smirk、wink、cute_annoyed、shy、laugh、soft_smile、curious、side_eye、sleepy、tender。lip_bite 和 cheek_puff 会占用嘴巴，不能边说边做；说话句子不要选它们。系统若收到这两张，会在开口时先换成接近的可说话表情，等这句说完再切过去。
 voice 只能选 neutral、happy、playful、warm、tender、shy、serious、sad、angry、surprised；voice_intensity 是 0 到 1；nonverbal 只能选 none、soft_laugh、laugh、sigh、breath、hum；pace 是 0.96 到 1.04。
-面部表情和声音情绪必须分别判断。根据完整对话、真实语义、态度和表达节奏临场选择，不能按词语机械匹配。面部可以灵动，但声音整体必须温柔、软、轻：普通说明、事实陈述、新闻主体和日常衔接句优先用 warm 或 tender，voice_intensity 填 0.00 到 0.12，pace 填 1.01 到 1.04。不要选 happy 当日常声音，不要为了显得活泼而拔高、发力、喊或撒娇。
-只有某一个具体句子确实承载明显的惊喜、调侃、害羞、安慰、生气、难过或强调时，才为该情绪片段选择对应 voice，并将 voice_intensity 提高到 0.32 到 0.48；极少数情绪高潮才可到 0.58，且仍要压着声音。特殊片段结束后，必须在下一普通句前重新输出 tender 或 warm 的低强度标签，不能让上一句的高情绪沿用到整段回答。面部表情不要求随声音一起升高。
+面部表情和声音情绪必须分别判断。根据完整对话、真实语义、态度和表达节奏临场选择，不能按词语机械匹配。面部可以灵动，但声音整体必须温柔、软、轻：普通说明、事实陈述、新闻主体和日常衔接句优先用 warm 或 tender，voice_intensity 填 0.08 到 0.14，pace 填 1.01 到 1.04。不要选 happy 当日常声音，不要为了显得活泼而拔高、发力、喊或撒娇。
+只有某一个具体句子确实承载明显的惊喜、调侃、害羞、安慰、生气、难过或强调时，才为该情绪片段选择对应 voice，并将 voice_intensity 提到 0.36 到 0.52；极少数情绪高潮才可到 0.62，且仍要压着声音。调侃用 playful，害羞用 shy，安慰用 tender，不要用偏低的 0.2 把味道抹掉。特殊片段结束后，必须在下一普通句前重新输出 tender 或 warm 的低强度标签，不能让上一句的高情绪沿用到整段回答。面部表情不要求随声音一起升高。
 只有真的需要可听笑声、叹气或呼吸时才选 nonverbal，不要每句都加。严肃新闻、灾难、求助和难过话题不强行撒娇或发笑。
 选择 soft_laugh、laugh、sigh 或 hum 时，正文必须自然写出当下真会说出口的简短中文拟声或语气，不要加英文方括号标签。例如轻笑写成“嘿嘿，被你发现了。”，叹气写成“唉……那我慢慢说。”，悄悄话写成“这个只有你能听。”。不要写中文舞台提示，不要解释自己在表演。
-每个回答的第一句前必须输出一个标签；后续只有特殊情绪片段开始或结束时才输出新标签。把连续的普通句视为同一低情绪片段，特殊句结束后务必切回低情绪。不要把“诶、哟、嘿嘿”等单独作为一个待合成句子，应自然连到后面的正文。严格按六个值的顺序填写，不写属性名，不写结束标签。例如普通句用 <e soft_smile 0.48 tender 0.08 none 1.02>，好奇时用 <e curious 0.52 warm 0.10 none 1.02>，调侃用 <e side_eye 0.50 playful 0.28 none 1.01>，安慰用 <e tender 0.56 tender 0.16 none 1.03>。标签后立刻输出正文，不解释标签。调用工具或不输出正文时不要输出标签。
+每个回答的第一句前必须输出一个标签；后续只有特殊情绪片段开始或结束时才输出新标签。把连续的普通句视为同一低情绪片段，特殊句结束后务必切回低情绪。不要把“诶、哟、嘿嘿”等单独作为一个待合成句子，应自然连到后面的正文。每句尽量短，一句最好不超过二十八个字；新闻和说明先说完一句再补下一句，不要把整段塞进第一句。严格按六个值的顺序填写，不写属性名，不写结束标签。例如普通句用 <e soft_smile 0.48 tender 0.10 none 1.02>，好奇时用 <e curious 0.52 warm 0.12 none 1.02>，调侃用 <e side_eye 0.50 playful 0.40 none 1.01>，安慰用 <e tender 0.56 tender 0.38 none 1.03>。标签后立刻输出正文，不解释标签。调用工具或不输出正文时不要输出标签。
 正文只能是可直接展示和朗读的纯文本，禁止Markdown和任何HTML/XML标签，包括<br>、<p>、<div>。
 """.strip()
 
@@ -445,11 +445,26 @@ def cue_duration_ms(text: str, profile: str) -> int:
     return estimate
 
 
+def _fallback_voice(metadata: object | None) -> tuple[str, float]:
+    """Warm default when the model omitted a tag. Do not guess from reply text."""
+
+    emotion = getattr(metadata, "emotion", None) if metadata is not None else None
+    return {
+        "开心": ("warm", 0.18),
+        "难过": ("tender", 0.24),
+        "生气": ("serious", 0.18),
+        "害怕": ("tender", 0.18),
+        "厌恶": ("serious", 0.16),
+        "惊讶": ("surprised", 0.32),
+    }.get(str(emotion or ""), ("warm", 0.12))
+
+
 def publish_expression(text: str, *_args, **_kwargs) -> ExpressionCue:
-    """Bind the next LLM plan to TTS, or use a non-semantic neutral fallback."""
+    """Bind the next LLM plan to TTS, or use a non-semantic warm fallback."""
 
     global _sequence, _timeline_base_offset
     plans = _take_plans()
+    metadata = _kwargs.get("metadata")
     with _lock:
         if not plans:
             plans = [None]
@@ -460,17 +475,18 @@ def publish_expression(text: str, *_args, **_kwargs) -> ExpressionCue:
         for plan in plans:
             _sequence += 1
             profile = plan.profile if plan else "neutral"
+            fallback_voice, fallback_intensity = _fallback_voice(metadata)
             cue = ExpressionCue(
                 sequence=_sequence,
                 profile=profile,
                 intensity=plan.intensity if plan else 0.0,
                 duration_ms=cue_duration_ms(text, profile),
                 mouth_strength=plan.mouth_strength if plan else 0.0,
-                style=plan.style if plan else "neutral",
-                vocal_emotion=plan.vocal_emotion if plan else "neutral",
-                vocal_intensity=plan.vocal_intensity if plan else 0.0,
+                style=plan.style if plan else "gentle",
+                vocal_emotion=plan.vocal_emotion if plan else fallback_voice,
+                vocal_intensity=plan.vocal_intensity if plan else fallback_intensity,
                 nonverbal=plan.nonverbal if plan else "none",
-                duration_factor=plan.duration_factor if plan else 1.0,
+                duration_factor=plan.duration_factor if plan else 1.02,
                 source="llm" if plan else "fallback",
                 # Qwen3-TTS averages roughly 150-200ms per visible Chinese
                 # character. The gateway binds this offset to its PCM clock,
