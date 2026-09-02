@@ -32,7 +32,7 @@
 | MCP 工具 | 默认关闭。主动新闻仍走 RSS；把 `DIALOGUE_TOOLS_ENABLED=1` 后，连线和 `@小麻` 才可调用搜索与 MCP |
 | 双层记忆 | 热上下文保留近期原文，旧内容先本地结构化压缩，再于空闲期异步进行语义整理 |
 | 管理设置保护 | 右上角工具与设置需要密码解锁，带 HttpOnly 会话与失败频率限制 |
-| 本地 AI 栈 | SenseVoice、Ollama/Qwen、Fish S2 或共享 VoxCPM，以及 AVTR-1 全部运行在自己的 GPU 服务器上 |
+| 本地 AI 栈 | SenseVoice、Ollama/Qwen、IndexTTS-2.5，以及 AVTR-1 全部运行在自己的 GPU 服务器上 |
 
 ## 交互规则
 
@@ -67,7 +67,7 @@ flowchart LR
     M --> C[CoinGecko]
     M --> E[Exa]
     M --> G[GDELT]
-    L --> T[Fish S2 / 共享 VoxCPM]
+    L --> T[IndexTTS-2.5]
     T --> P[音频 Tee / 预缓冲]
     P --> V[AVTR-1 Renderer]
     V --> F[H.264 + AAC HTTP-FLV]
@@ -86,7 +86,7 @@ flowchart LR
 - **公网入口：** Nginx、HTTPS、自签名证书
 - **语音识别：** FunASR `SenseVoiceSmall` + Silero VAD（中/英/粤/日/韩）
 - **大语言模型：** 可选 Grok 4.6 主模型 + Ollama `jaahas/qwen3.5-uncensored:9b` 自动降级
-- **语音合成：** 默认 Fish Speech S2 Pro 克隆；也可设 `TTS_BACKEND=voxcpm_shared` 复用本机已加载的 VoxCPM2，不再占第二份显存。上游 CLI 仍走 Qwen3 TTS 插槽，实际合成由 Fish / VoxCPM 客户端完成。
+- **语音合成：** 默认 IndexTTS-2.5 克隆，独立工人进程复用 `s2s/.venv`。上游 CLI 仍走 Qwen3 TTS 插槽，实际合成由 Index 客户端完成。`TTS_BACKEND=fish_s2` 仍可作为灾难开关。
 - **数字人渲染与分发：** AVTR-1、TensorRT、H.264/Opus、MediaMTX WebRTC/WHEP、HTTP-FLV 回退
 - **工具调用：** Streamable HTTP MCP（CoinGecko、Exa、GDELT）
 - **运行环境：** Ubuntu、Python 3.12、CUDA 12.8、Pixi、uv
@@ -134,7 +134,7 @@ sudo -E ./install.sh
 
 1. 安装系统依赖、uv、Pixi 与 Ollama；
 2. 创建 Python 3.12 语音环境；
-3. 下载 SenseVoiceSmall、Silero VAD、Fish S2 Pro 和 AVTR-1 权重；
+3. 下载 SenseVoiceSmall、Silero VAD、IndexTTS-2.5、Fish S2 Pro 和 AVTR-1 权重；
 4. 拉取默认 Qwen LLM；
 5. 为当前 GPU 编译 AVTR-1 TensorRT 引擎；
 6. 生成 `config.env` 与本地 HTTPS 证书。
@@ -173,7 +173,7 @@ docker compose up -d --build
 ./scripts/docker-down.sh
 ```
 
-这台机器如果已经用 `TTS_BACKEND=voxcpm_shared` 复用本机 `:10102` 的 VoxCPM，host 网络下容器可以直接访问它。全新服务器请保持示例配置里的 `TTS_BACKEND=fish_s2`，让容器自己拉起 Fish S2。
+容器与宿主机共用同一套 `s2s/.venv` 和 `models/indextts2.5`。保持示例配置里的 `TTS_BACKEND=indextts25`，让 `start.sh` 拉起本机 Index 工人。
 
 ### 5. 运维命令
 
@@ -287,7 +287,7 @@ SEARXNG_URL=
 | `MIN_SPEECH_MS` | `192` | 最短有效语音时长 |
 | `MIN_SILENCE_MS` | `700` | 结束一句话所需静音时间 |
 | `REOPEN_MS` | `1200` | 短暂停顿后重新合并窗口 |
-| `TTS_BACKEND` | `fish_s2` | `fish_s2` 拉起本机 Fish 工人；`voxcpm_shared` 复用 `:10102` 已有 VoxCPM |
+| `TTS_BACKEND` | `indextts25` | `indextts25` 拉起本机 IndexTTS-2.5 工人；`fish_s2` 是可选灾难开关 |
 | `QWEN3_TTS_CHUNK_SIZE` | `4` | 适配层流式分块大小（名称沿用上游 CLI） |
 | `TTS_EMOTION_ENABLED` | `1` | 根据用户声学情绪和回复语义选择温柔、平静、轻快或沉稳语气 |
 | `TTS_STYLE_INSTRUCT_ENABLED` | `1` | 向 Base 克隆模型发送逐句风格指令；关闭后仍保留文本停顿优化 |
@@ -299,7 +299,7 @@ SEARXNG_URL=
 | `TTS_DO_SAMPLE` | `1` | 保留自然采样；设为 `0` 会更固定但可能更机械 |
 | `TTS_REPETITION_PENALTY` | `1.05` | 声码重复惩罚 |
 | `AVATAR_TEE_UPLOAD_PREROLL_MS` | `320` | TTS 上传到网关前的短缓冲；真正开播水位看下面的 AVTR 输出水库 |
-| `VOXCPM_PLAY_RESERVOIR_SECONDS` | `1.2` | 对话在攒够这么多流式 PCM 后开始播放；新闻仍等整句再对节奏 |
+| `INDEXTTS_PLAY_RESERVOIR_SECONDS` | `0.8` | 对话在攒够这么多流式 PCM 后开始播放 |
 | `AVATAR_TEE_SEGMENT_GAP_MS` | `14000` | 下一句还在克隆时保持口型回合；低于 8 秒会被抬到 8 秒 |
 | `AVTR1_SPEECH_START_BUFFER_MS` | `600` | 网关开始对口型前至少攒这么多音频 |
 | `AVTR1_AUDIO_REBUFFER_STEP_MS` | `200` | 一轮语音发生欠载后，动态恢复水位的递增步长 |
@@ -421,7 +421,7 @@ cyber-girlfriend-live/
 │   └── speech/                     # STT 适配与数字人音频分流
 ├── services/
 │   ├── avatar/                     # AVTR-1 会话、口型与 HTTP-FLV 网关
-│   ├── tts/                        # Fish S2 / 共享 VoxCPM 与节奏控制
+│   ├── tts/                        # IndexTTS-2.5 客户端、情绪映射与节奏控制
 │   └── llm/                        # Ollama thinkless、记忆压缩与输出过滤
 ├── deploy/
 │   ├── nginx/nginx.conf.tpl        # 公网反向代理模板

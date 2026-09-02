@@ -973,7 +973,7 @@ def _take_output_audio() -> tuple[tuple[bytes, bytes], bool]:
         _apply_deferred_silent_expression()
         return (packet, packet), False
 
-    # The next VoxCPM sentence is still cloning. Hold the 40ms clock with
+    # The next TTS sentence is still cloning. Hold the 40ms clock with
     # silence and keep the turn ready so returning PCM does not wait through
     # another 800ms render reservoir. Rebuffering here is what froze the
     # picture between clauses.

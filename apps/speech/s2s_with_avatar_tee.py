@@ -66,7 +66,7 @@ BYTES_PER_SAMPLE = 2
 PREROLL_MS = max(240, int(os.environ.get("AVATAR_TEE_UPLOAD_PREROLL_MS", "320")))
 PREROLL_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * PREROLL_MS / 1000)
 PACE_BYTES = int(SAMPLE_RATE * BYTES_PER_SAMPLE * 0.1)
-# VoxCPM's next sentence takes 4-12s. The old 1.2s gap closed the mouth
+# The next TTS sentence can take several seconds. The old 1.2s gap closed the mouth
 # and forced another AVTR start watermark after every clause.
 SEGMENT_GAP_SECONDS = max(
     8.0, float(os.environ.get("AVATAR_TEE_SEGMENT_GAP_MS", "14000")) / 1000.0
@@ -351,9 +351,8 @@ if TEE_URL:
     async def send_events_with_avatar_tee(ws, events):
         query_params = getattr(ws, "query_params", {})
         is_preview = str(query_params.get("preview", "")) == "1" if hasattr(query_params, "get") else False
-        # Proactive news has no conversational latency requirement. Buffer its
-        # entire synthesized turn before AVTR playback so multi-sentence TTS
-        # stalls can never drain the live reservoir halfway through a report.
+        # Room news and welcomes now use the same live socket as chat. The
+        # complete_audio flag is only honored when a caller still asks for it.
         complete_audio = (
             str(query_params.get("complete_audio", "")) == "1"
             if hasattr(query_params, "get") else False
@@ -410,7 +409,7 @@ if TEE_URL:
                         LOG.warning("Invalid realtime PCM delta: %s", exc)
             elif event_type in ("response.audio.done", "response.output_audio.done"):
                 tee.finish_expression_segment()
-                # Do not close the AVTR turn here. The next VoxCPM sentence is
+                # Do not close the AVTR turn here. The next TTS sentence is
                 # still cloning; finishing made the mouth stop and then wait
                 # through another full generate plus a new start watermark.
                 # response.done (or the long segment gap) closes the turn.

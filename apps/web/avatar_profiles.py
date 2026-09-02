@@ -250,8 +250,8 @@ class AvatarProfileStore:
                       "status": row["voice_status"]},
             "tts": {
                 "provider": (
-                    "voxcpm"
-                    if os.environ.get("TTS_BACKEND", "fish_s2") in {"voxcpm", "voxcpm_shared"}
+                    "indextts"
+                    if os.environ.get("TTS_BACKEND", "indextts25") in {"indextts", "indextts25"}
                     else "fish"
                 ),
                 "config_revision": row["tts_config_revision"],
@@ -432,7 +432,7 @@ class AvatarProfileStore:
         target = self.voice_dir / f"{voice_id}.wav"
         incoming.write_bytes(data)
         try:
-            # VoxCPM2 is 48 kHz. Keep that rate and avoid loudnorm, which
+            # Keep the uploaded sample rate and avoid loudnorm, which
             # flattens the highs that make a clone sound bright.
             command = [
                 "ffmpeg", "-v", "error", "-y", "-i", str(incoming),

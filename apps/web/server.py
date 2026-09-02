@@ -902,12 +902,19 @@ async def admin_list_voices(request: Request):
 @app.get("/api/admin/tts/status")
 async def admin_tts_status(request: Request):
     await _require_admin(request)
-    backend = os.environ.get("TTS_BACKEND", "fish_s2")
-    if backend in {"voxcpm", "voxcpm_shared"}:
+    backend = os.environ.get("TTS_BACKEND", "indextts25")
+    if backend in {"indextts", "indextts25"}:
+        url = os.environ.get("INDEXTTS_URL", "http://127.0.0.1:18782")
+        ready = False
+        try:
+            payload = httpx.get(f"{url.rstrip('/')}/healthz", timeout=2.0).json()
+            ready = bool(payload.get("ok") and payload.get("ready"))
+        except Exception:
+            ready = False
         return {
-            "ready": True,
-            "engine": "VoxCPM2-shared",
-            "model": os.environ.get("VOXCPM_SHARED_URL", "http://127.0.0.1:10102"),
+            "ready": ready,
+            "engine": "IndexTTS-2.5",
+            "model": os.environ.get("INDEXTTS_MODEL_DIR", "models/indextts2.5"),
         }
     model = Path(os.environ.get("TTS_MODEL", "models/fish-s2-pro"))
     if not model.is_absolute():
