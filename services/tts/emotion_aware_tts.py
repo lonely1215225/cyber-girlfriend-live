@@ -1,4 +1,4 @@
-"""Emotion-aware Fish S2 Pro voice cloning with hidden delivery controls."""
+"""Emotion-aware IndexTTS-2.5 voice cloning with hidden delivery controls."""
 
 from __future__ import annotations
 
@@ -14,13 +14,15 @@ from typing import Any
 import numpy as np
 
 from sensevoice_stt import SenseVoiceMetadata, get_turn_context
-from speech_to_speech.pipeline.messages import TTSInput
+from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 
 from fish_s2_client import FishS2Client
 from fish_s2_tags import apply_fish_performance_tags
-from playback_policy import is_batch_tts
-from voxcpm_shared_client import SharedVoxCPMClient
+from indextts_client import IndexTTSClient, live_tts_options
+from indextts_emotion import plan_indextts_controls
+from playback_policy import begin_live_tts_turn, is_batch_tts
+from stream_resampler import StreamResampler
 from expression_director import (
     DELIVERY_CONTROL_PROMPT,
     DeliveryControlFilter,
@@ -91,7 +93,7 @@ def _is_dialogue_boundary(text: str, index: int, candidate: str) -> bool:
     """Keep punchlines and tiny openers attached to the next clause.
 
     A 3-character first sentence such as ``没干嘛。`` would otherwise play
-    for under a second, then stall while VoxCPM clones the real reply.
+    for under a second, then stall while TTS clones the real reply.
     """
 
     if is_leading_interjection(candidate):
@@ -208,13 +210,6 @@ def prepare_tts_text(
     return value
 
 
-def voxcpm_clone_options(batch: bool) -> dict[str, bool]:
-    """Dialogue uses a fast timbre clone; news keeps the slower hi-fi prompt."""
-
-    interactive = not bool(batch)
-    return {"live": interactive, "fast": interactive}
-
-
 class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
     """Fish S2 handler that keeps the upstream Qwen3 TTS slot."""
 
@@ -249,7 +244,7 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
         self.max_new_tokens = int(kwargs.get("max_new_tokens") or 1024)
         self.blocksize = int(kwargs.get("blocksize") or 512)
         self.gen_kwargs = kwargs.get("gen_kwargs") or {}
-        self.backend = os.environ.get("TTS_BACKEND", "fish_s2").strip() or "fish_s2"
+        self.backend = os.environ.get("TTS_BACKEND", "indextts25").strip() or "indextts25"
         self.streaming_chunk_size = 4
         self.device = kwargs.get("device") or "cuda"
         self.model_name = os.environ.get("TTS_MODEL", "fish-s2-pro")
@@ -257,21 +252,24 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
         self._initial_speaker = self.speaker
         self._initial_ref_audio = self.ref_audio
         self.fish = None
-        self.voxcpm = None
-        if self.backend in {"voxcpm", "voxcpm_shared"}:
-            self.voxcpm = SharedVoxCPMClient(
-                base_url=os.environ.get("VOXCPM_SHARED_URL", "http://127.0.0.1:10102"),
+        self.indextts = None
+        self._live_turn_key: tuple[object, object] | None = None
+        self._pcm_resampler = StreamResampler()
+        self._active_delivery: dict[str, Any] = {}
+        if self.backend in {"indextts", "indextts25"}:
+            self.indextts = IndexTTSClient(
+                base_url=os.environ.get("INDEXTTS_URL", "http://127.0.0.1:18782"),
                 ref_audio=str(self.ref_audio or ""),
                 ref_text=str(self.ref_text or ""),
             )
-            self.voxcpm.wait_ready()
+            self.indextts.wait_ready()
             LOG.info(
-                "Emotion-aware shared VoxCPM ready url=%s ref=%s emotion=%s",
-                self.voxcpm.base_url,
+                "Emotion-aware IndexTTS-2.5 ready url=%s ref=%s emotion=%s",
+                self.indextts.base_url,
                 self.ref_audio,
                 self.emotion_control_enabled,
             )
-        else:
+        elif self.backend == "fish_s2":
             self.fish = FishS2Client(
                 base_url=os.environ.get("FISH_S2_URL", "http://127.0.0.1:18781"),
                 ref_audio=str(self.ref_audio or ""),
@@ -284,12 +282,15 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
                 self.ref_audio,
                 self.emotion_control_enabled,
             )
+        else:
+            raise RuntimeError(
+                f"unsupported TTS_BACKEND={self.backend}; use indextts25 or fish_s2"
+            )
         self.warmup()
 
     def warmup(self) -> None:
-        if self.voxcpm is not None:
-            # Do not steal their inference lock for a dummy sentence.
-            LOG.info("Shared VoxCPM warmup skipped; using the already-loaded worker")
+        if self.indextts is not None:
+            LOG.info("IndexTTS warmup skipped; the worker already cloned a sentence")
             return
         LOG.info("Warming up Fish S2 Pro")
         try:
@@ -326,7 +327,16 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
             prosody_enabled=self.prosody_enabled,
             max_clause_chars=self.prosody_max_clause_chars,
         )
-        if self.voxcpm is None:
+        self._active_delivery = plan_indextts_controls(
+            vocal_emotion=cue.vocal_emotion,
+            vocal_intensity=cue.vocal_intensity,
+            nonverbal=cue.nonverbal,
+            duration_factor=cue.duration_factor,
+            spoken_text=spoken_text,
+        )
+        if self.indextts is not None:
+            spoken_text = str(self._active_delivery.get("spoken_text") or spoken_text)
+        elif self.fish is not None:
             spoken_text = apply_fish_performance_tags(
                 spoken_text,
                 vocal_emotion=cue.vocal_emotion,
@@ -392,12 +402,49 @@ class EmotionAwareQwen3TTSHandler(Qwen3TTSHandler):
                 return
         super()._apply_session_voice_override(model_type, runtime_config, response)
 
+    def process(self, tts_input: TTSInput) -> Iterator[bytes | np.ndarray]:
+        if isinstance(tts_input, EndOfResponse):
+            begin_live_tts_turn()
+            self._live_turn_key = None
+            return super().process(tts_input)
+        turn_key = (
+            getattr(tts_input, "turn_id", None),
+            getattr(tts_input, "turn_revision", None),
+        )
+        if self._live_turn_key != turn_key:
+            self._live_turn_key = turn_key
+            begin_live_tts_turn()
+        return super().process(tts_input)
+
+    def _resample_to_pipeline_sr(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Keep native TTS patches continuous instead of resampling each one."""
+
+        return self._pcm_resampler.push(audio, sr)
+
+    def _stream(self, gen: Any, label: str) -> Iterator[bytes | np.ndarray]:
+        self._pcm_resampler.reset()
+        try:
+            yield from super()._stream(gen, label)
+        finally:
+            self._pcm_resampler.reset()
+
     def _process_voice_clone(self, text: str) -> Iterator[bytes | np.ndarray]:
-        if self.voxcpm is not None:
-            self.voxcpm.set_reference(str(self.ref_audio or ""), str(self.ref_text or ""))
+        if self.indextts is not None:
+            self.indextts.set_reference(str(self.ref_audio or ""), str(self.ref_text or ""))
+            controls = dict(self._active_delivery)
+            spoken = str(controls.pop("spoken_text", text) or text)
             yield from self._stream(
-                self.voxcpm.stream_clone(text, **voxcpm_clone_options(is_batch_tts())),
-                label=f"voxcpm_{self._active_style}",
+                self.indextts.stream_clone(
+                    spoken,
+                    **live_tts_options(is_batch_tts()),
+                    emo_vector=controls.get("emo_vector"),
+                    emo_alpha=float(controls.get("emo_alpha") or 0.2),
+                    use_emo_text=bool(controls.get("use_emo_text")),
+                    emo_text=str(controls.get("emo_text") or ""),
+                    duration_factor=float(controls.get("duration_factor") or 1.0),
+                    emo_audio=controls.get("emo_audio"),
+                ),
+                label=f"indextts_{self._active_style}",
             )
             return
         if self.fish is None:

@@ -12,10 +12,11 @@ from emotion_aware_tts import (  # noqa: E402
     prepare_tts_text,
     remove_unspeechable_preserving_cjk,
     split_streaming_sentences,
-    voxcpm_clone_options,
 )
+from indextts_client import live_tts_options  # noqa: E402
 from playback_policy import (  # noqa: E402
     apply_websocket_playback_policy,
+    begin_live_tts_turn,
     is_batch_tts,
     set_batch_tts,
     should_complete_flush_before_play,
@@ -86,7 +87,7 @@ class EmotionAwareTTSTests(unittest.TestCase):
         )
         self.assertEqual(prepare_tts_text("喂，", "cheerful"), "喂，")
 
-    def test_news_batch_policy_keeps_the_whole_report_as_one_tts_request(self) -> None:
+    def test_explicit_complete_audio_still_keeps_one_tts_request(self) -> None:
         report = "嗯……刚看到新闻，中国人保上半年科技金融投了挺多。"
         streamed = split_streaming_sentences(report)
         self.assertEqual(streamed, [report, ""])
@@ -98,8 +99,20 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(split_streaming_sentences(report), streamed)
         self.assertFalse(should_complete_flush_before_play("interactive"))
         self.assertTrue(should_complete_flush_before_play("proactive"))
-        self.assertEqual(voxcpm_clone_options(False), {"live": True, "fast": True})
-        self.assertEqual(voxcpm_clone_options(True), {"live": False, "fast": False})
+        begin_live_tts_turn()
+        self.assertEqual(
+            live_tts_options(False),
+            {"live": True, "followup": False},
+        )
+        self.assertEqual(
+            live_tts_options(False),
+            {"live": True, "followup": True},
+        )
+        begin_live_tts_turn()
+        self.assertEqual(
+            live_tts_options(True),
+            {"live": False, "followup": False},
+        )
 
     def test_quoted_question_does_not_cut_a_joke_in_half(self) -> None:
         joke = (

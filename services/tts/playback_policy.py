@@ -1,9 +1,9 @@
-"""Per-connection TTS policy: batch news, stream dialogue.
+"""Per-connection TTS policy: live clone by default.
 
 The speech-to-speech pipeline has one slot, so a process-wide flag is enough.
-News and arrival welcomes already connect with ``complete_audio=1``; those
-turns can wait for the full reply, run one VoxCPM generate, then play.
-Interactive dialogue must flush the first spoken sentence immediately.
+Chat, arrival welcomes, and room news all start the first sentence after the
+short live TTS reservoir. ``complete_audio=1`` remains available if a caller
+still wants one whole-clip generate.
 """
 
 from __future__ import annotations
@@ -12,12 +12,31 @@ import threading
 
 _lock = threading.Lock()
 _batch_tts = False
+_live_sentence_index = 0
 
 
 def set_batch_tts(batch: bool) -> None:
     global _batch_tts
     with _lock:
         _batch_tts = bool(batch)
+
+
+def begin_live_tts_turn() -> None:
+    """First sentence of a new reply keeps the start reservoir."""
+
+    global _live_sentence_index
+    with _lock:
+        _live_sentence_index = 0
+
+
+def take_live_tts_sentence() -> int:
+    """Return the 0-based live sentence index, then advance it."""
+
+    global _live_sentence_index
+    with _lock:
+        index = _live_sentence_index
+        _live_sentence_index += 1
+        return index
 
 
 def is_batch_tts() -> bool:
