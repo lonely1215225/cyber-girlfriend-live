@@ -42,11 +42,24 @@ alive_pidfile() {
 }
 
 # start.sh daemonizes nginx and the Python workers. Stay alive only while the
-# public edge and the two processes that actually talk are still up.
+# public edge, speech, and the live TTS worker are still up.
+tts_backend="indextts25"
+if [[ -f "$ROOT/config.env" ]]; then
+  tts_backend="$(awk -F= '/^TTS_BACKEND=/{print $2}' "$ROOT/config.env" | tail -1)"
+  tts_backend="${tts_backend:-indextts25}"
+fi
 while true; do
   if alive_pidfile "$ROOT/run/nginx.pid" \
       && alive_pidfile "$ROOT/run/web.pid" \
       && alive_pidfile "$ROOT/run/s2s.pid"; then
+    if [[ "$tts_backend" == "indextts" || "$tts_backend" == "indextts25" ]] \
+      && ! alive_pidfile "$ROOT/run/indextts.pid"; then
+      die "IndexTTS worker exited; see $ROOT/logs/indextts.log"
+    fi
+    if [[ "$tts_backend" == "fish_s2" ]] \
+      && ! alive_pidfile "$ROOT/run/fish_s2.pid"; then
+      die "Fish S2 worker exited; see $ROOT/logs/fish_s2.log"
+    fi
     sleep 2
     continue
   fi
