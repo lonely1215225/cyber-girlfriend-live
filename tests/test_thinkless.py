@@ -20,6 +20,7 @@ from ollama_thinkless import (  # noqa: E402
     _spoken_text_is_incomplete,
     clean_model_output,
     completed_response,
+    _function_call_item,
     local_compaction,
     relay_sanitized_grok_stream,
     request_messages,
@@ -53,6 +54,19 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         self.assertTrue(_needs_reliable_external_route([
             {"role": "user", "content": "为什么比特币最近涨这么多"},
         ]))
+        self.assertFalse(_needs_reliable_external_route([
+            {"role": "user", "content": "别说别的了，你就简单讲个笑话"},
+        ]))
+        self.assertFalse(_needs_reliable_external_route([
+            {
+                "role": "user",
+                "content": (
+                    "【历史记忆，仅供理解】\n数字人：今天最新新闻很好看\n\n"
+                    "【当前评论，这是唯一需要回答的问题】\n"
+                    "直播间观众“张三丰”说：别说别的了，你就简单讲个笑话"
+                ),
+            },
+        ]))
 
     def test_only_server_owned_proactive_marker_disables_conversation_lead(self):
         self.assertTrue(_is_proactive_broadcast_request([
@@ -79,6 +93,15 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         payload["input"].append({"type": "function_call_output", "output": "enabled"})
         self.assertFalse(_is_fast_discovery_turn(payload))
         payload["tools"].append({"type": "function", "name": "smart_web_search"})
+        self.assertFalse(_is_fast_discovery_turn(payload))
+
+    def test_web_search_only_first_turn_uses_fast_local_model(self):
+        payload = {
+            "tools": [{"type": "function", "name": "smart_web_search"}],
+            "input": [{"role": "user", "content": "哦"}],
+        }
+        self.assertTrue(_is_fast_discovery_turn(payload))
+        payload["input"].append({"type": "function_call_output", "output": "search evidence"})
         self.assertFalse(_is_fast_discovery_turn(payload))
 
     def test_conversation_route_followup_stays_local_without_research_tools(self):
@@ -170,6 +193,8 @@ class ModelOutputSanitizerTests(unittest.TestCase):
         )
         self.assertEqual(response["output"][0]["type"], "function_call")
         self.assertEqual(response["output"][0]["arguments"], '{"q":"ETH"}')
+        self.assertEqual(response["output"][0]["name"], "search")
+        self.assertEqual(_function_call_item({"name": "smart_web_search", "arguments": "{}"})["name"], "smart_web_search")
 
     def test_removes_complete_reasoning_blocks(self):
         self.assertEqual(clean_model_output("<think>秘密推理</think>最终回答"), "最终回答")

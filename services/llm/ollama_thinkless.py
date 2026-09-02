@@ -9,13 +9,25 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+_WEB_DIR = Path(__file__).resolve().parents[2] / "apps" / "web"
+if str(_WEB_DIR) not in sys.path:
+    sys.path.insert(0, str(_WEB_DIR))
+
+from dialogue_intent import (
+    SPOKEN_CHINESE_POLICY,
+    needs_web_search,
+    viewer_is_chinese,
+    viewer_utterance,
+)
 from memory_compaction import local_compaction as _local_compaction
 from output_harness import PublicOutputFilter, clean_public_output
 
@@ -61,6 +73,9 @@ LOCAL_TIMEOUT_REPLY = "嗯？刚才没接稳，你再说一遍嘛。"
 LOCAL_CONVERSATION_NUM_PREDICT = max(
     80, int(os.environ.get("LLM_LOCAL_CONVERSATION_NUM_PREDICT", "160"))
 )
+SIMPLE_CHAT_NUM_PREDICT = max(
+    64, int(os.environ.get("LLM_SIMPLE_CHAT_NUM_PREDICT", "96"))
+)
 LOCAL_LEAD_ENABLED = os.environ.get("LOCAL_LEAD_ENABLED", "0").strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -73,15 +88,6 @@ LOCAL_LEAD_TIMEOUT_SECONDS = max(
 LOCAL_LEAD_MAX_CHARS = max(8, int(os.environ.get("LOCAL_LEAD_MAX_CHARS", "24")))
 LEAD_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="local-lead")
 GROK_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="grok-upstream")
-_EXTERNAL_INTENT_RE = re.compile(
-    r"(?:查(?:一下|下|查)?|搜索|搜一下|联网|核实|验证|最新|实时|新闻|热搜|行情|报价|汇率|"
-    r"现在.{0,12}(?:价格|多少钱|报价|行情|天气|汇率)|"
-    r"今天.{0,10}(?:新闻|天气|价格|发生)|"
-    r"最近.{0,14}(?:上涨|下跌|涨|跌|原因)|"
-    r"为什么.{0,14}(?:上涨|下跌|涨|跌)|"
-    r"\b(?:current|latest|today'?s?)\s+(?:price|news|weather|market)\b)",
-    re.IGNORECASE,
-)
 
 
 ModelOutputSanitizer = PublicOutputFilter
@@ -389,17 +395,22 @@ def _is_public_comment_request(messages: list[dict]) -> bool:
     )
 
 
-def _is_fast_discovery_turn(payload: dict) -> bool:
-    """Use the resident model for native bounded tool selection.
+_CHAT_ONLY_TOOL_NAMES = {
+    frozenset({"request_external_capabilities"}),
+    frozenset({"smart_web_search"}),
+}
 
-    Ordinary conversation is answered in this same turn. If external evidence
-    is genuinely needed, the model calls the single progressive-disclosure
-    tool. Once a capability result exists, research returns to the stronger
-    remote model.
+
+def _is_fast_discovery_turn(payload: dict) -> bool:
+    """Use the resident model for the first chat turn.
+
+    Ordinary conversation is answered in this same turn after tools are
+    stripped. If the viewer actually asked for a live fact, the same hop
+    keeps ``smart_web_search`` and forces that one call.
     """
     tools = [tool for tool in payload.get("tools") or [] if isinstance(tool, dict)]
-    names = {str(tool.get("name") or "") for tool in tools}
-    if names != {"request_external_capabilities"}:
+    names = frozenset(str(tool.get("name") or "") for tool in tools)
+    if names not in _CHAT_ONLY_TOOL_NAMES:
         return False
     return not any(
         isinstance(item, dict) and item.get("type") == "function_call_output"
@@ -410,9 +421,8 @@ def _is_fast_discovery_turn(payload: dict) -> bool:
 def _needs_reliable_external_route(messages: list[dict]) -> bool:
     """Recognize explicit freshness/lookup requests that must not be hallucinated.
 
-    This is a routing safety net, not an answer generator. The model still
-    chooses the concrete capability and tools, then writes from their evidence.
-    Ordinary conversation never pays this second planning hop.
+    Intent is taken from the viewer's current line only. Packed memory or a
+    leftover news wrapper must not turn a joke request into a live search.
     """
     current = next(
         (
@@ -422,8 +432,7 @@ def _needs_reliable_external_route(messages: list[dict]) -> bool:
         ),
         "",
     )
-    current = current.split("\n\n【", 1)[0].strip()
-    return bool(_EXTERNAL_INTENT_RE.search(current))
+    return needs_web_search(viewer_utterance(current))
 
 
 def _is_fast_conversation_followup(payload: dict) -> bool:
@@ -884,7 +893,7 @@ def _function_call_item(call: dict) -> dict:
         "id": "fc_" + uuid.uuid4().hex[:20],
         "type": "function_call",
         "call_id": call.get("id") or "call_" + uuid.uuid4().hex[:20],
-        "name": function.get("name") or "",
+        "name": function.get("name") or call.get("name") or "",
         "arguments": arguments,
         "status": "completed",
     }
@@ -981,7 +990,8 @@ class Handler(BaseHTTPRequestHandler):
         fast_welcome = _is_room_welcome_request(messages)
         proactive_broadcast = _is_proactive_broadcast_request(messages)
         public_comment = _is_public_comment_request(messages)
-        explicit_external_request = fast_discovery and _needs_reliable_external_route(messages)
+        looking_up = _needs_reliable_external_route(messages)
+        explicit_external_request = fast_discovery and looking_up
         has_tool_evidence = any(
             isinstance(item, dict) and item.get("type") == "function_call_output"
             for item in req.get("input") or []
@@ -991,6 +1001,14 @@ class Handler(BaseHTTPRequestHandler):
             and not has_tool_evidence
             and not proactive_broadcast
             and not _is_exact_speech_request(messages)
+        )
+        simple_chat = (
+            not looking_up
+            and not has_tool_evidence
+            and not proactive_broadcast
+            and not fast_welcome
+            and not _is_exact_speech_request(messages)
+            and (public_comment or ordinary_no_tool_turn or fast_discovery)
         )
         # One request must have exactly one prose generator.  The previous
         # hybrid path exposed a local answer and then appended a second Grok
@@ -1006,30 +1024,27 @@ class Handler(BaseHTTPRequestHandler):
             or fast_external_planning
             or fast_welcome
             or ordinary_no_tool_turn
-            or (public_comment and not has_tool_evidence)
+            or public_comment
         )
         if explicit_external_request:
             current = next(
                 (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
                 "",
-            ).split("\n\n【", 1)[0].strip()
+            )
             messages = [
                 {
                     "role": "system",
                     "content": (
-                        "External routing only. Call request_external_capabilities exactly once with "
-                        "the smallest required capability set. Do not answer, estimate, mention a tool, "
-                        "or claim a result before verified tool output."
+                        "Live lookup only. Call smart_web_search exactly once with a concrete query. "
+                        "Do not answer, estimate, mention a tool, or claim a result before verified "
+                        "tool output."
                     ),
                 },
-                {"role": "user", "content": current},
+                {"role": "user", "content": viewer_utterance(current)},
             ]
-        elif fast_discovery:
-            # Tool schemas are intentionally absent for ordinary conversation.
-            # This makes the no-tool route an invariant instead of trusting a
-            # small model to obey a descriptive hint while a tool is present.
-            # The model still writes the answer; this guard only decides
-            # whether external I/O is permitted for the current user request.
+        elif simple_chat or fast_discovery:
+            # Casual chat never sees a tool schema. Intent is decided here,
+            # not by hoping a small model will ignore web search.
             tools = []
         elif fast_external_planning:
             messages.insert(
@@ -1042,6 +1057,18 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 },
             )
+        if (
+            not _is_exact_speech_request(messages)
+            and not proactive_broadcast
+            and not explicit_external_request
+            and (public_comment or viewer_is_chinese(
+                next(
+                    (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
+                    "",
+                )
+            ))
+        ):
+            messages.insert(0, {"role": "system", "content": SPOKEN_CHINESE_POLICY})
 
         if COMPACTION_MODE == "local" and _is_compaction_request(messages):
             text = local_compaction(messages)
@@ -1081,15 +1108,16 @@ class Handler(BaseHTTPRequestHandler):
                     if use_local_lead
                     else None
                 )
-                grok_request = req
+                grok_request = dict(req)
+                grok_request["instructions"] = (
+                    f"{str(req.get('instructions') or '').strip()}\n{SPOKEN_CHINESE_POLICY}"
+                ).strip()
                 if use_local_lead:
-                    grok_request = dict(req)
-                    grok_request["instructions"] = (
-                        str(req.get("instructions") or "")
-                        + "\n同一轮会先播放一句本地生成的简短接话，它已经负责接住情绪、"
+                    grok_request["instructions"] += (
+                        "\n同一轮会先播放一句本地生成的简短接话，它已经负责接住情绪、"
                         "态度和第一层直接回应。请从补充信息、解释或推进话题开始，"
                         "不要再次问候、安慰、复述问题或重复第一层结论。"
-                    ).strip()
+                    )
                 print(
                     f"[thinkless] route provider=grok model={route_model} "
                     f"effort={route_effort} stream={want_stream} "
@@ -1225,8 +1253,9 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 else:
                     local_limit = (
-                        LOCAL_CONVERSATION_NUM_PREDICT
-                        if ordinary_no_tool_turn else None
+                        SIMPLE_CHAT_NUM_PREDICT if simple_chat
+                        else LOCAL_CONVERSATION_NUM_PREDICT if ordinary_no_tool_turn
+                        else None
                     )
                     with ollama_chat(
                         model, messages, False, tools,
@@ -1312,7 +1341,7 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         def consume_stream(chat_messages: list[dict], limit: int | None) -> None:
-            nonlocal in_tok, out_tok, local_done_reason
+            nonlocal in_tok, out_tok, local_done_reason, first_delta_at
             with ollama_chat(
                 model, chat_messages, True, tools,
                 num_predict_override=limit,
@@ -1366,12 +1395,13 @@ class Handler(BaseHTTPRequestHandler):
                 tool_calls.extend(msg.get("tool_calls") or [])
             else:
                 local_limit = (
-                    LOCAL_CONVERSATION_NUM_PREDICT
-                    if ordinary_no_tool_turn else None
+                    SIMPLE_CHAT_NUM_PREDICT if simple_chat
+                    else LOCAL_CONVERSATION_NUM_PREDICT if ordinary_no_tool_turn
+                    else None
                 )
                 consume_stream(messages, local_limit)
                 raw_text = "".join(raw_parts)
-                if _should_finish_incomplete(local_done_reason, raw_text, tool_calls):
+                if (not simple_chat) and _should_finish_incomplete(local_done_reason, raw_text, tool_calls):
                     print(
                         "[thinkless] dialogue incomplete "
                         f"(reason={local_done_reason or 'stop'}); continuing",
@@ -1452,6 +1482,8 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "type": "response.function_call_arguments.done",
                     "item_id": item["id"],
+                    "call_id": item["call_id"],
+                    "name": item["name"],
                     "output_index": output_index,
                     "arguments": item["arguments"],
                 },
