@@ -83,6 +83,7 @@ fi
 
 stop_pidfile web "$RUN/web.pid"
 stop_pidfile s2s "$RUN/s2s.pid"
+stop_pidfile indextts "$RUN/indextts.pid"
 stop_pidfile fish_s2 "$RUN/fish_s2.pid"
 stop_pidfile webrtc_music "$RUN/webrtc_music.pid"
 stop_pidfile webrtc_voice "$RUN/webrtc_voice.pid"
@@ -98,6 +99,7 @@ stop_pidfile log_guard "$RUN/log_guard.pid"
 # belonging to another checkout.
 stop_matching s2s "$ROOT/apps/speech/s2s_with_avatar_tee.py"
 stop_matching s2s-legacy "$ROOT/proxy/s2s_with_avatar_tee.py"
+stop_matching indextts "$ROOT/apps/speech/indextts25_server.py"
 stop_matching fish-s2 "$ROOT/third_party/fish-speech/.venv/bin/python tools/api_server.py"
 stop_matching frontend "uvicorn server:app --app-dir $ROOT/apps/web"
 stop_matching frontend-legacy "uvicorn server:app --app-dir $ROOT/s2s/hf-realtime-voice"

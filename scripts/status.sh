@@ -42,29 +42,20 @@ if [[ "${GROK_ENABLED:-0}" == "1" ]]; then
 fi
 check "${AVTR1_PORT:-18012}" AVTR-1-renderer
 check "${AVATAR_GW_PORT:-18011}" AVTR-1-gateway
-TTS_BACKEND="${TTS_BACKEND:-fish_s2}"
-if [[ "$TTS_BACKEND" == "voxcpm_shared" || "$TTS_BACKEND" == "voxcpm" ]]; then
-  if [[ -z "${VOXCPM_API_KEY:-}" ]]; then
-    voxcpm_pid="$(pgrep -f '/opt/localization/voxcpm_server.py' | head -n 1 || true)"
-    if [[ -n "$voxcpm_pid" && -r "/proc/${voxcpm_pid}/environ" ]]; then
-      VOXCPM_API_KEY="$(
-        tr '\0' '\n' <"/proc/${voxcpm_pid}/environ" \
-          | awk -F= '/^(VOXCPM_API_KEY|LOCALIZATION_GPU_API_KEY)=/{print substr($0, index($0,"=")+1); exit}'
-      )"
-    fi
-  fi
-  voxcpm_code="$(
-    curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \
-      ${VOXCPM_API_KEY:+-H "Authorization: Bearer ${VOXCPM_API_KEY}"} \
-      "${VOXCPM_SHARED_URL:-http://127.0.0.1:10102}/healthz" || echo ERR
+TTS_BACKEND="${TTS_BACKEND:-indextts25}"
+if [[ "$TTS_BACKEND" == "indextts" || "$TTS_BACKEND" == "indextts25" ]]; then
+  tts_code="$(
+    curl -fsS --max-time 3 "${INDEXTTS_URL:-http://127.0.0.1:18782}/healthz" 2>/dev/null || true
   )"
-  if [[ "$voxcpm_code" == "200" ]]; then
-    echo "  tts        shared VoxCPM  OK"
+  if grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' <<<"$tts_code"; then
+    echo "  tts        IndexTTS-2.5  OK"
   else
-    echo "  tts        shared VoxCPM  DOWN"
+    echo "  tts        IndexTTS-2.5  DOWN"
   fi
-else
+elif [[ "$TTS_BACKEND" == "fish_s2" ]]; then
   check "${FISH_S2_PORT:-18781}" Fish-S2
+else
+  echo "  tts        $TTS_BACKEND  UNKNOWN"
 fi
 if [[ "${WEBRTC_ENABLED:-1}" != "0" ]]; then
   check "${MEDIAMTX_WHEP_PORT:-18889}" MediaMTX-WHEP

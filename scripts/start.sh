@@ -19,13 +19,19 @@ FISH_S2_PORT="${FISH_S2_PORT:-18781}"
 FISH_S2_URL="${FISH_S2_URL:-http://127.0.0.1:${FISH_S2_PORT}}"
 FISH_REPO="$ROOT/third_party/fish-speech"
 FISH_VENV="${FISH_VENV:-$FISH_REPO/.venv}"
-TTS_BACKEND="${TTS_BACKEND:-fish_s2}"
-VOXCPM_SHARED_URL="${VOXCPM_SHARED_URL:-http://127.0.0.1:10102}"
-export TTS_MODEL REF_AUDIO REF_TEXT FISH_S2_PORT FISH_S2_URL TTS_BACKEND VOXCPM_SHARED_URL
-export VOXCPM_TARGET_HANZI_PER_SEC="${VOXCPM_TARGET_HANZI_PER_SEC:-4.5}"
-export VOXCPM_PACE_FAST_THRESHOLD="${VOXCPM_PACE_FAST_THRESHOLD:-5.0}"
-export VOXCPM_MIN_ATEMPO="${VOXCPM_MIN_ATEMPO:-0.86}"
-export VOXCPM_PLAY_RESERVOIR_SECONDS="${VOXCPM_PLAY_RESERVOIR_SECONDS:-1.2}"
+TTS_BACKEND="${TTS_BACKEND:-indextts25}"
+INDEXTTS_PORT="${INDEXTTS_PORT:-18782}"
+INDEXTTS_URL="${INDEXTTS_URL:-http://127.0.0.1:${INDEXTTS_PORT}}"
+INDEXTTS_MODEL_DIR="${INDEXTTS_MODEL_DIR:-$ROOT/models/indextts2.5}"
+INDEXTTS_REPO="${INDEXTTS_REPO:-$ROOT/third_party/index-tts}"
+[[ "${INDEXTTS_MODEL_DIR}" = /* ]] || INDEXTTS_MODEL_DIR="$ROOT/$INDEXTTS_MODEL_DIR"
+[[ "${INDEXTTS_REPO}" = /* ]] || INDEXTTS_REPO="$ROOT/$INDEXTTS_REPO"
+export TTS_MODEL REF_AUDIO REF_TEXT FISH_S2_PORT FISH_S2_URL TTS_BACKEND
+export INDEXTTS_PORT INDEXTTS_URL INDEXTTS_MODEL_DIR INDEXTTS_REPO
+export INDEXTTS_USE_BF16="${INDEXTTS_USE_BF16:-1}"
+export INDEXTTS_USE_QWEN_EMO="${INDEXTTS_USE_QWEN_EMO:-1}"
+export INDEXTTS_PLAY_RESERVOIR_SECONDS="${INDEXTTS_PLAY_RESERVOIR_SECONDS:-0.8}"
+export INDEXTTS_FOLLOWUP_RESERVOIR_SECONDS="${INDEXTTS_FOLLOWUP_RESERVOIR_SECONDS:-0.16}"
 export AVATAR_TEE_SEGMENT_GAP_MS="${AVATAR_TEE_SEGMENT_GAP_MS:-14000}"
 export PYTHONPATH="$ROOT/apps/speech:$ROOT/services/tts:$ROOT/services/avatar:$ROOT/services/llm${PYTHONPATH:+:$PYTHONPATH}"
 SENSEVOICE_MODEL="${SENSEVOICE_MODEL:-models/sensevoice/SenseVoiceSmall}"
@@ -76,6 +82,20 @@ wait_port() {
   die "$label did not listen on :$port"
 }
 
+wait_healthz() {
+  local url="$1" label="$2" tries="${3:-150}"
+  local i body
+  for i in $(seq 1 "$tries"); do
+    body="$(curl -fsS --max-time 2 "$url" 2>/dev/null || true)"
+    if grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' <<<"$body"; then
+      say "$label ready at $url"
+      return 0
+    fi
+    sleep 2
+  done
+  die "$label did not become ready at $url"
+}
+
 port_listening() {
   ss -ltn "sport = :$1" 2>/dev/null | grep -q LISTEN
 }
@@ -119,11 +139,15 @@ stop_bg() {
 
 [[ -x "$S2S_VENV/bin/speech-to-speech" ]] || die "speech-to-speech is not installed；先运行 ./install.sh"
 [[ -d "$FRONTEND" ]] || die "frontend is missing"
-if [[ "$TTS_BACKEND" == "voxcpm_shared" || "$TTS_BACKEND" == "voxcpm" ]]; then
-  say "TTS backend: shared VoxCPM at $VOXCPM_SHARED_URL (no second model load)"
-else
+if [[ "$TTS_BACKEND" == "indextts" || "$TTS_BACKEND" == "indextts25" ]]; then
+  say "TTS backend: IndexTTS-2.5 at $INDEXTTS_URL"
+  [[ -f "$INDEXTTS_MODEL_DIR/config.yaml" ]] || die "IndexTTS weights missing at $INDEXTTS_MODEL_DIR"
+  [[ -d "$INDEXTTS_REPO/indextts" ]] || die "IndexTTS source missing at $INDEXTTS_REPO"
+elif [[ "$TTS_BACKEND" == "fish_s2" ]]; then
   [[ -s "$TTS_MODEL/codec.pth" ]] || die "Fish S2 Pro weight is missing at $TTS_MODEL"
   [[ -x "$FISH_VENV/bin/python" ]] || die "Fish S2 venv is missing at $FISH_VENV"
+else
+  die "unsupported TTS_BACKEND=$TTS_BACKEND (use indextts25 or fish_s2)"
 fi
 SOURCE_REF="$ROOT/assets/ref16k.wav"
 if [[ ! -f "$REF_AUDIO" && -f "$SOURCE_REF" ]]; then
@@ -588,28 +612,23 @@ if [[ "$WEBRTC_ENABLED" != "0" ]]; then
     || die "WebRTC publishers are not ready; see $LOG/webrtc_*.log"
 fi
 
-# 4) TTS worker. Shared VoxCPM reuses the localization process already in VRAM.
+# 4) TTS worker. IndexTTS-2.5 is a separate process on the s2s venv.
 export FISH_S2_URL FISH_S2_PORT
-if [[ "$TTS_BACKEND" == "voxcpm_shared" || "$TTS_BACKEND" == "voxcpm" ]]; then
-  if [[ -z "${VOXCPM_API_KEY:-}" ]]; then
-    voxcpm_pid="$(pgrep -f '/opt/localization/voxcpm_server.py' | head -n 1 || true)"
-    if [[ -n "$voxcpm_pid" && -r "/proc/${voxcpm_pid}/environ" ]]; then
-      VOXCPM_API_KEY="$(
-        tr '\0' '\n' <"/proc/${voxcpm_pid}/environ" \
-          | awk -F= '/^(VOXCPM_API_KEY|LOCALIZATION_GPU_API_KEY)=/{print substr($0, index($0,"=")+1); exit}'
-      )"
-    fi
-  fi
-  [[ -n "${VOXCPM_API_KEY:-}" ]] || die "shared VoxCPM needs VOXCPM_API_KEY (or a running localization worker)"
-  export VOXCPM_API_KEY
-  voxcpm_code="$(
-    curl -sS -o /tmp/voxcpm_healthz -w '%{http_code}' --max-time 5 \
-      -H "Authorization: Bearer ${VOXCPM_API_KEY}" \
-      "${VOXCPM_SHARED_URL}/healthz" || echo ERR
-  )"
-  [[ "$voxcpm_code" == "200" ]] || die "shared VoxCPM is not ready at ${VOXCPM_SHARED_URL} (HTTP ${voxcpm_code})"
-  say "shared VoxCPM ready; Fish S2 will not be started"
-else
+if [[ "$TTS_BACKEND" == "indextts" || "$TTS_BACKEND" == "indextts25" ]]; then
+  start_bg indextts "$RUN/indextts.pid" "$LOG/indextts.log" \
+    env INDEXTTS_PORT="$INDEXTTS_PORT" \
+        INDEXTTS_MODEL_DIR="$INDEXTTS_MODEL_DIR" \
+        INDEXTTS_REPO="$INDEXTTS_REPO" \
+        INDEXTTS_USE_BF16="$INDEXTTS_USE_BF16" \
+        INDEXTTS_USE_QWEN_EMO="$INDEXTTS_USE_QWEN_EMO" \
+        INDEXTTS_WARMUP_REF="${INDEXTTS_WARMUP_REF:-$ROOT/data/voices/system-default.wav}" \
+        HF_HOME="${HF_HOME:-$ROOT/.cache/huggingface}" \
+        HF_HUB_CACHE="$INDEXTTS_MODEL_DIR/hf_cache" \
+        PYTHONPATH="$INDEXTTS_REPO${PYTHONPATH:+:$PYTHONPATH}" \
+    "$S2S_VENV/bin/python" "$ROOT/apps/speech/indextts25_server.py"
+  wait_port "$INDEXTTS_PORT" "IndexTTS-2.5" 90
+  wait_healthz "$INDEXTTS_URL/healthz" "IndexTTS-2.5" 150
+elif [[ "$TTS_BACKEND" == "fish_s2" ]]; then
   start_bg fish_s2 "$RUN/fish_s2.pid" "$LOG/fish_s2.log" \
     bash -lc "cd \"$FISH_REPO\" && exec env HF_HUB_DISABLE_TELEMETRY=1 \
       \"$FISH_VENV/bin/python\" tools/api_server.py \
@@ -618,6 +637,8 @@ else
       --listen \"127.0.0.1:${FISH_S2_PORT}\" \
       --half --compile --workers 1"
   wait_port "$FISH_S2_PORT" "Fish S2 Pro" 180
+else
+  die "unsupported TTS_BACKEND=$TTS_BACKEND"
 fi
 
 # 5) speech-to-speech
@@ -675,7 +696,11 @@ if alive "$RUN/s2s.pid"; then
     elif ! grep -Fxq "TTS_BACKEND=${TTS_BACKEND}" <<<"$s2s_env"; then
       say "s2s is still on the old TTS worker; restarting"
       stop_bg s2s "$RUN/s2s.pid"
-    elif [[ "$TTS_BACKEND" != "voxcpm_shared" && "$TTS_BACKEND" != "voxcpm" ]] \
+    elif [[ "$TTS_BACKEND" == "indextts" || "$TTS_BACKEND" == "indextts25" ]] \
+      && ! grep -Fxq "INDEXTTS_URL=${INDEXTTS_URL}" <<<"$s2s_env"; then
+      say "s2s is still on the old TTS worker; restarting"
+      stop_bg s2s "$RUN/s2s.pid"
+    elif [[ "$TTS_BACKEND" == "fish_s2" ]] \
       && ! grep -Fxq "FISH_S2_URL=${FISH_S2_URL}" <<<"$s2s_env"; then
       say "s2s is still on the old TTS worker; restarting"
       stop_bg s2s "$RUN/s2s.pid"
@@ -688,12 +713,10 @@ start_bg s2s "$RUN/s2s.pid" "$LOG/s2s.log" \
       TTS_BACKEND="$TTS_BACKEND" \
       FISH_S2_URL="$FISH_S2_URL" \
       FISH_S2_PORT="$FISH_S2_PORT" \
-      VOXCPM_SHARED_URL="$VOXCPM_SHARED_URL" \
-      VOXCPM_API_KEY="${VOXCPM_API_KEY:-}" \
-      VOXCPM_TARGET_HANZI_PER_SEC="${VOXCPM_TARGET_HANZI_PER_SEC:-4.5}" \
-      VOXCPM_PACE_FAST_THRESHOLD="${VOXCPM_PACE_FAST_THRESHOLD:-5.0}" \
-      VOXCPM_MIN_ATEMPO="${VOXCPM_MIN_ATEMPO:-0.86}" \
-      VOXCPM_PLAY_RESERVOIR_SECONDS="${VOXCPM_PLAY_RESERVOIR_SECONDS:-1.2}" \
+      INDEXTTS_URL="$INDEXTTS_URL" \
+      INDEXTTS_PORT="$INDEXTTS_PORT" \
+      INDEXTTS_PLAY_RESERVOIR_SECONDS="$INDEXTTS_PLAY_RESERVOIR_SECONDS" \
+      INDEXTTS_FOLLOWUP_RESERVOIR_SECONDS="$INDEXTTS_FOLLOWUP_RESERVOIR_SECONDS" \
   "$S2S_VENV/bin/python" "$ROOT/apps/speech/s2s_with_avatar_tee.py" \
     --device cuda \
     --mode realtime \
