@@ -9,10 +9,22 @@ WEB_SEARCH_INTENT_RE = re.compile(
     r"现在.{0,12}(?:价格|多少钱|报价|行情|天气|汇率)|"
     r"今天.{0,10}(?:新闻|天气|价格|发生)|"
     r"(?:最新|实时).{0,10}(?:新闻|消息|价格|行情|进展)|"
+    r"看看.{0,8}(?:新闻|资讯|热搜|头条)|"
+    r"(?:有啥|有什么|来[条个]|讲[讲个]|播)(?:点|个|条)?(?:新闻|资讯|热搜|头条)|"
     r"最近.{0,14}(?:上涨|下跌|涨|跌|原因)|"
     r"为什么.{0,14}(?:上涨|下跌|涨|跌)|"
     r"(?:网上|互联网).{0,6}(?:查|搜)|"
     r"\b(?:current|latest|today'?s?)\s+(?:price|news|weather|market)\b)",
+    re.IGNORECASE,
+)
+NEWS_REQUEST_RE = re.compile(
+    r"(?:看看|讲讲|说说|播|来|有啥|有什么|最新|今天|今日|热搜).{0,10}(?:新闻|资讯|热搜|头条)|"
+    r"(?:新闻|资讯|热搜|头条).{0,6}(?:看看|讲讲|说说)",
+    re.IGNORECASE,
+)
+SEARCH_FILLER_RE = re.compile(
+    r"正在联网|正在查询|查找相关资料|核对一下来源|核对完就告诉|"
+    r"先帮你查|我先帮你查|这就去查|再核对|核对清楚|同时查几个来源",
     re.IGNORECASE,
 )
 NEWS_FOLLOWUP_RE = re.compile(
@@ -34,6 +46,10 @@ SPOKEN_CHINESE_POLICY = (
     "禁止英文句子、禁止Markdown、禁止井号标题和列表。"
     "英文资料只可用来理解，说出口必须是中文。"
 )
+LOOKED_UP_EVIDENCE_POLICY = (
+    "网上资料已经查到了。只根据【已查到的资料】用两三句中文口语讲最值得听的一两件事。"
+    "不要说正在查、正在联网、稍等或核对来源，不要编造资料里没有的事，不要念网址。"
+)
 _HAN_RE = re.compile(r"[\u3400-\u9fff]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 
@@ -53,7 +69,18 @@ def viewer_utterance(text: str) -> str:
 
 def needs_web_search(text: str) -> bool:
     """True only when the current utterance asks for a live internet fact."""
-    return bool(WEB_SEARCH_INTENT_RE.search(viewer_utterance(text)))
+    utterance = viewer_utterance(text)
+    return bool(WEB_SEARCH_INTENT_RE.search(utterance) or NEWS_REQUEST_RE.search(utterance))
+
+
+def is_news_request(text: str) -> bool:
+    """True when the viewer asked for headlines rather than a priced fact."""
+    return bool(NEWS_REQUEST_RE.search(viewer_utterance(text)))
+
+
+def looks_like_search_filler(text: str) -> bool:
+    """True when the model spoke a lookup promise instead of a fact."""
+    return bool(SEARCH_FILLER_RE.search(str(text or "").strip()))
 
 
 def wants_news_context(text: str) -> bool:

@@ -6,7 +6,9 @@ FRONTEND_DIR = Path(__file__).resolve().parents[1] / "apps" / "web"
 sys.path.insert(0, str(FRONTEND_DIR))
 
 from dialogue_intent import (  # noqa: E402
+    is_news_request,
     looks_like_english_answer,
+    looks_like_search_filler,
     needs_web_search,
     viewer_utterance,
     wants_news_context,
@@ -24,6 +26,16 @@ class DialogueIntentTests(unittest.TestCase):
         self.assertTrue(needs_web_search("小米最新的汽车是什么，多少钱"))
         self.assertTrue(needs_web_search("今天有什么新闻"))
         self.assertTrue(needs_web_search("你查一下今天有啥好玩的新闻不"))
+        self.assertTrue(needs_web_search("看看最新新闻"))
+        self.assertTrue(needs_web_search("看看新闻"))
+        self.assertTrue(is_news_request("看看最新新闻"))
+        self.assertTrue(is_news_request("@小麻 看看最新新闻"))
+        self.assertFalse(is_news_request("别说新闻了，你就简单讲个笑话"))
+        self.assertFalse(is_news_request("帮我查一下现在比特币多少钱"))
+
+    def test_search_filler_is_not_an_answer(self):
+        self.assertTrue(looks_like_search_filler("我正在联网查找相关资料，再核对一下来源呀。"))
+        self.assertFalse(looks_like_search_filler("今天有条挺好玩的，一只海豹上了路。"))
 
     def test_packed_memory_does_not_steal_the_current_line(self):
         packed = (
