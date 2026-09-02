@@ -154,14 +154,18 @@ class IndexTTSClient:
                         files=files,
                         timeout=httpx.Timeout(max(5.0, remaining), connect=5.0),
                     ) as response:
-                        if response.status_code == 429:
+                        if response.status_code in {429, 503}:
                             retry_after = response.headers.get("Retry-After", "2")
                             try:
                                 wait_s = max(0.2, float(retry_after))
                             except ValueError:
                                 wait_s = 2.0
-                            last_error = "worker busy"
-                            LOG.info("IndexTTS busy; waiting %.1fs", wait_s)
+                            last_error = (
+                                "worker still loading"
+                                if response.status_code == 503
+                                else "worker busy"
+                            )
+                            LOG.info("IndexTTS %s; waiting %.1fs", last_error, wait_s)
                             time.sleep(min(wait_s, max(0.2, remaining)))
                             continue
                         if response.status_code >= 400:

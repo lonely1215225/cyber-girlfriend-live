@@ -79,6 +79,17 @@ class IndexTTSClientTests(unittest.TestCase):
         self.assertEqual(stream.call_count, 2)
         self.assertTrue(chunks)
 
+    def test_loading_worker_retries(self) -> None:
+        pcm = _pcm16_bytes(np.linspace(-0.2, 0.2, 4096, dtype=np.float32))
+        client = IndexTTSClient(base_url="http://127.0.0.1:18782", timeout_s=5)
+        client._ref_path = "/tmp/ref.wav"
+        loading = _FakeResponse(503, b"", {"Retry-After": "0.2"})
+        ok = _FakeResponse(200, pcm)
+        with patch("indextts_client.httpx.stream", side_effect=[loading, ok]) as stream:
+            chunks = list(client.stream_clone("嗯，我在。", live=True, followup=True))
+        self.assertEqual(stream.call_count, 2)
+        self.assertTrue(chunks)
+
     def test_pcm16_roundtrip(self) -> None:
         source = np.array([0.0, 0.5, -0.5], dtype=np.float32)
         recovered = pcm16_to_float(_pcm16_bytes(source))
