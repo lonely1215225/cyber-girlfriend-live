@@ -622,6 +622,27 @@ class MentionReplyWorker:
                         progress_spoken = True
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("lookup wait speech failed: %s", exc)
+                if wants_search and prefetch_task is not None and not prefetched:
+                    fail_line = "网这会儿有点慢，这条我没翻到。你过一会儿再叫我看一次。"
+                    await self.room.publish_bot_reply(
+                        message_id=f"{speech_base_id}:lookup",
+                        text=fail_line,
+                        reply_to=reply_quote,
+                    )
+                    try:
+                        await self._speak_exact(ws, fail_line)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("lookup failure speech failed: %s", exc)
+                    if job is not None:
+                        job.update(
+                            phase="failed",
+                            status_text=fail_line,
+                            final_text=fail_line,
+                            terminal=True,
+                            error="lookup_unavailable",
+                        )
+                        await self.room.publish_agent_job(job, reply_to=reply_quote)
+                    return
                 web_tool = (
                     self.mcp_gateway.dialogue_web_tool()
                     if wants_search and not prefetched and self.mcp_gateway.enabled

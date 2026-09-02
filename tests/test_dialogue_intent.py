@@ -29,8 +29,14 @@ class DialogueIntentTests(unittest.TestCase):
         self.assertTrue(needs_web_search("你查一下今天有啥好玩的新闻不"))
         self.assertTrue(needs_web_search("看看最新新闻"))
         self.assertTrue(needs_web_search("看看新闻"))
+        self.assertTrue(needs_web_search("@小麻 看看最新有什么新闻说来听听"))
         self.assertTrue(is_news_request("看看最新新闻"))
         self.assertTrue(is_news_request("@小麻 看看最新新闻"))
+        self.assertTrue(is_news_request("@小麻 看看最新有什么新闻说来听听"))
+        self.assertEqual(
+            lookup_wait_line("@小麻 看看最新有什么新闻说来听听"),
+            "我翻一下今天的，马上说。",
+        )
         self.assertFalse(is_news_request("别说新闻了，你就简单讲个笑话"))
         self.assertFalse(is_news_request("帮我查一下现在比特币多少钱"))
 
