@@ -51,6 +51,10 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertEqual(split_streaming_sentences("没干嘛。"), ["没干嘛。"])
         self.assertEqual(split_streaming_sentences("你好呀。你今天"), ["你好呀。你今天"])
         self.assertEqual(
+            split_streaming_sentences("哟，劲儿还没使完呢？再给你整俩够疯的：后面"),
+            ["哟，劲儿还没使完呢？", "再给你整俩够疯的：后面"],
+        )
+        self.assertEqual(
             split_streaming_sentences("没干嘛。就……等人，比如现在就在等你说话呢。"),
             ["没干嘛。就……等人，比如现在就在等你说话呢。", ""],
         )
@@ -73,7 +77,7 @@ class EmotionAwareTTSTests(unittest.TestCase):
         self.assertFalse(is_leading_interjection("小麻呗。"))
         self.assertEqual(
             split_streaming_sentences("哎呦喂……你还真来了。"),
-            ["哎呦喂……你还真来了。"],
+            ["哎呦喂……你还真来了。", ""],
         )
         self.assertEqual(
             split_streaming_sentences("喂，你先听我说。"),
@@ -85,7 +89,7 @@ class EmotionAwareTTSTests(unittest.TestCase):
         )
         self.assertEqual(
             split_streaming_sentences("嘿嘿。叫我小麻就行。"),
-            ["嘿嘿。叫我小麻就行。"],
+            ["嘿嘿。叫我小麻就行。", ""],
         )
         self.assertEqual(prepare_tts_text("喂，", "cheerful"), "喂，")
 

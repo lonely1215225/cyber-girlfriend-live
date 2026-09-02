@@ -21,11 +21,22 @@ NATIVE_SR = 22050
 
 
 def play_reservoir_seconds(*, followup: bool = False) -> float:
-    first = max(0.4, float(os.environ.get("INDEXTTS_PLAY_RESERVOIR_SECONDS", "0.8")))
+    first = max(0.24, float(os.environ.get("INDEXTTS_PLAY_RESERVOIR_SECONDS", "0.32")))
     if not followup:
         return first
     later = float(os.environ.get("INDEXTTS_FOLLOWUP_RESERVOIR_SECONDS", "0.16"))
     return max(0.04, min(first, later))
+
+
+def live_infer_options() -> dict[str, int]:
+    """Smaller first segments and one beam so the first packet is not the whole clip."""
+
+    return {
+        "max_text_tokens_per_segment": max(
+            12, int(os.environ.get("INDEXTTS_MAX_TEXT_TOKENS_PER_SEGMENT", "28"))
+        ),
+        "num_beams": max(1, min(3, int(os.environ.get("INDEXTTS_NUM_BEAMS", "1")))),
+    }
 
 
 def play_reservoir_samples(sample_rate: int, *, followup: bool = False) -> int:
@@ -122,6 +133,7 @@ class IndexTTSClient:
             return
         if not self._ref_path:
             raise RuntimeError("IndexTTS reference audio is not loaded")
+        infer = live_infer_options()
         fields: dict[str, str] = {
             "text": spoken,
             "lang": lang,
@@ -132,6 +144,8 @@ class IndexTTSClient:
             "emo_text": str(emo_text or ""),
             "duration_factor": str(duration_factor),
             "interval_silence": "0",
+            "max_text_tokens_per_segment": str(infer["max_text_tokens_per_segment"]),
+            "num_beams": str(infer["num_beams"]),
         }
         files: dict[str, Any] | None = None
         file_handle = None

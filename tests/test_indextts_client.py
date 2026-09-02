@@ -11,8 +11,10 @@ add_service_paths()
 
 from indextts_client import (  # noqa: E402
     IndexTTSClient,
+    live_infer_options,
     live_tts_options,
     pcm16_to_float,
+    play_reservoir_seconds,
 )
 from playback_policy import begin_live_tts_turn, set_batch_tts  # noqa: E402
 
@@ -42,6 +44,17 @@ class IndexTTSClientTests(unittest.TestCase):
     def setUp(self) -> None:
         set_batch_tts(False)
         begin_live_tts_turn()
+
+    def test_live_infer_uses_one_beam_and_short_segments(self) -> None:
+        with patch.dict("os.environ", {
+            "INDEXTTS_PLAY_RESERVOIR_SECONDS": "0.32",
+            "INDEXTTS_NUM_BEAMS": "1",
+            "INDEXTTS_MAX_TEXT_TOKENS_PER_SEGMENT": "28",
+        }):
+            options = live_infer_options()
+            self.assertEqual(options["num_beams"], 1)
+            self.assertEqual(options["max_text_tokens_per_segment"], 28)
+            self.assertEqual(play_reservoir_seconds(followup=False), 0.32)
 
     def test_live_options_mark_followup_after_first_sentence(self) -> None:
         begin_live_tts_turn()

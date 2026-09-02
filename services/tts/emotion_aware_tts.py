@@ -65,7 +65,7 @@ _INTERJECTION_CORE = re.compile(
     r"^[嘿哎呦哟嗯喂哈啊哦额唔唉嗨哼诶欸哇]{1,4}[，。！？!?…\s]*$"
 )
 _CLOSING_QUOTE = frozenset("”」』\"'")
-_MIN_SENTENCE_FLUSH_CHARS = 12
+_MIN_SENTENCE_FLUSH_CHARS = 8
 # After the first audible clip, keep cloning longer groups. A 4s follow-up
 # plus a 7s IndexTTS generate is the gap listeners hear as 卡.
 _MIN_FOLLOWUP_FLUSH_CHARS = 28

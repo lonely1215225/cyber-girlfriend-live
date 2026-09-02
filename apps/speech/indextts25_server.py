@@ -299,6 +299,8 @@ def _iter_pcm(
     duration_factor: float,
     emo_audio: str | None,
     interval_silence: int,
+    max_text_tokens_per_segment: int,
+    num_beams: int,
 ) -> Iterator[bytes]:
     if _engine is None:
         raise RuntimeError("IndexTTS is not loaded")
@@ -314,6 +316,8 @@ def _iter_pcm(
         "verbose": False,
         "stream_return": True,
         "duration_factor": duration_factor,
+        "max_text_tokens_per_segment": max_text_tokens_per_segment,
+        "num_beams": num_beams,
     }
     if emo_vector:
         kwargs["emo_vector"] = emo_vector
@@ -371,6 +375,8 @@ async def stream_speech(
     emo_text: str = Form(""),
     duration_factor: str = Form("1.0"),
     interval_silence: str = Form("0"),
+    max_text_tokens_per_segment: str = Form("28"),
+    num_beams: str = Form("1"),
     reference: UploadFile | None = File(None),
     emo_audio: UploadFile | None = File(None),
 ):
@@ -394,6 +400,8 @@ async def stream_speech(
         alpha = min(1.0, max(0.0, float(emo_alpha)))
         pace = min(2.0, max(0.5, float(duration_factor)))
         silence = max(0, int(float(interval_silence)))
+        segment_tokens = max(12, min(120, int(float(max_text_tokens_per_segment))))
+        beams = max(1, min(3, int(float(num_beams))))
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     emotion_path = None
@@ -423,6 +431,8 @@ async def stream_speech(
                 duration_factor=pace,
                 emo_audio=emotion_path,
                 interval_silence=silence,
+                max_text_tokens_per_segment=segment_tokens,
+                num_beams=beams,
             )
         finally:
             _lock.release()
