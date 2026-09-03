@@ -12,6 +12,7 @@ from dialogue_intent import (  # noqa: E402
     looks_like_english_answer,
     looks_like_search_filler,
     needs_web_search,
+    news_search_query,
     viewer_utterance,
     wants_news_context,
 )
@@ -38,16 +39,27 @@ class DialogueIntentTests(unittest.TestCase):
         self.assertTrue(needs_web_search("看看新闻"))
         self.assertTrue(needs_web_search("@小麻 看看最新有什么新闻说来听听"))
         self.assertTrue(needs_web_search("@小麻 看看有啥新闻不"))
+        self.assertTrue(needs_web_search("有新闻吗"))
+        self.assertTrue(needs_web_search("说个新闻"))
+        self.assertTrue(needs_web_search("新闻呢"))
         self.assertTrue(is_news_request("看看最新新闻"))
         self.assertTrue(is_news_request("@小麻 看看最新新闻"))
         self.assertTrue(is_news_request("@小麻 看看最新有什么新闻说来听听"))
         self.assertTrue(is_news_request("@小麻 看看有啥新闻不"))
+        self.assertTrue(is_news_request("有新闻吗"))
+        self.assertTrue(is_news_request("说个新闻"))
+        self.assertTrue(is_news_request("新闻呢"))
         self.assertEqual(
             lookup_wait_line("@小麻 看看最新有什么新闻说来听听"),
             "我翻一下今天的，马上说。",
         )
         self.assertFalse(is_news_request("别说新闻了，你就简单讲个笑话"))
         self.assertFalse(is_news_request("帮我查一下现在比特币多少钱"))
+        self.assertFalse(needs_web_search("没有新闻就算了"))
+        self.assertEqual(news_search_query("看看有啥新闻不"), "今天国内外热点新闻")
+        self.assertEqual(news_search_query("有新闻吗"), "今天国内外热点新闻")
+        self.assertEqual(news_search_query("看看特斯拉有啥新闻"), "看看特斯拉有啥新闻")
+        self.assertEqual(news_search_query("帮我查一下现在比特币多少钱"), "帮我查一下现在比特币多少钱")
 
     def test_search_filler_is_not_an_answer(self):
         self.assertTrue(looks_like_search_filler("我正在联网查找相关资料，再核对一下来源呀。"))

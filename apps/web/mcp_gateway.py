@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from dialogue_intent import is_news_request
+from dialogue_intent import is_news_request, news_search_query
 from rss_news import RssNewsAggregator
 from smart_search import SmartSearchGateway, format_hits_for_speech
 
@@ -485,12 +485,13 @@ class McpGateway:
         if not query:
             raise ValueError("search query is empty")
         news = is_news_request(query) or bool(re.search(r"新闻|热搜|资讯|头条", query))
+        lookup_query = news_search_query(query) or query
         errors: list[str] = []
         if self.smart_search.search_enabled:
             try:
                 topic = "news" if news else "general"
                 raw = await self.smart_search.search(
-                    query, topic=topic, limit=5, ignore_circuit=True
+                    lookup_query, topic=topic, limit=5, ignore_circuit=True
                 )
                 return self._spoken_search_output(raw)
             except Exception as exc:

@@ -126,6 +126,7 @@ class LocalRssToolTests(unittest.IsolatedAsyncioTestCase):
         try:
             news = await gateway.prefetch_spoken_evidence("看看最新有什么新闻说来听听")
             self.assertIn("某国发布了新政策", news)
+            self.assertEqual(gateway.smart_search.search.await_args.args[0], "今天国内外热点新闻")
             self.assertEqual(gateway.smart_search.search.await_args.kwargs["topic"], "news")
             self.assertTrue(gateway.smart_search.search.await_args.kwargs["ignore_circuit"])
             gateway.rss_news.spoken_brief.assert_not_awaited()

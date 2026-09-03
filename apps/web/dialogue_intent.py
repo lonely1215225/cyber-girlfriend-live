@@ -10,8 +10,10 @@ WEB_SEARCH_INTENT_RE = re.compile(
     r"今天.{0,10}(?:新闻|天气|价格|发生)|"
     r"(?:最新|实时).{0,10}(?:新闻|消息|价格|行情|进展)|"
     r"看看.{0,16}(?:新闻|资讯|热搜|头条)|"
-    r"(?:有啥|有什么|来[条个]|讲[讲个]|播)(?:点|个|条)?(?:新闻|资讯|热搜|头条)|"
-    r"(?:新闻|资讯|热搜|头条).{0,10}(?:说来听听|讲讲|说说)|"
+    r"(?:有没有|有啥|有什么|还有)(?:啥|什么)?(?:新闻|资讯|热搜|头条)|"
+    r"(?<!没)有(?:新闻|资讯|热搜|头条)(?:吗|不|呢|啊)?|"
+    r"(?:来[点条个]|讲[讲个点条]|说[说个点条]|播)(?:点|个|条)?(?:新闻|资讯|热搜|头条)|"
+    r"(?:新闻|资讯|热搜|头条).{0,10}(?:说来听听|讲讲|说说|看看|吗|呢|不)|"
     r"最近.{0,14}(?:上涨|下跌|涨|跌|原因)|"
     r"为什么.{0,14}(?:上涨|下跌|涨|跌)|"
     r"(?:网上|互联网).{0,6}(?:查|搜)|"
@@ -19,9 +21,17 @@ WEB_SEARCH_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 NEWS_REQUEST_RE = re.compile(
-    r"(?:看看|讲讲|说说|播|来|有啥|有什么|最新|今天|今日|热搜).{0,16}(?:新闻|资讯|热搜|头条)|"
-    r"(?:新闻|资讯|热搜|头条).{0,10}(?:看看|讲讲|说说|说来听听)",
+    r"(?:看看|讲讲|说说|说个|说点|讲个|来|来点|来条|有没有|有啥|有什么|还有|最新|今天|今日|热搜).{0,16}(?:新闻|资讯|热搜|头条)|"
+    r"(?<!没)有(?:新闻|资讯|热搜|头条)(?:吗|不|呢|啊)?|"
+    r"(?:新闻|资讯|热搜|头条).{0,10}(?:看看|讲讲|说说|说来听听|吗|呢|不)",
     re.IGNORECASE,
+)
+_NEWS_ASK_NOISE_RE = re.compile(
+    r"@小麻|[？?！!。,.，、~～]|帮我|给我|你|再|先|"
+    r"看看|看一下|看下|讲讲|讲个|讲点|讲条|说说|说个|说点|说条|"
+    r"来点|来条|来个|来则|有没有啥|有没有|有啥|有什么|还有|"
+    r"一下|一点|一条|一个|最新|今天|今日|现在|的|点|个|条|则|下|"
+    r"新闻|资讯|热搜|头条|不|吗|呢|啊|呀|吧|哇|说来听听|来听听|听听|播报|播一下"
 )
 SEARCH_FILLER_RE = re.compile(
     r"正在联网|正在查询|查找相关资料|核对一下来源|核对完就告诉|"
@@ -81,6 +91,20 @@ def needs_web_search(text: str) -> bool:
 def is_news_request(text: str) -> bool:
     """True when the viewer asked for headlines rather than a priced fact."""
     return bool(NEWS_REQUEST_RE.search(viewer_utterance(text)))
+
+
+def news_search_query(text: str) -> str:
+    """Turn a spoken news ask into a query a search API can actually use."""
+    utterance = viewer_utterance(text)
+    if not utterance:
+        return ""
+    if not is_news_request(utterance):
+        return utterance
+    leftover = _NEWS_ASK_NOISE_RE.sub("", utterance)
+    leftover = re.sub(r"\s+", "", leftover)
+    if len(leftover) < 2:
+        return "今天国内外热点新闻"
+    return utterance
 
 
 def looks_like_search_filler(text: str) -> bool:
