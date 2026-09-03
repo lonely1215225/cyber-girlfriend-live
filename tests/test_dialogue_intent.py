@@ -26,41 +26,53 @@ class DialogueIntentTests(unittest.TestCase):
         self.assertNotIn("四十个字", SIMPLE_CHAT_POLICY)
 
     def test_casual_chat_is_not_a_live_lookup(self):
-        for text in ("哦", "什么玩意", "别说别的了，你就简单讲个笑话", "想我没？"):
+        for text in (
+            "哦", "什么玩意", "别说别的了，你就简单讲个笑话", "想我没？",
+            "讲个笑话", "西瓜甜不甜", "你咋了", "今天心情不好",
+        ):
             self.assertFalse(needs_web_search(text), text)
             self.assertFalse(wants_news_context(text), text)
 
     def test_explicit_lookup_needs_search(self):
+        news_asks = (
+            "今天有什么新闻", "你查一下今天有啥好玩的新闻不", "看看最新新闻",
+            "看看新闻", "@小麻 看看最新有什么新闻说来听听", "@小麻 看看有啥新闻不",
+            "有新闻吗", "说个新闻", "新闻呢", "热搜", "看看热搜", "今日热榜",
+            "来点瓜", "吃瓜", "有啥瓜", "今天啥瓜", "网上都在说啥",
+            "今天发生了什么", "最近出啥事了", "外面出什么事了",
+            "想听今天的资讯", "给我讲讲时事", "刷刷早报",
+        )
+        for text in news_asks:
+            self.assertTrue(needs_web_search(text), text)
+            self.assertTrue(is_news_request(text), text)
         self.assertTrue(needs_web_search("帮我查一下现在比特币多少钱"))
         self.assertTrue(needs_web_search("小米最新的汽车是什么，多少钱"))
-        self.assertTrue(needs_web_search("今天有什么新闻"))
-        self.assertTrue(needs_web_search("你查一下今天有啥好玩的新闻不"))
-        self.assertTrue(needs_web_search("看看最新新闻"))
-        self.assertTrue(needs_web_search("看看新闻"))
-        self.assertTrue(needs_web_search("@小麻 看看最新有什么新闻说来听听"))
-        self.assertTrue(needs_web_search("@小麻 看看有啥新闻不"))
-        self.assertTrue(needs_web_search("有新闻吗"))
-        self.assertTrue(needs_web_search("说个新闻"))
-        self.assertTrue(needs_web_search("新闻呢"))
+        self.assertTrue(needs_web_search("比特币涨了没"))
+        self.assertTrue(needs_web_search("今天天气怎么样"))
+        self.assertTrue(needs_web_search("会下雨吗"))
+        self.assertTrue(needs_web_search("百度一下"))
         self.assertTrue(is_news_request("看看最新新闻"))
         self.assertTrue(is_news_request("@小麻 看看最新新闻"))
         self.assertTrue(is_news_request("@小麻 看看最新有什么新闻说来听听"))
         self.assertTrue(is_news_request("@小麻 看看有啥新闻不"))
-        self.assertTrue(is_news_request("有新闻吗"))
-        self.assertTrue(is_news_request("说个新闻"))
-        self.assertTrue(is_news_request("新闻呢"))
         self.assertEqual(
             lookup_wait_line("@小麻 看看最新有什么新闻说来听听"),
             "我翻一下今天的，马上说。",
         )
+        self.assertEqual(lookup_wait_line("来点瓜"), "我翻一下今天的，马上说。")
+        self.assertEqual(lookup_wait_line("比特币涨了没"), "我去对一下最新的数。")
         self.assertFalse(is_news_request("别说新闻了，你就简单讲个笑话"))
+        self.assertFalse(is_news_request("不想听新闻"))
         self.assertFalse(is_news_request("帮我查一下现在比特币多少钱"))
         self.assertFalse(needs_web_search("没有新闻就算了"))
+        self.assertFalse(needs_web_search("别说新闻了"))
         self.assertFalse(wants_news_context("这个好玩吗"))
         self.assertTrue(wants_news_context("刚才那条怎么样"))
         self.assertTrue(wants_news_context("这个为什么会上涨"))
+        self.assertTrue(wants_news_context("辟谣了吗"))
         self.assertEqual(news_search_query("看看有啥新闻不"), "今天国内外热点新闻")
         self.assertEqual(news_search_query("有新闻吗"), "今天国内外热点新闻")
+        self.assertEqual(news_search_query("来点瓜"), "今天国内外热点新闻")
         self.assertEqual(news_search_query("看看特斯拉有啥新闻"), "看看特斯拉有啥新闻")
         self.assertEqual(news_search_query("帮我查一下现在比特币多少钱"), "帮我查一下现在比特币多少钱")
 
