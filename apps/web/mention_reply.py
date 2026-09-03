@@ -578,20 +578,6 @@ class MentionReplyWorker:
             prefetch_fn = getattr(self.mcp_gateway, "prefetch_spoken_evidence", None)
             if callable(prefetch_fn):
                 prefetch_task = asyncio.create_task(prefetch_fn(request.prompt))
-        if wait_line:
-            if job is not None:
-                job.update(
-                    phase="researching",
-                    status_text=wait_line,
-                    terminal=False,
-                )
-                await self.room.publish_agent_job(job, reply_to=reply_quote)
-            await self.room.publish_bot_reply(
-                message_id=f"{speech_base_id}:wait",
-                text=wait_line,
-                reply_to=reply_quote,
-            )
-            request.delivery_started = True
         try:
             # News and welcomes use the same live TTS socket as chat: first
             # sentence starts after the short reservoir, not after a
@@ -604,19 +590,46 @@ class MentionReplyWorker:
                     if event.get("type") == "session.created":
                         break
 
+                async def announce_wait() -> None:
+                    if not wait_line:
+                        return
+                    if job is not None:
+                        job.update(
+                            phase="researching",
+                            status_text=wait_line,
+                            terminal=False,
+                        )
+                        await self.room.publish_agent_job(job, reply_to=reply_quote)
+                    await self.room.publish_bot_reply(
+                        message_id=f"{speech_base_id}:wait",
+                        text=wait_line,
+                        reply_to=reply_quote,
+                    )
+                    request.delivery_started = True
+
                 progress_spoken = False
-                speak_wait = (
-                    asyncio.create_task(self._speak_exact(ws, wait_line))
-                    if wait_line else None
-                )
+                speak_wait: asyncio.Task[None] | None = None
                 prefetched = ""
                 if prefetch_task is not None:
+                    if not prefetch_task.done():
+                        await asyncio.sleep(0)
+                    if not prefetch_task.done() and wait_line:
+                        await announce_wait()
+                        speak_wait = asyncio.create_task(self._speak_exact(ws, wait_line))
                     try:
                         prefetched = str(await prefetch_task or "").strip()
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("lookup prefetch failed: %s", exc)
                         prefetched = ""
-                if speak_wait is not None:
+                    if speak_wait is not None:
+                        try:
+                            await speak_wait
+                            progress_spoken = True
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("lookup wait speech failed: %s", exc)
+                elif wait_line:
+                    await announce_wait()
+                    speak_wait = asyncio.create_task(self._speak_exact(ws, wait_line))
                     try:
                         await speak_wait
                         progress_spoken = True

@@ -447,9 +447,8 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         ):
             await worker._respond(request)
         self.assertEqual(gateway.queries, ["看看最新新闻"])
-        worker._speak_exact.assert_awaited()
-        self.assertEqual(worker._speak_exact.await_args.args[1], "我翻一下今天的，马上说。")
-        self.assertTrue(any(item.get("text") == "我翻一下今天的，马上说。" for item in room.items))
+        worker._speak_exact.assert_not_awaited()
+        self.assertFalse(any(item.get("text") == "我翻一下今天的，马上说。" for item in room.items))
         user_item = next(
             item["item"]["content"][0]["text"]
             for item in socket.sent
@@ -462,6 +461,55 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.get("tools") or [], [])
         self.assertIn("已经查到", session["instructions"])
         self.assertFalse(any("正在联网查找" in str(item.get("text") or "") for item in room.items))
+        self.assertTrue(any("某国今天落地了新政策" in str(item.get("text") or "") for item in room.items))
+
+    async def test_slow_news_prefetch_still_speaks_a_wait_line(self):
+        class RecordingRoom(FakeRoom):
+            def __init__(self): self.items = []
+            async def publish_bot_reply(self, **item): self.items.append(dict(item)); return item
+            async def publish_agent_job(self, job, **_kwargs): self.items.append(dict(job)); return job
+            async def participant_memory_context(self, *_args, **_kwargs): return ""
+            async def active_news_context(self, *_args): return ""
+
+        class SlowPrefetch:
+            enabled = True
+            DISCOVERY_TOOL_NAME = "request_external_capabilities"
+            async def prefetch_spoken_evidence(self, query):
+                await asyncio.sleep(0.25)
+                return "刚才查到的最新资讯：\n1. 某国发布了新政策"
+            def dialogue_web_tool(self):
+                raise AssertionError("prefetched news must not expose search tools")
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.events = iter([
+                    '{"type":"session.created"}',
+                    json.dumps({
+                        "type": "response.audio_transcript.done",
+                        "transcript": "刚看到一条，某国今天落地了新政策。",
+                    }, ensure_ascii=False),
+                    '{"type":"response.done","response":{"status":"completed"}}',
+                ])
+                self.sent = []
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def recv(self): return next(self.events)
+            async def send(self, message): self.sent.append(json.loads(message))
+
+        room, socket = RecordingRoom(), FakeWebSocket()
+        worker = MentionReplyWorker(room, SlowPrefetch(), "ws://unused")
+        worker._speak_exact = mock.AsyncMock()
+        request = parse_mention({
+            "id": "news-slow", "participant_id": "p1", "speaker": "张三丰",
+            "text": "@小麻 看看最新新闻",
+        })
+        with mock.patch("mention_reply.DIALOGUE_TOOLS_ENABLED", True), mock.patch(
+            "mention_reply.websockets.connect", return_value=socket
+        ):
+            await worker._respond(request)
+        worker._speak_exact.assert_awaited()
+        self.assertEqual(worker._speak_exact.await_args.args[1], "我翻一下今天的，马上说。")
+        self.assertTrue(any(item.get("text") == "我翻一下今天的，马上说。" for item in room.items))
         self.assertTrue(any("某国今天落地了新政策" in str(item.get("text") or "") for item in room.items))
 
     async def test_failed_prefetch_speaks_a_lookup_failure_instead_of_chat(self):
@@ -498,11 +546,10 @@ class MentionResearchTests(unittest.IsolatedAsyncioTestCase):
         ):
             await worker._respond(request)
         texts = [str(item.get("text") or "") for item in room.items]
-        self.assertTrue(any("我翻一下今天的，马上说。" in text for text in texts))
+        self.assertFalse(any("我翻一下今天的，马上说。" in text for text in texts))
         self.assertTrue(any("没翻到" in text for text in texts))
         spoken = [call.args[1] for call in worker._speak_exact.await_args_list]
-        self.assertEqual(spoken[0], "我翻一下今天的，马上说。")
-        self.assertIn("没翻到", spoken[-1])
+        self.assertEqual(spoken, ["网这会儿有点慢，这条我没翻到。你过一会儿再叫我看一次。"])
         self.assertFalse(any(item.get("type") == "response.create" and not (
             isinstance(item.get("response"), dict)
             and item["response"].get("metadata", {}).get("client_purpose") == "tool_progress"
