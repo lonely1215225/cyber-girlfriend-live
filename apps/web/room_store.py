@@ -691,7 +691,11 @@ class RoomStore:
         from dialogue_intent import wants_news_context
 
         clean_query = re.sub(r"[\s，。！？,.!?@]", "", query or "").lower()
-        deictic = bool(re.search(r"这个|这条|刚才|刚刚|那个|它|此事|这件事|是真的吗|为什么|后来|进展", clean_query))
+        deictic = bool(re.search(
+            r"这条|那条|(?:刚才|刚刚)(?:的)?(?:那|这)|此事|这件事|是真的吗|"
+            r"后来呢|后来怎么|后来如何|进展|为什么.{0,8}(?:涨|跌)",
+            clean_query,
+        ))
         title = str(item.get("title") or "").lower()
         stop = {
             "什么", "怎么", "怎样", "新闻", "现在", "最新", "简单", "别的", "别说",
