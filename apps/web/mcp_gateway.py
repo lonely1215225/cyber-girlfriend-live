@@ -505,6 +505,17 @@ class McpGateway:
                 errors.append(str(exc))
         raise RuntimeError("; ".join(errors) or "没有可用的查询来源")
 
+    async def fetch_live_headlines(self, *, limit: int = 6) -> tuple[str, str]:
+        """Return (source, payload) for idle/proactive news. Prefer paid search."""
+        if self.smart_search.search_enabled:
+            raw = await self.smart_search.search(
+                "今天国内外热点新闻", topic="news", limit=limit, ignore_circuit=True
+            )
+            return "search", raw
+        if self.rss_news.enabled:
+            return "rss", await self.rss_news.latest_topics()
+        raise RuntimeError("没有可用的新闻来源")
+
     async def call(self, public_name: str, arguments: dict[str, Any]) -> str:
         if public_name == "smart_web_search":
             query = str(arguments.get("query") or "")

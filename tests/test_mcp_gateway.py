@@ -180,6 +180,37 @@ class LocalRssToolTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.close()
 
+    async def test_live_headlines_use_search_when_configured(self):
+        gateway = McpGateway()
+        gateway.rss_news.enabled = True
+        gateway.smart_search.tavily_key = "tvly-test"
+        gateway.rss_news.latest_topics = mock.AsyncMock(
+            side_effect=AssertionError("configured search must not wait on RSS")
+        )
+        gateway.smart_search.search = mock.AsyncMock(return_value=json.dumps({
+            "results": [{"title": "今日头条", "source": "Tavily", "snippet": "摘要"}],
+        }, ensure_ascii=False))
+        try:
+            source, payload = await gateway.fetch_live_headlines()
+            self.assertEqual(source, "search")
+            self.assertIn("今日头条", payload)
+            gateway.rss_news.latest_topics.assert_not_awaited()
+        finally:
+            await gateway.close()
+
+        gateway = McpGateway()
+        gateway.rss_news.enabled = True
+        gateway.smart_search.tavily_key = ""
+        gateway.smart_search.exa_key = ""
+        gateway.smart_search.searxng_url = ""
+        gateway.rss_news.latest_topics = mock.AsyncMock(return_value="RSS 最新资讯：一条备用")
+        try:
+            source, payload = await gateway.fetch_live_headlines()
+            self.assertEqual(source, "rss")
+            self.assertIn("备用", payload)
+        finally:
+            await gateway.close()
+
 
 if __name__ == "__main__":
     unittest.main()
