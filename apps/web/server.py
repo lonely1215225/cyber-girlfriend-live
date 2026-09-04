@@ -35,11 +35,17 @@ import limiter
 from avatar_profiles import (
     AvatarProfileStore,
     DEFAULT_PERSONA_PROMPT,
-    ROLE_IDENTITY_POLICY,
-    ROLE_OUTPUT_POLICY,
 )
 from mcp_gateway import McpGateway
 from mention_reply import MentionReplyWorker
+from voice_lookup import (
+    VoiceLookupGate,
+    compose_voice_instructions,
+    dumps as lookup_dumps,
+    run_voice_lookup,
+    strip_live_tools,
+)
+from dialogue_intent import READ_EXACT_INSTRUCTIONS, decide_voice_turn
 from rss_news import (
     IdleNewsRotator,
     formatted_news_blocks,
@@ -1825,50 +1831,19 @@ async def session_end(request: Request):
     return {"ok": True}
 
 
-def _dialogue_tool_policy() -> str:
-    if DIALOGUE_TOOLS_ENABLED and mcp_gateway.dialogue_web_tool():
-        return (
-            "普通闲聊只回一两句，短、直、像随口说，不要讲新闻或瓜，不要分点。"
-            "只有用户明确要求查询，或问题确实依赖最新外部事实时，才调用 smart_web_search。"
-            "不要申请其他能力，也不要调用其他工具。外部查询取得证据后必须用中文口语给出结论，"
-            "禁止英文段落和Markdown。"
-        )
-    return (
-        "当前是纯陪伴聊天模式。直接回应对方，不调用搜索、新闻、价格、网页、RSS、MCP、视觉或"
-        "其他外部工具，也不要说正在查询、核对来源或稍后告诉对方。遇到依赖实时外部资料的问题，"
-        "坦率说明现在只陪对方聊天，不猜测、不编造。"
-    )
-
-
 def _role_instructions(persona_prompt: str, display_name: str, personal_memory: str = "",
-                       active_news: str = "") -> str:
+                       active_news: str = "", *, evidence: bool = False,
+                       pinned: bool = False) -> str:
     """Compose the server-owned role prompt shared by every live voice turn."""
-    instructions = str(persona_prompt or DEFAULT_PERSONA_PROMPT).strip()
-    identity = f"当前正在与你连线的观众名字是“{display_name}”。请自然地用这个名字称呼对方。"
-    tool_policy = _dialogue_tool_policy()
-    additions = [
-        item for item in (ROLE_IDENTITY_POLICY, ROLE_OUTPUT_POLICY, identity, tool_policy)
-        if item not in instructions
-    ]
-    if personal_memory:
-        additions.append(
-            "以下记忆仅属于当前连线者，只在相关时自然使用，不复述、不与其他用户混用。"
-            "\n【当前用户个人记忆】\n"
-            f"{personal_memory}"
-        )
-    if active_news:
-        news_query = (
-            "涉及现在价格、最新进展或实时状态时再查询，不要猜测。"
-            if DIALOGUE_TOOLS_ENABLED
-            else "涉及现在价格、最新进展或实时状态时不要猜测，也不要继续联网查询。"
-        )
-        additions.append(
-            "下面是直播间刚播报的公共话题，可用于承接讨论。"
-            "只有对方说‘这个、刚才那条、它、为什么、后来呢’或明确提到相关主体时才使用；"
-            f"无关问题必须忽略；{news_query}\n"
-            f"{active_news}"
-        )
-    return "\n".join([instructions, *additions]).strip()
+    return compose_voice_instructions(
+        persona_prompt or DEFAULT_PERSONA_PROMPT,
+        display_name,
+        personal_memory=personal_memory,
+        active_news=active_news,
+        evidence=evidence,
+        pinned=pinned,
+        companion=not DIALOGUE_TOOLS_ENABLED,
+    )
 
 
 def _add_caller_identity(message: str, display_name: str, personal_memory: str = "",
@@ -1890,6 +1865,7 @@ def _add_caller_identity(message: str, display_name: str, personal_memory: str =
             output["voice"] = voice_token
     # A later tools-only update is a patch. Adding an `instructions` key to it
     # would replace the complete personality prompt with only the caller name.
+    strip_live_tools(session_data)
     if "instructions" not in session_data:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     session_data["instructions"] = _role_instructions(
@@ -1917,12 +1893,13 @@ async def room_realtime(websocket: WebSocket):
     # WebSocket handshake so even a cold thread-pool/database open adds no
     # serial delay to joining the voice pipeline.
     memory_task = asyncio.create_task(live_room.memory_context(token))
-    # Do not preload the current headline into every voice turn. Casual chat
-    # is memory-only; @mentions attach news only when that utterance asks.
+    # Casual chat stays memory-only. Headlines are attached per utterance
+    # when the server decides the line is a lookup or a deictic follow-up.
     active_news = ""
     # Resolve on every TTS sentence so a deferred profile switch takes effect
     # on the next turn without reconnecting the caller.
     voice_token = "active_profile"
+    lookup_gate: VoiceLookupGate | None = None
 
     try:
         async with websockets.connect(
@@ -1936,6 +1913,49 @@ async def room_realtime(websocket: WebSocket):
             assistant_text: dict[str, str] = {}
             assistant_pending_text: dict[str, str] = {}
             listen_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=16)
+            lookup_gate = VoiceLookupGate()
+
+            async def send_upstream(payload: dict) -> None:
+                await upstream.send(lookup_dumps(payload))
+
+            async def start_voice_lookup(kind: str, transcript: str) -> None:
+                previous = lookup_gate.task
+                if previous is not None and not previous.done():
+                    lookup_gate.interrupt()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await previous
+                lookup_gate.begin(transcript)
+
+                async def prefetch(query: str) -> str:
+                    return str(
+                        await mcp_gateway.prefetch_spoken_evidence(query) or ""
+                    ).strip()
+
+                async def pin_news(query: str) -> str:
+                    return str(await live_room.active_news_context(query) or "").strip()
+
+                async def job() -> None:
+                    try:
+                        persona_prompt = await avatar_profiles.active_persona()
+                        await run_voice_lookup(
+                            utterance=transcript,
+                            display_name=display_name,
+                            persona_prompt=persona_prompt,
+                            personal_memory=personal_memory,
+                            companion=not DIALOGUE_TOOLS_ENABLED,
+                            kind=kind,
+                            send=send_upstream,
+                            prefetch=prefetch,
+                            pin_news=pin_news,
+                            gate=lookup_gate,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("voice lookup turn failed: %s", exc)
+                        lookup_gate.release()
+
+                lookup_gate.task = asyncio.create_task(job())
 
             async def listener_to_avatar() -> None:
                 """Batch caller PCM so AVTR-1 can render active listening."""
@@ -2057,6 +2077,10 @@ async def room_realtime(websocket: WebSocket):
                         except (TypeError, json.JSONDecodeError):
                             browser_payload = {}
                         event_type = str(browser_payload.get("type") or "")
+                        if event_type == "input_audio_buffer.speech_started":
+                            lookup_gate.interrupt()
+                        if event_type == "response.create" and lookup_gate.should_hold_browser_create():
+                            continue
                         if event_type == "session.update":
                             persona_prompt = await avatar_profiles.active_persona()
                             message = _add_caller_identity(
@@ -2078,19 +2102,20 @@ async def room_realtime(websocket: WebSocket):
                                 and response_metadata.get("client_purpose") == "tool_progress"
                             )
                             persona_prompt = await avatar_profiles.active_persona()
-                            await upstream.send(json.dumps({
+                            await send_upstream({
                                 "type": "session.update",
-                                "session": {
+                                "session": strip_live_tools({
                                     "type": "realtime",
                                     "instructions": (
-                                        "只逐字朗读用户提供的文字，不要回答、改写、解释、调用工具或增加任何内容。"
+                                        READ_EXACT_INSTRUCTIONS
                                         if progress_only else
                                         _role_instructions(
                                             persona_prompt, display_name, personal_memory, active_news
                                         )
                                     ),
-                                },
-                            }, ensure_ascii=False, separators=(",", ":")))
+                                    "audio": {"output": {"voice": voice_token}},
+                                }),
+                            })
                         await upstream.send(message)
                         if AVATAR_LISTEN_URL:
                             try:
@@ -2110,9 +2135,26 @@ async def room_realtime(websocket: WebSocket):
                 async for message in upstream:
                     if isinstance(message, bytes):
                         await websocket.send_bytes(message)
-                    else:
-                        await websocket.send_text(message)
-                        await publish_room_transcript(message)
+                        continue
+                    try:
+                        event = json.loads(message)
+                    except (TypeError, json.JSONDecodeError):
+                        event = {}
+                    event_type = str(event.get("type") or "")
+                    lookup_gate.observe(event)
+                    if event_type == "input_audio_buffer.speech_started":
+                        lookup_gate.interrupt()
+                    if event_type == "conversation.item.input_audio_transcription.completed":
+                        transcript = str(event.get("transcript") or "").strip()
+                        kind = decide_voice_turn(
+                            transcript, tools_enabled=DIALOGUE_TOOLS_ENABLED
+                        )
+                        if kind != "chat":
+                            await start_voice_lookup(kind, transcript)
+                    if lookup_gate.should_drop_upstream(event_type):
+                        continue
+                    await websocket.send_text(message)
+                    await publish_room_transcript(message)
 
             async def bridge():
                 tasks = {
@@ -2145,6 +2187,12 @@ async def room_realtime(websocket: WebSocket):
             memory_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await memory_task
+        if lookup_gate is not None:
+            lookup_task = lookup_gate.task
+            lookup_gate.interrupt()
+            if lookup_task is not None and not lookup_task.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await lookup_task
         await live_room.end_session(token, session_id)
         mention_replies.notify()
 
