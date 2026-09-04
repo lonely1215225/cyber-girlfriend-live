@@ -22,6 +22,8 @@ import websockets
 from avatar_profiles import DEFAULT_PERSONA_PROMPT, ROLE_IDENTITY_POLICY, ROLE_OUTPUT_POLICY
 from dialogue_intent import (
     LOOKED_UP_EVIDENCE_POLICY,
+    LOOKUP_FAIL_LINE,
+    MEMORY_NOTE,
     SIMPLE_CHAT_POLICY,
     SPOKEN_CHINESE_POLICY,
     lookup_wait_line,
@@ -636,7 +638,7 @@ class MentionReplyWorker:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("lookup wait speech failed: %s", exc)
                 if wants_search and prefetch_task is not None and not prefetched:
-                    fail_line = "网这会儿有点慢，这条我没翻到。你过一会儿再叫我看一次。"
+                    fail_line = LOOKUP_FAIL_LINE
                     await self.room.publish_bot_reply(
                         message_id=f"{speech_base_id}:lookup",
                         text=fail_line,
@@ -729,12 +731,7 @@ class MentionReplyWorker:
                         active_topic = ""
                     context_sections: list[str] = []
                     if memory:
-                        instructions += (
-                            "附带记忆仅属于当前观众，只能辅助理解指代；历史中的数字人回答不是本轮答案，"
-                            "不得照抄、续写或复述，更不要把旧的长篇瓜或新闻接着讲下去。"
-                            "本轮必须回答最后的【当前评论】。如果当前评论正在纠正"
-                            "历史里的称呼、身份、事实或误解，应接受本轮纠正并据此回答，不能固守旧说法。"
-                        )
+                        instructions += MEMORY_NOTE
                         context_sections.append(f"【历史记忆，仅供理解】\n{memory}")
                     if active_topic:
                         instructions += (
