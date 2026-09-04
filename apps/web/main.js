@@ -80,7 +80,7 @@ let dialogueToolsEnabled = false;
 const COMPANION_TOOL_POLICY =
   "当前是纯陪伴聊天模式。直接回应对方，不调用搜索、新闻、价格、网页、RSS、MCP、视觉或其他外部工具，也不要说正在查询、核对来源或稍后告诉对方。遇到依赖实时外部资料的问题，坦率说明现在只陪对方聊天，不猜测、不编造。";
 const NETWORK_TOOL_POLICY =
-  "普通闲聊只回一两句，短、直、像随口说，不要讲新闻或瓜，不要分点。只有用户明确要求查询，或问题确实依赖最新外部事实时，才调用 smart_web_search。不要申请其他能力，也不要调用其他工具。外部查询取得证据后必须用中文口语给出结论，禁止英文段落和Markdown。";
+  "正在连线，不要假装在回评论。这是简单闲聊：先给对方要的东西，再可补半句。一两句中文口语，总共不超过八十字。要名字、答案、选择时，第一句就必须点出来，禁止只预告、卖关子或反问。可顺着记忆接话，但不复述旧答案，也不要接着讲新闻或瓜。只用中文口语，两三句说完。英文资料只可用来理解，说出口必须是中文。";
 
 function toolPolicy() {
   return dialogueToolsEnabled ? NETWORK_TOOL_POLICY : COMPANION_TOOL_POLICY;
