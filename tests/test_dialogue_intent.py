@@ -6,8 +6,11 @@ FRONTEND_DIR = Path(__file__).resolve().parents[1] / "apps" / "web"
 sys.path.insert(0, str(FRONTEND_DIR))
 
 from dialogue_intent import (  # noqa: E402
+    LOOKUP_FAIL_LINE,
     SIMPLE_CHAT_POLICY,
+    decide_voice_turn,
     is_news_request,
+    lookup_fail_line,
     lookup_wait_line,
     looks_like_english_answer,
     looks_like_search_filler,
@@ -41,6 +44,9 @@ class DialogueIntentTests(unittest.TestCase):
             "来点瓜", "吃瓜", "有啥瓜", "今天啥瓜", "网上都在说啥",
             "今天发生了什么", "最近出啥事了", "外面出什么事了",
             "想听今天的资讯", "给我讲讲时事", "刷刷早报",
+            "报个新闻", "来段热搜", "整点瓜", "热搜呗",
+            "世界怎么了", "今天有啥大事", "刷一下热搜榜",
+            "国际上发生了什么", "今日要闻", "听听财经新闻",
         )
         for text in news_asks:
             self.assertTrue(needs_web_search(text), text)
@@ -66,7 +72,17 @@ class DialogueIntentTests(unittest.TestCase):
         self.assertFalse(is_news_request("帮我查一下现在比特币多少钱"))
         self.assertFalse(needs_web_search("没有新闻就算了"))
         self.assertFalse(needs_web_search("别说新闻了"))
+        self.assertFalse(needs_web_search("不看新闻"))
+        self.assertFalse(needs_web_search("别查了"))
+        self.assertFalse(needs_web_search("你冷不冷"))
+        self.assertTrue(needs_web_search("今天冷不冷"))
+        self.assertTrue(needs_web_search("外面要带伞吗"))
         self.assertFalse(wants_news_context("这个好玩吗"))
+        self.assertEqual(decide_voice_turn("看看有啥新闻不", tools_enabled=True), "prefetch")
+        self.assertEqual(decide_voice_turn("刚才那条怎么样", tools_enabled=True), "pin_news")
+        self.assertEqual(decide_voice_turn("今天有点烦", tools_enabled=True), "chat")
+        self.assertEqual(decide_voice_turn("看看有啥新闻不", tools_enabled=False), "chat")
+        self.assertEqual(lookup_fail_line(), LOOKUP_FAIL_LINE)
         self.assertTrue(wants_news_context("刚才那条怎么样"))
         self.assertTrue(wants_news_context("这个为什么会上涨"))
         self.assertTrue(wants_news_context("辟谣了吗"))
